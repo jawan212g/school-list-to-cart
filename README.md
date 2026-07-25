@@ -1,0 +1,42 @@
+# School List-to-Cart Agent
+
+Turns school supply lists into an optimized multi-store shopping cart, with a human
+approval gate for the decisions a parent should actually make.
+
+**Team 6 — BUKD-X500 Agentic AI Systems**
+Ian Demroff · Sarah Fritschy · Jawan Goodspeed · Marwa Gujarathi · Abhishek Singh
+
+## What it does
+
+Upload or paste one supply list per child. Set a budget and a shopping mode. The agent
+extracts the requirements, aggregates them across children, matches them to products,
+builds the cheapest compliant cart across a simulated four-store catalog, and stops to
+ask you whenever a decision falls outside its limits.
+
+## Important
+
+The product catalog is **simulated**. Stores are fictional. Prices, stock, and fees are
+representative rather than live, so cost figures are directional and cannot be read as
+real retailer quotes. Checkout is simulated; no payment information is ever collected.
+
+## Specification
+
+`BRD.md` is the specification of record. Requirements are numbered FR-##, business rules
+BR-##, and edge cases E-##.
+
+## Running locally
+
+```
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+pip install -r requirements.txt
+copy .streamlit\secrets.toml.example .streamlit\secrets.toml
+# add your API key to .streamlit\secrets.toml
+streamlit run app.py
+```
+
+## Tests
+
+```
+pytest -q
+```
