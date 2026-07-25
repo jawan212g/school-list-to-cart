@@ -19,6 +19,8 @@ MAJOR_PACK_DIFFERENCE_PERCENT = 20  # BR-01: pack-count approval threshold.
 
 DEFAULT_TAX_BASIS_POINTS = 700  # BR-02: default tax rate is 7.0%.
 BASIS_POINTS_DENOMINATOR = 10_000  # BR-02: integer tax-rate scale.
+TAX_ROUNDING_METHOD = "half_up_to_nearest_cent"  # BR-02: fractional cents.
+TAX_ROUNDING_OFFSET = BASIS_POINTS_DENOMINATOR // 2  # BR-02: half-up offset.
 
 TOTAL_INCLUDES_TAX_AND_FEES = True  # BR-03: totals are always landed cost.
 

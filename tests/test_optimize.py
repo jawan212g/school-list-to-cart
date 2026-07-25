@@ -4,11 +4,13 @@ from collections.abc import Mapping
 
 from agent.aggregate import Requirement, UnitNeed, aggregate_requirements
 from agent.optimize import (
+    FulfillmentPreference,
     OptimizationConfig,
     ShoppingMode,
     optimize_cart,
     select_packages,
 )
+from agent.rules import TAX_ROUNDING_METHOD
 from data.loader import Offer, Store
 
 
@@ -42,6 +44,7 @@ def _offer(
     *,
     brand: str = "Generic",
     stock_qty: int = 100,
+    unit_price: int | None = None,
 ) -> Offer:
     return Offer(
         sku=sku,
@@ -50,7 +53,11 @@ def _offer(
         title=sku,
         category=category,
         pack_size=pack_size,
-        unit_price=pack_price // pack_size,
+        unit_price=(
+            pack_price // pack_size
+            if unit_price is None
+            else unit_price
+        ),
         pack_price=pack_price,
         stock_qty=stock_qty,
         is_returnable=True,
@@ -63,7 +70,10 @@ def _store(
     *,
     pickup_fee: int = 0,
     pickup_minimum: int = 0,
+    delivery_fee: int = 0,
+    delivery_minimum: int = 0,
     tax_applies: bool = True,
+    pickup_available: bool = True,
 ) -> Store:
     return Store(
         store_id=store_id,
@@ -71,10 +81,10 @@ def _store(
         distance_miles=1.0,
         pickup_fee=pickup_fee,
         pickup_minimum=pickup_minimum,
-        delivery_fee=0,
-        delivery_minimum=0,
+        delivery_fee=delivery_fee,
+        delivery_minimum=delivery_minimum,
         tax_applies=tax_applies,
-        pickup_available=True,
+        pickup_available=pickup_available,
     )
 
 
@@ -85,6 +95,7 @@ def _config(
     tax_basis_points: int = 0,
     max_stores: int | None = None,
     allowed_store_ids: frozenset[str] | None = None,
+    fulfillment_preference: FulfillmentPreference = "pickup",
 ) -> OptimizationConfig:
     return OptimizationConfig(
         shopping_mode=mode,
@@ -92,7 +103,7 @@ def _config(
         tax_basis_points=tax_basis_points,
         max_stores=max_stores,
         allowed_store_ids=allowed_store_ids,
-        fulfillment_preference="pickup",
+        fulfillment_preference=fulfillment_preference,
     )
 
 
@@ -137,6 +148,32 @@ def test_e13_forty_eight_pack_is_blocked_by_overage_ceiling() -> None:
     assert selection.units_purchased == 5
     assert selection.overage_units == 0
     assert selection.lines[0].packs_purchased == 1
+
+
+def test_all_money_uses_pack_price_not_lossy_unit_price() -> None:
+    """A deliberately false 1-cent unit price cannot change the $1.00 pack."""
+
+    need = _unit_need("pencils", {"child-a": 3})
+    offer = _offer(
+        "S-PEN-003",
+        "S",
+        "pencils",
+        3,
+        100,
+        unit_price=1,
+    )
+
+    result = optimize_cart(
+        [need],
+        [offer],
+        [_store("S")],
+        _config(),
+    )
+
+    assert offer.unit_price == 1
+    assert result.plan.lines[0].line_cost == 100
+    assert result.plan.item_subtotal == 100
+    assert result.landed_cost == 100
 
 
 def test_e14_twelve_pack_supplies_eight_with_four_overage() -> None:
@@ -199,6 +236,67 @@ def test_shared_package_cost_allocates_proportionally_by_units() -> None:
         "child-b": 200,
     }
     assert sum(result.plan.per_child_item_costs.values()) == 600
+
+
+def test_br09_rounding_allocates_every_cent_across_three_children() -> None:
+    """BR-09: $1.00 split by 1:2:3 units becomes 17, 33, and 50 cents."""
+
+    need = _unit_need(
+        "pencils",
+        {"child-a": 1, "child-b": 2, "child-c": 3},
+    )
+    result = optimize_cart(
+        [need],
+        [_offer("S-PEN-006", "S", "pencils", 6, 100)],
+        [_store("S")],
+        _config(),
+    )
+
+    assert result.plan.per_child_item_costs == {
+        "child-a": 17,
+        "child-b": 33,
+        "child-c": 50,
+    }
+    assert sum(result.plan.per_child_item_costs.values()) == 100
+    assert sum(result.plan.per_child_item_costs.values()) == (
+        result.plan.lines[0].line_cost
+    )
+
+
+def test_partial_stock_cannot_satisfy_a_unit_need_alone() -> None:
+    """Two 4-packs in stock supply only 8 units, so the 10-pack store wins."""
+
+    need = _unit_need("pencils", {"child-a": 10})
+    partial_offer = _offer(
+        "A-PEN-004",
+        "A",
+        "pencils",
+        4,
+        100,
+        stock_qty=2,
+    )
+    complete_offer = _offer(
+        "B-PEN-010",
+        "B",
+        "pencils",
+        10,
+        500,
+        stock_qty=1,
+    )
+
+    partial_selection = select_packages(need, [partial_offer])
+    result = optimize_cart(
+        [need],
+        [partial_offer, complete_offer],
+        [_store("A"), _store("B")],
+        _config(),
+    )
+
+    assert partial_offer.stock_qty * partial_offer.pack_size == 8
+    assert partial_selection is None
+    assert result.plan.lines[0].units_purchased == 10
+    assert result.plan.item_subtotal == 500
+    assert result.plan.store_orders[0].store_id == "B"
 
 
 def test_e18_landed_cost_under_budget_is_recommended() -> None:
@@ -269,6 +367,95 @@ def test_e21_fees_and_tax_turn_item_headroom_into_budget_breach() -> None:
     assert result.landed_cost == 10_665
     assert result.shortfall_cents == 665
     assert result.within_budget is False
+
+
+def test_br02_tax_rounds_fractional_cents_half_up() -> None:
+    """BR-02: 7% of $1.50 is 10.5 cents and rounds half-up to 11 cents."""
+
+    result = optimize_cart(
+        [_unit_need("pencils", {"child-a": 1})],
+        [_offer("S-PEN", "S", "pencils", 1, 150)],
+        [_store("S")],
+        _config(tax_basis_points=700),
+    )
+
+    assert TAX_ROUNDING_METHOD == "half_up_to_nearest_cent"
+    assert result.plan.item_subtotal == 150
+    assert result.plan.tax == 11
+    assert result.landed_cost == 161
+
+
+def test_delivery_fee_is_charged_below_and_waived_above_minimum() -> None:
+    """FR-25: $7 delivery applies below $50 and is waived at $60."""
+
+    store = _store(
+        "D",
+        delivery_fee=700,
+        delivery_minimum=5_000,
+    )
+    offer = _offer("D-PEN", "D", "pencils", 1, 3_000)
+
+    below_minimum = optimize_cart(
+        [_unit_need("pencils", {"child-a": 1})],
+        [offer],
+        [store],
+        _config(fulfillment_preference="delivery"),
+    )
+    above_minimum = optimize_cart(
+        [_unit_need("pencils", {"child-a": 2})],
+        [offer],
+        [store],
+        _config(fulfillment_preference="delivery"),
+    )
+
+    assert below_minimum.plan.item_subtotal == 3_000
+    assert below_minimum.plan.fulfillment_fees == 700
+    assert below_minimum.landed_cost == 3_700
+    assert below_minimum.plan.store_orders[0].fulfillment_method == "delivery"
+    assert above_minimum.plan.item_subtotal == 6_000
+    assert above_minimum.plan.fulfillment_fees == 0
+    assert above_minimum.landed_cost == 6_000
+    assert above_minimum.plan.store_orders[0].fulfillment_method == "delivery"
+
+
+def test_e27_pickup_preference_surfaces_cheaper_delivery_only_tradeoff() -> None:
+    """E-27: pickup selects $10 at P and reports the excluded $5 delivery cart."""
+
+    need = _unit_need("pencils", {"child-a": 1})
+    stores = [
+        _store("P"),
+        _store("D", pickup_available=False),
+    ]
+    offers = [
+        _offer("P-PEN", "P", "pencils", 1, 1_000),
+        _offer("D-PEN", "D", "pencils", 1, 500),
+    ]
+
+    pickup_result = optimize_cart(
+        [need],
+        offers,
+        stores,
+        _config(fulfillment_preference="pickup"),
+    )
+    delivery_result = optimize_cart(
+        [need],
+        offers,
+        stores,
+        _config(fulfillment_preference="delivery"),
+    )
+
+    assert pickup_result.landed_cost == 1_000
+    assert pickup_result.plan.store_orders[0].store_id == "P"
+    assert pickup_result.plan.store_orders[0].fulfillment_method == "pickup"
+    assert len(pickup_result.fulfillment_tradeoffs) == 1
+    tradeoff = pickup_result.fulfillment_tradeoffs[0]
+    assert tradeoff.store_id == "D"
+    assert tradeoff.required_method == "delivery"
+    assert tradeoff.affected_items == ("pencils",)
+    assert tradeoff.alternative_landed_cost == 500
+    assert delivery_result.landed_cost == 500
+    assert delivery_result.plan.store_orders[0].store_id == "D"
+    assert delivery_result.plan.store_orders[0].fulfillment_method == "delivery"
 
 
 def test_e24_single_stop_returns_gap_and_minimum_second_trip() -> None:

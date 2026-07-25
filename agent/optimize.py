@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from agent.aggregate import UnitNeed
@@ -15,6 +15,7 @@ from agent.rules import (
     OVERAGE_ABSOLUTE_UNITS,
     OVERAGE_PERCENT,
     PERCENT_DENOMINATOR,
+    TAX_ROUNDING_OFFSET,
 )
 from data.loader import Offer, Store
 
@@ -121,6 +122,17 @@ class CartPlan:
 
 
 @dataclass(frozen=True)
+class FulfillmentTradeoff:
+    """A store excluded because it cannot honor the requested fulfillment."""
+
+    store_id: str
+    requested_preference: FulfillmentPreference
+    required_method: FulfillmentMethod
+    affected_items: tuple[str, ...]
+    alternative_landed_cost: int | None
+
+
+@dataclass(frozen=True)
 class OptimizationResult:
     """Recommended cart plus budget and single-stop fallback information."""
 
@@ -132,6 +144,7 @@ class OptimizationResult:
     budget_cents: int | None
     within_budget: bool | None
     shortfall_cents: int
+    fulfillment_tradeoffs: tuple[FulfillmentTradeoff, ...] = ()
 
     @property
     def is_complete(self) -> bool:
@@ -304,9 +317,8 @@ def calculate_tax(subtotal_cents: int, tax_basis_points: int) -> int:
 
     if subtotal_cents < 0 or tax_basis_points < 0:
         raise ValueError("Subtotal and tax rate must be nonnegative")
-    rounding_offset = BASIS_POINTS_DENOMINATOR // 2
     return (
-        subtotal_cents * tax_basis_points + rounding_offset
+        subtotal_cents * tax_basis_points + TAX_ROUNDING_OFFSET
     ) // BASIS_POINTS_DENOMINATOR
 
 
@@ -547,11 +559,11 @@ def _build_plan(
     )
 
 
-def _eligible_stores(
+def _stores_in_scope(
     stores: Sequence[Store],
     config: OptimizationConfig,
 ) -> tuple[Store, ...]:
-    eligible = []
+    in_scope = []
     for store in stores:
         if (
             config.allowed_store_ids is not None
@@ -563,6 +575,16 @@ def _eligible_stores(
             and store.distance_miles > config.store_radius_miles
         ):
             continue
+        in_scope.append(store)
+    return tuple(sorted(in_scope, key=lambda store: store.store_id))
+
+
+def _eligible_stores(
+    stores: Sequence[Store],
+    config: OptimizationConfig,
+) -> tuple[Store, ...]:
+    eligible = []
+    for store in _stores_in_scope(stores, config):
         if (
             config.fulfillment_preference == "pickup"
             and not store.pickup_available
@@ -703,6 +725,59 @@ def _single_store_plan(
     return _build_plan(assignments, stores_by_id, config)
 
 
+def _fulfillment_tradeoffs(
+    unit_needs: Sequence[UnitNeed],
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    config: OptimizationConfig,
+) -> tuple[FulfillmentTradeoff, ...]:
+    if config.fulfillment_preference != "pickup":
+        return ()
+
+    delivery_config = replace(config, fulfillment_preference="delivery")
+    tradeoffs: list[FulfillmentTradeoff] = []
+    for store in stores:
+        if store.pickup_available:
+            continue
+        store_candidates = _candidate_selections(
+            unit_needs,
+            offers,
+            (store,),
+        )
+        affected_items = tuple(
+            unit_need.label
+            for unit_need, candidates in zip(
+                unit_needs,
+                store_candidates,
+                strict=True,
+            )
+            if candidates
+        )
+        if not affected_items:
+            continue
+        alternative_plan = _single_store_plan(
+            unit_needs,
+            store_candidates,
+            store.store_id,
+            {store.store_id: store},
+            delivery_config,
+        )
+        tradeoffs.append(
+            FulfillmentTradeoff(
+                store_id=store.store_id,
+                requested_preference="pickup",
+                required_method="delivery",
+                affected_items=affected_items,
+                alternative_landed_cost=(
+                    alternative_plan.landed_cost
+                    if alternative_plan is not None
+                    else None
+                ),
+            )
+        )
+    return tuple(tradeoffs)
+
+
 def _minimum_second_trip(
     gap_needs: Sequence[UnitNeed],
     gap_candidates: Sequence[Mapping[str, PackageSelection]],
@@ -813,6 +888,7 @@ def _make_result(
     gap_items: tuple[str, ...],
     minimum_second_trip: CartPlan | None,
     budget_cents: int | None,
+    fulfillment_tradeoffs: tuple[FulfillmentTradeoff, ...] = (),
 ) -> OptimizationResult:
     landed_cost = plan.landed_cost
     comparison_cost = plan.comparison_cost
@@ -839,6 +915,7 @@ def _make_result(
         budget_cents=budget_cents,
         within_budget=within_budget,
         shortfall_cents=shortfall_cents,
+        fulfillment_tradeoffs=fulfillment_tradeoffs,
     )
 
 
@@ -858,7 +935,14 @@ def optimize_cart(
     if active_config.budget_cents is not None and active_config.budget_cents < 0:
         raise ValueError("Budget must be nonnegative")
 
-    eligible_stores = _eligible_stores(stores, active_config)
+    stores_in_scope = _stores_in_scope(stores, active_config)
+    fulfillment_tradeoffs = _fulfillment_tradeoffs(
+        unit_needs,
+        offers,
+        stores_in_scope,
+        active_config,
+    )
+    eligible_stores = _eligible_stores(stores_in_scope, active_config)
     stores_by_id = {store.store_id: store for store in eligible_stores}
     if len(stores_by_id) != len(eligible_stores):
         raise ValueError("Store IDs must be unique")
@@ -881,6 +965,7 @@ def optimize_cart(
             gap_items,
             second_trip,
             active_config.budget_cents,
+            fulfillment_tradeoffs,
         )
 
     available_needs: list[UnitNeed] = []
@@ -908,4 +993,5 @@ def optimize_cart(
         tuple(gap_items),
         None,
         active_config.budget_cents,
+        fulfillment_tradeoffs,
     )
