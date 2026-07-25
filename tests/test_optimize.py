@@ -27,6 +27,7 @@ def _unit_need(
             canonical_item=canonical_item,
             quantity=quantity,
             brand_lock=brand_lock,
+            extraction_confidence=1.0,
         )
         for index, (child_id, quantity) in enumerate(allocated_to.items())
     ]
@@ -111,15 +112,30 @@ def test_aggregation_rolls_up_children_but_separates_brand_locks() -> None:
     """FR-14/15/16: quantities and child attribution remain exact."""
 
     requirements = [
-        Requirement("r1", "child-a", "2 pencils", "pencils", 2),
-        Requirement("r2", "child-b", "3 pencils", "pencils", 3),
         Requirement(
-            "r3",
-            "child-b",
-            "4 Ticonderoga pencils",
-            "pencils",
-            4,
+            req_id="r1",
+            child_id="child-a",
+            raw_text="2 pencils",
+            canonical_item="pencils",
+            quantity=2,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="r2",
+            child_id="child-b",
+            raw_text="3 pencils",
+            canonical_item="pencils",
+            quantity=3,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="r3",
+            child_id="child-b",
+            raw_text="4 Ticonderoga pencils",
+            canonical_item="pencils",
+            quantity=4,
             brand_lock="Ticonderoga",
+            extraction_confidence=1.0,
         ),
     ]
 

@@ -4,28 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from decimal import Decimal
 from typing import Any
 
-
-@dataclass(frozen=True)
-class Requirement:
-    """One normalized school-list line from the BRD Section 8 schema."""
-
-    req_id: str
-    child_id: str
-    raw_text: str
-    canonical_item: str
-    quantity: int
-    quantity_is_range: bool = False
-    quantity_max: int | None = None
-    unit_type: str = "each"
-    brand_lock: str | None = None
-    exclusions: tuple[str, ...] = ()
-    is_required: bool = True
-    is_purchasable: bool = True
-    attributes: Mapping[str, Any] = field(default_factory=dict)
-    extraction_confidence: Decimal = Decimal("1")
+from agent.schema import Requirement
 
 
 @dataclass(frozen=True)
@@ -99,6 +80,9 @@ def aggregate_requirements(
             )
 
         normalized_brand = _normalized_brand(requirement.brand_lock)
+        requirement_attributes = requirement.attributes.model_dump(
+            exclude_none=True
+        )
         normalized_exclusions = tuple(
             sorted(exclusion.strip().casefold() for exclusion in requirement.exclusions)
         )
@@ -108,7 +92,7 @@ def aggregate_requirements(
             requirement.unit_type,
             normalized_exclusions,
             requirement.is_required,
-            _freeze(requirement.attributes),
+            _freeze(requirement_attributes),
         )
         accumulator = grouped.get(key)
         if accumulator is None:
@@ -123,7 +107,7 @@ def aggregate_requirements(
                 unit_type=requirement.unit_type,
                 exclusions=tuple(requirement.exclusions),
                 is_required=requirement.is_required,
-                attributes=dict(requirement.attributes),
+                attributes=requirement_attributes,
             )
             grouped[key] = accumulator
 

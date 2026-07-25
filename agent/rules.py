@@ -79,3 +79,61 @@ ALLOWED_CATEGORIES = frozenset(
         "hand_sanitizer",
     }
 )
+
+NON_PURCHASABLE_CATEGORY = "non_purchasable"
+MAX_UPLOAD_BYTES = 10_000_000  # BRD 11.2: local upload size cap.
+
+CANONICAL_ITEM_ALIASES = {
+    "#2_pencil": "pencils",
+    "#2_pencils": "pencils",
+    "pencil": "pencils",
+    "glue_stick": "glue_sticks",
+    "scissor": "scissors",
+    "pair_of_scissors": "scissors",
+    "crayon": "crayons",
+    "colored_pencil": "colored_pencils",
+    "marker": "markers",
+    "composition_notebook": "composition_notebooks",
+    "spiral_notebook": "spiral_notebooks",
+    "loose_leaf_paper": "notebook_paper",
+    "wide_ruled_notebook_paper": "notebook_paper",
+    "binder": "binders",
+    "divider": "dividers",
+    "pen": "pens",
+    "highlighter": "highlighters",
+    "eraser": "erasers",
+    "pencil_box": "pencil_boxes",
+    "backpack": "backpacks",
+    "headphone": "headphones",
+    "ruler": "rulers",
+    "folder": "folders",
+    "index_card": "index_cards",
+    "tissue": "tissues",
+    "disinfecting_wipe": "disinfecting_wipes",
+    "zip_top_bag": "zip_top_bags",
+    "zipper_bags": "zip_top_bags",
+    "card_stock": "cardstock",
+    "sanitizer": "hand_sanitizer",
+}  # Deterministic canonical-name aliases for FR-11.
+
+STANDARD_PACK_COUNTS = {
+    "pencils": 12,
+    "glue_sticks": 4,
+    "crayons": 24,
+    "colored_pencils": 12,
+    "markers": 10,
+    "composition_notebooks": 3,
+    "spiral_notebooks": 3,
+    "folders": 5,
+    "pens": 12,
+    "highlighters": 5,
+    "erasers": 3,
+}  # E-02: standard sizes used only when a count is omitted.
+
+STANDARD_CONTAINER_CONTENT_COUNTS = {
+    "notebook_paper": 150,
+}  # E-02: assumed contents for catalog units sold as one container.
+
+COUNT_BASED_CATEGORIES = frozenset(STANDARD_PACK_COUNTS)
+PAPER_CATEGORIES = frozenset({"notebook_paper", "cardstock"})
+REAM_SHEET_COUNT = 500  # E-17: one ream contains 500 sheets.
