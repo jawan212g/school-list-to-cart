@@ -1,0 +1,46 @@
+[
+  {
+    "store_id": "VALUE_DEPOT",
+    "name": "Value Depot",
+    "distance_miles": 8.6,
+    "pickup_fee": 299,
+    "pickup_minimum": 3500,
+    "delivery_fee": 899,
+    "delivery_minimum": 7500,
+    "tax_applies": true,
+    "pickup_available": true
+  },
+  {
+    "store_id": "NEIGHBOR_MART",
+    "name": "Neighbor Mart",
+    "distance_miles": 1.8,
+    "pickup_fee": 0,
+    "pickup_minimum": 0,
+    "delivery_fee": 599,
+    "delivery_minimum": 3500,
+    "tax_applies": true,
+    "pickup_available": true
+  },
+  {
+    "store_id": "SCHOLARS_CORNER",
+    "name": "Scholar's Corner",
+    "distance_miles": 0.7,
+    "pickup_fee": 0,
+    "pickup_minimum": 1000,
+    "delivery_fee": 1099,
+    "delivery_minimum": 5000,
+    "tax_applies": true,
+    "pickup_available": true
+  },
+  {
+    "store_id": "SUPPLY_CLOUD",
+    "name": "Supply Cloud",
+    "distance_miles": 0.0,
+    "pickup_fee": 0,
+    "pickup_minimum": 0,
+    "delivery_fee": 749,
+    "delivery_minimum": 4900,
+    "tax_applies": true,
+    "pickup_available": false
+  }
+]
