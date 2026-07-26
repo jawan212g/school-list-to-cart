@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent.aggregate import UnitNeed
 from agent.approval_options import (
     CatalogApprovalChoice,
     RemovalCostContext,
@@ -31,6 +32,7 @@ from agent.optimize import (
     CartPlan,
     OptimizationConfig,
     OptimizationResult,
+    optimize_cart,
 )
 from agent.pipeline import (
     ListInput,
@@ -141,6 +143,10 @@ class ApprovalDisplayOption:
     label: str
     cost_delta_cents: int
     explanation: str | None = None
+    sku: str | None = None
+    source_requirement_ids: tuple[str, ...] = ()
+    is_current_product: bool = False
+    leaves_required_unmet: bool = False
 
 
 @dataclass(frozen=True)
@@ -148,6 +154,7 @@ class ApprovalDisplayDecision:
     """Plain-language approval content assembled without changing the gate."""
 
     interrupt: ApprovalInterrupt
+    item_name: str
     heading: str
     message: str
     recommendation: str
@@ -198,7 +205,7 @@ def tax_percent_to_basis_points(value: str) -> int:
 
 
 def format_money(cents: int) -> str:
-    """Format integer cents at the interface boundary."""
+    """Format integer cents for plain-text artifacts."""
 
     sign = "-" if cents < 0 else ""
     absolute = abs(cents)
@@ -208,6 +215,36 @@ def format_money(cents: int) -> str:
     )
 
 
+def escape_streamlit_dollars(text: str) -> str:
+    """Escape unescaped dollar signs before Streamlit Markdown rendering."""
+
+    return re.sub(r"(?<!\\)\$", r"\\$", text)
+
+
+def escape_streamlit_data(value: Any) -> Any:
+    """Escape dollar signs recursively in values sent to Streamlit."""
+
+    if isinstance(value, str):
+        return escape_streamlit_dollars(value)
+    if isinstance(value, Mapping):
+        return {
+            escape_streamlit_dollars(key) if isinstance(key, str) else key:
+            escape_streamlit_data(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(escape_streamlit_data(item) for item in value)
+    if isinstance(value, list):
+        return [escape_streamlit_data(item) for item in value]
+    return value
+
+
+def format_streamlit_money(cents: int) -> str:
+    """Format cents for a Streamlit Markdown-capable display call."""
+
+    return escape_streamlit_dollars(format_money(cents))
+
+
 def format_cost_delta(cents: int) -> str:
     """Format one approval alternative's landed-cost change."""
 
@@ -215,6 +252,12 @@ def format_cost_delta(cents: int) -> str:
         return "no cost change"
     direction = "adds" if cents > 0 else "saves"
     return f"{direction} {format_money(abs(cents))}"
+
+
+def format_streamlit_cost_delta(cents: int) -> str:
+    """Format a landed-cost delta safely for Streamlit rendering."""
+
+    return escape_streamlit_dollars(format_cost_delta(cents))
 
 
 def store_radius_rows(
@@ -529,11 +572,34 @@ def _source_lines(
     )
 
 
-def _component_effect(label: str, cents: int) -> str:
+def _has_exact_catalog_match(
+    result: PipelineResult,
+    line: CartLine,
+) -> bool:
+    need_matches = next(
+        (
+            item
+            for item in result.matches.needs
+            if item.unit_need.source_requirement_ids
+            == line.source_requirement_ids
+        ),
+        None,
+    )
+    return bool(
+        need_matches
+        and any(
+            candidate.attribute_status == "exact"
+            for candidate in need_matches.candidates
+        )
+    )
+
+
+def _short_cost_component(label: str, cents: int) -> str | None:
     if cents == 0:
-        verb = "do" if label.endswith("fees") else "does"
-        return f"{label} {verb} not change"
-    return f"{label} {format_cost_delta(cents)}"
+        return None
+    if cents > 0:
+        return f"{format_money(cents)} {label}"
+    return f"{format_money(abs(cents))} {label} saving"
 
 
 def _catalog_choice_explanation(
@@ -541,11 +607,26 @@ def _catalog_choice_explanation(
 ) -> str | None:
     if choice.is_current:
         return None
+    components = tuple(
+        component
+        for component in (
+            _short_cost_component(
+                "item",
+                choice.item_subtotal_delta_cents,
+            ),
+            _short_cost_component("tax", choice.tax_delta_cents),
+            _short_cost_component(
+                "fees",
+                choice.fulfillment_fee_delta_cents,
+            ),
+        )
+        if component is not None
+    )
+    direction = "Adds" if choice.cost_delta_cents > 0 else "Saves"
+    detail = f" ({', '.join(components)})" if components else ""
     return (
-        "Full-cart effect: "
-        f"{_component_effect('item subtotal', choice.item_subtotal_delta_cents)}; "
-        f"{_component_effect('tax', choice.tax_delta_cents)}; "
-        f"{_component_effect('fulfillment fees', choice.fulfillment_fee_delta_cents)}."
+        f"{direction} {format_money(abs(choice.cost_delta_cents))} "
+        f"landed{detail}"
     )
 
 
@@ -597,7 +678,10 @@ def _fallback_option_label(
             f"{format_money(result.proposed_cart.shortfall_cents)}"
         )
     if alternative_id.endswith(("-omit", "-parent-remove")):
-        return f"Remove required {item_name} from the cart"
+        return (
+            "Do not buy this — I will source it myself "
+            f"(leaves required {item_name.lower()} unmet)"
+        )
     if alternative_id.endswith("-approve"):
         return f"Keep the recommended {item_name.lower()}"
     return original_label
@@ -641,9 +725,16 @@ def _approval_options(
                     label=f"{verb} {offer.title} — {store_name}",
                     cost_delta_cents=choice.cost_delta_cents,
                     explanation=_catalog_choice_explanation(choice),
+                    sku=choice.sku,
+                    source_requirement_ids=line.source_requirement_ids,
+                    is_current_product=choice.is_current,
                 )
             )
-        if len(catalog_choices) > 1:
+        should_offer_self_source = (
+            not _has_exact_catalog_match(result, line)
+            or len(catalog_choices) <= 1
+        )
+        if not should_offer_self_source:
             return tuple(options)
 
         removal = next(
@@ -665,18 +756,28 @@ def _approval_options(
                 context,
                 stores_by_id,
             )
+            availability_explanation = (
+                "No exact catalog match is available. "
+                if len(catalog_choices) > 1
+                else "No other stocked catalog match is available. "
+            )
             options.append(
                 ApprovalDisplayOption(
                     alternative_id=removal.alternative_id,
-                    label=f"Remove required {item_name} from the cart",
+                    label=(
+                        "Do not buy this — I will source it myself "
+                        f"(leaves required {item_name.lower()} unmet)"
+                    ),
                     cost_delta_cents=removal.cost_delta_cents,
                     explanation=(
-                        "No other stocked catalog match is available. "
+                        availability_explanation
                         + (
                             cost_explanation
                             or "This removes the required item from the cart."
                         )
                     ),
+                    source_requirement_ids=line.source_requirement_ids,
+                    leaves_required_unmet=True,
                 )
             )
         return tuple(options)
@@ -692,6 +793,13 @@ def _approval_options(
                 item_name,
             ),
             cost_delta_cents=alternative.cost_delta_cents,
+            source_requirement_ids=interrupt.source_requirement_ids,
+            leaves_required_unmet=(
+                bool(interrupt.source_requirement_ids)
+                and alternative.alternative_id.endswith(
+                    ("-omit", "-parent-remove")
+                )
+            ),
         )
         for alternative in interrupt.alternatives
     )
@@ -804,10 +912,16 @@ def build_approval_presentations(
     presentations = []
     for interrupt in _all_interrupts(result.approval_batch):
         line = _interrupt_line(result, interrupt)
+        item_name = (
+            _item_display_name(line.canonical_item)
+            if line is not None
+            else "Required item"
+        )
         options = _approval_options(result, interrupt, offers, stores)
         presentations.append(
             ApprovalDisplayDecision(
                 interrupt=interrupt,
+                item_name=item_name,
                 heading=_approval_heading(result, interrupt, line),
                 message=_approval_message(
                     result,
@@ -831,6 +945,99 @@ def build_approval_presentations(
             )
         )
     return tuple(presentations)
+
+
+def approval_option_markdown(option: ApprovalDisplayOption) -> str:
+    """Render one radio choice and its own explanation safely."""
+
+    label = (
+        f"{option.label} "
+        f"({format_streamlit_cost_delta(option.cost_delta_cents)})"
+    )
+    if option.explanation:
+        label += f"  \n{option.explanation}"
+    return escape_streamlit_dollars(label)
+
+
+def _selected_approval_options(
+    presentations: Sequence[ApprovalDisplayDecision],
+    outcomes: Mapping[str, str],
+) -> tuple[
+    tuple[ApprovalDisplayDecision, ApprovalDisplayOption],
+    ...,
+]:
+    selected = []
+    for presentation in presentations:
+        selected_id = outcomes.get(presentation.interrupt.interrupt_id)
+        option = next(
+            (
+                candidate
+                for candidate in presentation.options
+                if candidate.alternative_id == selected_id
+            ),
+            None,
+        )
+        if option is not None:
+            selected.append((presentation, option))
+    return tuple(selected)
+
+
+def _self_sourced_decisions(
+    presentations: Sequence[ApprovalDisplayDecision],
+    outcomes: Mapping[str, str],
+) -> tuple[ApprovalDisplayDecision, ...]:
+    return tuple(
+        presentation
+        for presentation, option in _selected_approval_options(
+            presentations,
+            outcomes,
+        )
+        if option.leaves_required_unmet
+    )
+
+
+def _apply_approval_outcomes(
+    optimization: OptimizationResult,
+    matches: MatchResult,
+    unit_needs: Sequence[UnitNeed],
+    presentations: Sequence[ApprovalDisplayDecision],
+    outcomes: Mapping[str, str],
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    config: OptimizationConfig,
+) -> OptimizationResult:
+    selected = _selected_approval_options(presentations, outcomes)
+    unmet_source_ids = {
+        option.source_requirement_ids
+        for _, option in selected
+        if option.leaves_required_unmet
+    }
+    forced_skus = {
+        option.source_requirement_ids: frozenset({option.sku})
+        for _, option in selected
+        if (
+            option.sku is not None
+            and not option.is_current_product
+            and not option.leaves_required_unmet
+        )
+    }
+    if not unmet_source_ids and not forced_skus:
+        return optimization
+
+    remaining_needs = tuple(
+        need
+        for need in unit_needs
+        if need.source_requirement_ids not in unmet_source_ids
+    )
+    candidate_skus = dict(matches.candidate_skus_by_need)
+    candidate_skus.update(forced_skus)
+    return optimize_cart(
+        remaining_needs,
+        offers,
+        stores,
+        config,
+        candidate_skus_by_need=candidate_skus,
+    )
 
 
 def _combined_costs(
@@ -858,6 +1065,7 @@ def build_text_summary(
     stores: Sequence[Store],
     child_labels: Mapping[str, str],
     approval_outcomes: Mapping[str, str],
+    self_sourced_decisions: Sequence[ApprovalDisplayDecision],
     parent_decisions: Sequence[Decision],
 ) -> str:
     """Build the manual-shopping export artifact (FR-34, FR-36)."""
@@ -875,6 +1083,28 @@ def build_text_summary(
         f"LANDED COST: {format_money(optimization.landed_cost)}",
         "",
     ]
+    if self_sourced_decisions:
+        lines.extend(
+            [
+                (
+                    "STATUS: INCOMPLETE — one or more required items will be "
+                    "sourced separately by the parent."
+                ),
+                "",
+                "ITEMS YOU CHOSE TO SOURCE YOURSELF",
+            ]
+        )
+        lines.extend(
+            (
+                f"  {decision.item_name} | "
+                f"{_join_names(decision.affected_children)} | "
+                "UNFULFILLED BY PARENT CHOICE"
+            )
+            for decision in self_sourced_decisions
+        )
+        lines.append("")
+    else:
+        lines.extend(["STATUS: COMPLETE", ""])
     for plan in _plans(optimization):
         for order in plan.store_orders:
             store_name = stores_by_id.get(order.store_id)
@@ -979,14 +1209,26 @@ def _render_development_diagnostic(st: Any) -> None:
     with st.expander("Development use: OpenAI connection diagnostic"):
         diagnostic = get_api_key_diagnostic()
         st.write(
-            f"API key found: {'Yes' if diagnostic.found else 'No'}"
+            escape_streamlit_dollars(
+                f"API key found: {'Yes' if diagnostic.found else 'No'}"
+            )
         )
-        st.write(f"Credential source: {diagnostic.source or 'None'}")
         st.write(
-            "Key preview: "
-            f"{diagnostic.masked_key or 'Not available'}"
+            escape_streamlit_dollars(
+                f"Credential source: {diagnostic.source or 'None'}"
+            )
         )
-        st.write(f"Configured model: {MODEL_NAME}")
+        st.write(
+            escape_streamlit_dollars(
+                "Key preview: "
+                f"{diagnostic.masked_key or 'Not available'}"
+            )
+        )
+        st.write(
+            escape_streamlit_dollars(
+                f"Configured model: {MODEL_NAME}"
+            )
+        )
         st.caption(
             "The preview contains only the first 8 and last 4 characters. "
             "The full key is never displayed."
@@ -997,9 +1239,9 @@ def _render_development_diagnostic(st: Any) -> None:
         ):
             success, message = probe_openai_connection()
             if success:
-                st.success(message)
+                st.success(escape_streamlit_dollars(message))
             else:
-                st.error(message)
+                st.error(escape_streamlit_dollars(message))
                 st.caption(
                     "The complete exception and traceback were written to "
                     "the Streamlit application logs."
@@ -1032,7 +1274,9 @@ def _render_intake(st: Any) -> None:
     for index in range(child_count):
         child_id = f"child-{index + 1}"
         with st.container(border=True):
-            st.subheader(f"Entry {index + 1}")
+            st.subheader(
+                escape_streamlit_dollars(f"Entry {index + 1}")
+            )
             left, right = st.columns(2)
             label = left.text_input(
                 "Label",
@@ -1092,7 +1336,7 @@ def _render_intake(st: Any) -> None:
     budget_texts: dict[str, str] = {}
     if budget_mode == "combined":
         combined_budget = st.text_input(
-            "Combined budget ($)",
+            r"Combined budget (\$)",
             value=DEFAULT_BUDGET_TEXT,
             help=(
                 "This is a text field so a tight demo budget such as 75 "
@@ -1104,7 +1348,12 @@ def _render_intake(st: Any) -> None:
         columns = st.columns(2)
         for index, child in enumerate(children):
             budget_texts[child["child_id"]] = columns[index % 2].text_input(
-                f"{child['label'] or f'Entry {index + 1}'} budget ($)",
+                escape_streamlit_dollars(
+                    (
+                        f"{child['label'] or f'Entry {index + 1}'} "
+                        r"budget (\$)"
+                    )
+                ),
                 value="75.00",
                 key=f"budget_{index}",
             )
@@ -1163,10 +1412,12 @@ def _render_intake(st: Any) -> None:
         "outside the pickup-trip radius."
     )
     st.dataframe(
-        store_radius_rows(
-            stores,
-            radius,
-            fulfillment_preference,
+        escape_streamlit_data(
+            store_radius_rows(
+                stores,
+                radius,
+                fulfillment_preference,
+            )
         ),
         use_container_width=True,
         hide_index=True,
@@ -1205,7 +1456,7 @@ def _render_intake(st: Any) -> None:
             errors.append("Choose at least one store in custom mode.")
         if errors:
             for error in errors:
-                st.error(error)
+                st.error(escape_streamlit_dollars(error))
             return
         st.session_state["intake"] = {
             "session_id": str(uuid4()),
@@ -1305,7 +1556,11 @@ def _render_lists(st: Any) -> None:
             st.rerun()
     for index, child in enumerate(children):
         with st.container(border=True):
-            st.subheader(f"{child['label']} · Grade {child['grade']}")
+            st.subheader(
+                escape_streamlit_dollars(
+                    f"{child['label']} · Grade {child['grade']}"
+                )
+            )
             st.radio(
                 "List source",
                 ("Paste text", "Upload a file"),
@@ -1337,7 +1592,7 @@ def _render_lists(st: Any) -> None:
             list_inputs = _build_list_inputs(st, children)
         except ValueError as error:
             for message in str(error).splitlines():
-                st.error(message)
+                st.error(escape_streamlit_dollars(message))
             return
         st.session_state["list_inputs"] = list_inputs
         st.session_state["result"] = None
@@ -1397,8 +1652,11 @@ def _render_working(st: Any) -> None:
         except Exception as error:
             status.update(label="Cart build stopped", state="error")
             st.error(
-                "The cart could not be built. Your setup and lists are still "
-                f"available. Technical detail: {type(error).__name__}: {error}"
+                escape_streamlit_dollars(
+                    "The cart could not be built. Your setup and lists are "
+                    "still available. Technical detail: "
+                    f"{type(error).__name__}: {error}"
+                )
             )
             if st.button("Return to lists"):
                 st.session_state["screen"] = "lists"
@@ -1411,7 +1669,9 @@ def _render_working(st: Any) -> None:
                 "check the files or pasted text."
             )
             for child_id, reason in result.extraction_failures.items():
-                st.warning(f"{child_id}: {reason}")
+                st.warning(
+                    escape_streamlit_dollars(f"{child_id}: {reason}")
+                )
             if st.button("Return to lists"):
                 st.session_state["screen"] = "lists"
                 st.rerun()
@@ -1470,14 +1730,22 @@ def _render_approval(st: Any) -> None:
     for index, presentation in enumerate(presentations):
         interrupt = presentation.interrupt
         with st.container(border=True):
-            st.subheader(f"{index + 1}. {presentation.heading}")
-            st.caption(
-                "Affects: "
-                f"{_join_names(presentation.affected_children)}"
+            st.subheader(
+                escape_streamlit_dollars(
+                    f"{index + 1}. {presentation.heading}"
+                )
             )
-            st.write(presentation.message)
+            st.caption(
+                escape_streamlit_dollars(
+                    "Affects: "
+                    f"{_join_names(presentation.affected_children)}"
+                )
+            )
+            st.write(escape_streamlit_dollars(presentation.message))
             st.info(
-                f"Recommendation: {presentation.recommendation}"
+                escape_streamlit_dollars(
+                    f"Recommendation: {presentation.recommendation}"
+                )
             )
             existing = st.session_state["approval_outcomes"].get(
                 interrupt.interrupt_id
@@ -1496,15 +1764,9 @@ def _render_approval(st: Any) -> None:
                 "Choose one",
                 presentation.options,
                 index=default_index,
-                format_func=lambda option: (
-                    f"{option.label} "
-                    f"({format_cost_delta(option.cost_delta_cents)})"
-                ),
+                format_func=approval_option_markdown,
                 key=f"approval_{interrupt.interrupt_id}",
             )
-            for option in presentation.options:
-                if option.explanation:
-                    st.caption(f"{option.label}: {option.explanation}")
     if st.button("Save decisions and continue", type="primary"):
         outcomes = dict(st.session_state["approval_outcomes"])
         response_log = DecisionLog(
@@ -1534,6 +1796,9 @@ def _render_approval(st: Any) -> None:
 def _effective_cart(
     st: Any,
     result: PipelineResult,
+    presentations: Sequence[ApprovalDisplayDecision],
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
 ) -> tuple[OptimizationResult, MatchResult]:
     proposal = result.addon_proposal
     if (
@@ -1542,8 +1807,26 @@ def _effective_cart(
         and proposal.optimization is not None
         and proposal.matches is not None
     ):
-        return proposal.optimization, proposal.matches
-    return result.proposed_cart, result.matches
+        optimization = proposal.optimization
+        matches = proposal.matches
+        unit_needs = proposal.purchase_needs
+    else:
+        optimization = result.proposed_cart
+        matches = result.matches
+        unit_needs = result.purchase_needs
+    return (
+        _apply_approval_outcomes(
+            optimization,
+            matches,
+            unit_needs,
+            presentations,
+            st.session_state["approval_outcomes"],
+            offers,
+            stores,
+            _optimization_config(result),
+        ),
+        matches,
+    )
 
 
 def _render_cost_summary(
@@ -1553,15 +1836,28 @@ def _render_cost_summary(
 ) -> None:
     item_subtotal, tax, fees = _combined_costs(optimization)
     columns = st.columns(4)
-    columns[0].metric("Item subtotal", format_money(item_subtotal))
-    columns[1].metric("Tax", format_money(tax))
-    columns[2].metric("Fulfillment fees", format_money(fees))
-    columns[3].metric("Landed cost", format_money(optimization.landed_cost))
+    columns[0].metric(
+        "Item subtotal",
+        format_streamlit_money(item_subtotal),
+    )
+    columns[1].metric("Tax", format_streamlit_money(tax))
+    columns[2].metric(
+        "Fulfillment fees",
+        format_streamlit_money(fees),
+    )
+    columns[3].metric(
+        "Landed cost",
+        format_streamlit_money(optimization.landed_cost),
+    )
     variance = budget_cents - optimization.landed_cost
     if variance >= 0:
-        st.success(f"Budget remaining: {format_money(variance)}")
+        st.success(
+            f"Budget remaining: {format_streamlit_money(variance)}"
+        )
     else:
-        st.error(f"Budget shortfall: {format_money(abs(variance))}")
+        st.error(
+            f"Budget shortfall: {format_streamlit_money(abs(variance))}"
+        )
 
 
 def _render_store_breakdown(
@@ -1578,9 +1874,13 @@ def _render_store_breakdown(
             store = stores_by_id.get(order.store_id)
             store_name = store.name if store else order.store_id
             with st.expander(
-                (
-                    f"{store_name} · {order.fulfillment_method.title()} · "
-                    f"Landed cost {format_money(order.landed_cost)}"
+                escape_streamlit_dollars(
+                    (
+                        f"{store_name} · "
+                        f"{order.fulfillment_method.title()} · "
+                        "Landed cost "
+                        f"{format_streamlit_money(order.landed_cost)}"
+                    )
                 ),
                 expanded=True,
             ):
@@ -1597,18 +1897,26 @@ def _render_store_breakdown(
                             "Needed": line.units_needed,
                             "Bought": line.units_purchased,
                             "For": allocations,
-                            "Line cost": format_money(line.line_cost),
+                            "Line cost": format_streamlit_money(
+                                line.line_cost
+                            ),
                         }
                     )
-                st.table(rows)
+                st.table(escape_streamlit_data(rows))
                 a, b, c, d = st.columns(4)
-                a.metric("Item subtotal", format_money(order.item_subtotal))
-                b.metric("Tax", format_money(order.tax))
+                a.metric(
+                    "Item subtotal",
+                    format_streamlit_money(order.item_subtotal),
+                )
+                b.metric("Tax", format_streamlit_money(order.tax))
                 c.metric(
                     "Fulfillment fee",
-                    format_money(order.fulfillment_fee),
+                    format_streamlit_money(order.fulfillment_fee),
                 )
-                d.metric("Landed cost", format_money(order.landed_cost))
+                d.metric(
+                    "Landed cost",
+                    format_streamlit_money(order.landed_cost),
+                )
 
 
 def _render_per_child(
@@ -1631,14 +1939,18 @@ def _render_per_child(
         row = {
             "Entry": child["label"],
             "Grade": child["grade"],
-            "Item subtotal": format_money(item_costs.get(child_id, 0)),
-            "Landed cost": format_money(landed_costs.get(child_id, 0)),
+            "Item subtotal": format_streamlit_money(
+                item_costs.get(child_id, 0)
+            ),
+            "Landed cost": format_streamlit_money(
+                landed_costs.get(child_id, 0)
+            ),
         }
         if child_id in allocations:
             variance = allocations[child_id] - landed_costs.get(child_id, 0)
-            row["Budget variance"] = format_money(variance)
+            row["Budget variance"] = format_streamlit_money(variance)
         rows.append(row)
-    st.table(rows)
+    st.table(escape_streamlit_data(rows))
 
 
 def _render_substitutions(
@@ -1684,7 +1996,7 @@ def _render_substitutions(
                 }
             )
     if rows:
-        st.table(rows)
+        st.table(escape_streamlit_data(rows))
     else:
         st.write("No substitutions were made.")
 
@@ -1696,31 +2008,35 @@ def _render_addons(st: Any, result: PipelineResult) -> None:
         st.write("No donation or optional items were found.")
         return
     if not proposal.eligible:
-        st.caption(proposal.reason)
+        st.caption(escape_streamlit_dollars(proposal.reason))
         return
     st.success(
         "The required-item cart is at or below 90% of the budget, so these "
         "wish-list items can be considered."
     )
     st.table(
-        [
+        escape_streamlit_data([
             {
                 "For": item.child_id,
                 "Type": item.requirement_type.title(),
                 "List item": item.raw_text,
             }
             for item in proposal.items
-        ]
+        ])
     )
     if proposal.resulting_landed_cost_cents is not None:
         left, right = st.columns(2)
         left.metric(
             "Resulting landed cost",
-            format_money(proposal.resulting_landed_cost_cents),
+            format_streamlit_money(
+                proposal.resulting_landed_cost_cents
+            ),
         )
         right.metric(
             "Added landed cost",
-            format_money(proposal.incremental_landed_cost_cents or 0),
+            format_streamlit_money(
+                proposal.incremental_landed_cost_cents or 0
+            ),
         )
     blockers = []
     if proposal.review_requirement_ids:
@@ -1777,7 +2093,33 @@ def _render_approvals_summary(
                 ),
             }
         )
-    st.table(rows)
+    st.table(escape_streamlit_data(rows))
+
+
+def _render_self_sourced_items(
+    st: Any,
+    decisions: Sequence[ApprovalDisplayDecision],
+) -> None:
+    if not decisions:
+        return
+    st.subheader("Items you chose to source yourself")
+    st.warning(
+        "This shopping plan is incomplete. The required items below are not "
+        "included in the store cart."
+    )
+    st.table(
+        escape_streamlit_data([
+            {
+                "Required item": decision.item_name,
+                "For": _join_names(decision.affected_children),
+                "Status": (
+                    "Unfulfilled by parent choice — you will source this "
+                    "item separately"
+                ),
+            }
+            for decision in decisions
+        ])
+    )
 
 
 def _approval_outcome_labels(
@@ -1822,6 +2164,10 @@ def _render_summary(st: Any) -> None:
         stores,
         child_labels,
     )
+    self_sourced_decisions = _self_sourced_decisions(
+        approval_presentations,
+        st.session_state["approval_outcomes"],
+    )
     st.header("Your proposed shopping plan")
     if result.extraction_failures:
         st.warning(
@@ -1829,10 +2175,21 @@ def _render_summary(st: Any) -> None:
             "These entries could not be extracted:"
         )
         for child_id, reason in result.extraction_failures.items():
-            st.write(f"- {child_labels.get(child_id, child_id)}: {reason}")
+            st.write(
+                escape_streamlit_dollars(
+                    f"- {child_labels.get(child_id, child_id)}: {reason}"
+                )
+            )
 
     _render_addons(st, result)
-    optimization, matches = _effective_cart(st, result)
+    optimization, matches = _effective_cart(
+        st,
+        result,
+        approval_presentations,
+        offers,
+        stores,
+    )
+    _render_self_sourced_items(st, self_sourced_decisions)
     _render_cost_summary(st, optimization, int(intake["budget_total"]))
     _render_store_breakdown(
         st,
@@ -1855,14 +2212,17 @@ def _render_summary(st: Any) -> None:
         with st.expander("List notes that are not shopping items"):
             for requirement in display_only:
                 st.write(
-                    f"- {child_labels.get(requirement.source.child_id, requirement.source.child_id)}: "
-                    f"{requirement.source.raw_text}"
+                    escape_streamlit_dollars(
+                        "- "
+                        f"{child_labels.get(requirement.source.child_id, requirement.source.child_id)}: "
+                        f"{requirement.source.raw_text}"
+                    )
                 )
 
     parent_decisions = tuple(st.session_state["parent_decisions"])
     with st.expander("Full decision log"):
         st.table(
-            [
+            escape_streamlit_data([
                 {
                     "Time": decision.timestamp.isoformat(
                         timespec="seconds"
@@ -1876,7 +2236,7 @@ def _render_summary(st: Any) -> None:
                     ),
                 }
                 for decision in _decision_log(result, parent_decisions)
-            ]
+            ])
         )
 
     summary_text = build_text_summary(
@@ -1889,6 +2249,7 @@ def _render_summary(st: Any) -> None:
             approval_presentations,
             st.session_state["approval_outcomes"],
         ),
+        self_sourced_decisions,
         parent_decisions,
     )
     st.download_button(
@@ -1909,10 +2270,8 @@ def _render_summary(st: Any) -> None:
         stockout_sku = st.selectbox(
             "Mark one selected product out of stock",
             selected_skus,
-            format_func=lambda sku: _catalog_product_label(
-                sku,
-                offers,
-                stores,
+            format_func=lambda sku: escape_streamlit_dollars(
+                _catalog_product_label(sku, offers, stores)
             ),
         )
         if st.button("Inject stockout and rebuild"):
@@ -1926,25 +2285,41 @@ def _render_summary(st: Any) -> None:
             st.rerun()
 
     st.subheader("Simulated checkout")
-    st.caption(
-        "This creates an order confirmation only. No retailer account or "
-        "payment information is used."
-    )
-    if st.button("Place simulated order", type="primary"):
+    checkout_label = "Place simulated order"
+    if self_sourced_decisions:
+        st.warning(
+            "This checkout covers only the store-supplied items. Your overall "
+            "school-supply plan remains incomplete until you source the listed "
+            "required items yourself."
+        )
+        checkout_label = "Place partial simulated order"
+    else:
+        st.caption(
+            "This creates an order confirmation only. No retailer account or "
+            "payment information is used."
+        )
+    if st.button(checkout_label, type="primary"):
         confirmation = {
             "confirmation_id": (
                 "SIM-" + result.session.session_id.split("-")[0].upper()
             ),
             "created_at": datetime.now(timezone.utc),
             "landed_cost": optimization.landed_cost,
+            "is_partial": bool(self_sourced_decisions),
         }
         st.session_state["checkout_confirmation"] = confirmation
     confirmation = st.session_state["checkout_confirmation"]
     if confirmation:
+        order_label = (
+            "Partial order"
+            if confirmation.get("is_partial")
+            else "Order"
+        )
         st.success(
-            f"Order {confirmation['confirmation_id']} confirmed at "
+            f"{order_label} {confirmation['confirmation_id']} confirmed at "
             f"{confirmation['created_at'].strftime('%Y-%m-%d %H:%M UTC')}. "
-            f"Landed cost: {format_money(confirmation['landed_cost'])}."
+            "Landed cost: "
+            f"{format_streamlit_money(confirmation['landed_cost'])}."
         )
 
     left, right = st.columns(2)

@@ -10,6 +10,7 @@ from agent.approval_options import (
     build_catalog_approval_choices,
     removal_cost_context,
 )
+from agent.decisions import DecisionLog
 from agent.gate import ApprovalBatch, GateContext, evaluate_gate
 from agent.match import MatchResult, match_offers
 from agent.normalize import NormalizationResult
@@ -176,14 +177,14 @@ def _approval_fixture(
         ),
     ],
 )
-def test_stocked_catalog_choices_replace_required_item_removal(
+def test_no_exact_match_keeps_catalog_choices_and_self_source_last(
     category: str,
     attributes: dict[str, object],
     current_offer: Offer,
     alternative_offer: Offer,
     expected_heading: str,
 ) -> None:
-    """FR-28: attribute decisions show real products, not approve/remove."""
+    """FR-28/29: real products lead and parent self-sourcing ranks last."""
 
     stores = (_store("VALUE", "Value Depot"),)
     need = _need(
@@ -244,17 +245,21 @@ def test_stocked_catalog_choices_replace_required_item_removal(
 
     assert presentation.heading == expected_heading
     assert presentation.affected_children == ("Grade 5",)
-    assert len(presentation.options) == 2
-    assert not any(
-        "Remove required" in option.label
-        for option in presentation.options
-    )
+    assert len(presentation.options) == 3
     assert current_offer.title in presentation.options[0].label
     assert alternative_offer.title in presentation.options[1].label
     assert presentation.options[1].explanation is not None
-    assert "fulfillment fees do not change" in (
-        presentation.options[1].explanation
+    assert presentation.options[1].explanation == (
+        f"Adds {app.format_money(alternative_offer.pack_price - current_offer.pack_price)} "
+        "landed "
+        f"({app.format_money(alternative_offer.pack_price - current_offer.pack_price)} item)"
     )
+    assert presentation.options[-1].label == (
+        "Do not buy this — I will source it myself "
+        f"(leaves required {presentation.item_name.lower()} unmet)"
+    )
+    assert presentation.options[-1].leaves_required_unmet is True
+    assert "source it myself" not in presentation.recommendation
     assert all(
         offer.sku not in presentation.heading
         + presentation.message
@@ -355,6 +360,7 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
         purchase_needs=needs,
         approval_batch=batch,
         normalization=NormalizationResult(requirements=()),
+        decisions=(),
     )
     presentation = app.build_approval_presentations(
         result,
@@ -371,7 +377,8 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
         option.cost_delta_cents for option in presentation.options
     ) == (0, -3_101)
     assert presentation.options[1].label == (
-        "Remove required Headphones from the cart"
+        "Do not buy this — I will source it myself "
+        "(leaves required headphones unmet)"
     )
     assert presentation.options[1].explanation == (
         "No other stocked catalog match is available. This saves the item "
@@ -389,3 +396,72 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
     assert "CLOUD-HEADPHONES" not in visible_text
     assert "3598 cents" not in visible_text
     assert "non_returnable_threshold" not in visible_text
+
+    outcomes = {
+        presentation.interrupt.interrupt_id: (
+            presentation.options[1].alternative_id
+        )
+    }
+    adjusted = app._apply_approval_outcomes(
+        optimization,
+        matches,
+        needs,
+        (presentation,),
+        outcomes,
+        offers,
+        stores,
+        config,
+    )
+    assert adjusted.landed_cost == 2_208
+    assert tuple(line.canonical_item for line in adjusted.plan.lines) == (
+        "pencils",
+    )
+    assert app._self_sourced_decisions(
+        (presentation,),
+        outcomes,
+    ) == (presentation,)
+    summary = app.build_text_summary(
+        result,
+        adjusted,
+        matches,
+        stores,
+        {"grade2": "Grade 2", "grade5": "Grade 5"},
+        {
+            presentation.heading: presentation.options[1].label,
+        },
+        (presentation,),
+        (),
+    )
+    assert "STATUS: INCOMPLETE" in summary
+    assert "ITEMS YOU CHOSE TO SOURCE YOURSELF" in summary
+    assert "Headphones | Grade 2 and Grade 5" in summary
+    assert "UNFULFILLED BY PARENT CHOICE" in summary
+    assert "LANDED COST: $22.08" in summary
+    assert "\\$" not in summary
+    decision_log = DecisionLog("parent-self-source")
+    decision_log.record_approval_response(
+        presentation.options[1].label,
+        affected_lines=presentation.interrupt.affected_lines,
+    )
+    assert decision_log.entries[0].actor == "parent"
+    assert "source it myself" in decision_log.entries[0].rationale
+
+
+def test_radio_option_places_escaped_short_explanation_beneath_choice() -> None:
+    """Streamlit receives escaped money and an inline second explanation row."""
+
+    option = app.ApprovalDisplayOption(
+        alternative_id="binder-two",
+        label="Choose Avery 2-Inch Binder — Value Depot",
+        cost_delta_cents=300,
+        explanation="Adds $3.00 landed ($2.80 item, $0.20 tax)",
+    )
+
+    rendered = app.approval_option_markdown(option)
+
+    assert rendered == (
+        "Choose Avery 2-Inch Binder — Value Depot "
+        "(adds \\$3.00)  \n"
+        "Adds \\$3.00 landed (\\$2.80 item, \\$0.20 tax)"
+    )
+    assert "$" not in rendered.replace("\\$", "")

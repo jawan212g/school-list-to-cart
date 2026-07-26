@@ -15,6 +15,11 @@ def test_money_and_tax_inputs_convert_at_the_interface_boundary() -> None:
     assert app.money_to_cents("$1,234.56") == 123_456
     assert app.tax_percent_to_basis_points("7.0") == 700
     assert app.tax_percent_to_basis_points("7.125") == 713
+    assert app.format_money(300) == "$3.00"
+    assert app.format_streamlit_money(300) == r"\$3.00"
+    assert app.escape_streamlit_dollars(
+        r"Adds \$3.00 and $0.20"
+    ) == r"Adds \$3.00 and \$0.20"
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "abc", "1.001"])
