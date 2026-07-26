@@ -362,6 +362,16 @@ def money_to_cents(value: str) -> int:
     return parsed
 
 
+def budget_entry_error(value: str) -> str | None:
+    """Return an E-37 message while the parent is entering a budget."""
+
+    try:
+        money_to_cents(value)
+    except ValueError as error:
+        return str(error)
+    return None
+
+
 def tax_percent_to_basis_points(value: str) -> int:
     """Convert an editable display percentage to integer basis points."""
 
@@ -623,7 +633,11 @@ def store_radius_rows(
         rows.append(
             {
                 "Store": store.name,
-                "Simulated distance": f"{store.distance_miles:.1f} miles",
+                "Simulated distance": (
+                    f"{store.distance_miles:.1f} miles"
+                    if store.pickup_available
+                    else "Online only"
+                ),
                 "Pickup trip": pickup_status,
                 "Current scope": current_scope,
             }
@@ -2640,6 +2654,7 @@ def _render_intake(st: Any) -> None:
         else "per_child"
     )
     budget_texts: dict[str, str] = {}
+    budget_entry_errors: list[str] = []
     if budget_mode == "combined":
         combined_budget = st.text_input(
             r"Combined budget (\$)",
@@ -2649,11 +2664,16 @@ def _render_intake(st: Any) -> None:
                 "can be entered directly."
             ),
         )
+        budget_error = budget_entry_error(combined_budget)
+        if budget_error is not None:
+            budget_entry_errors.append(budget_error)
+            st.error(escape_streamlit_dollars(budget_error))
     else:
         combined_budget = ""
         columns = st.columns(2)
         for index, child in enumerate(children):
-            budget_texts[child["child_id"]] = columns[index % 2].text_input(
+            budget_column = columns[index % 2]
+            budget_text = budget_column.text_input(
                 escape_streamlit_dollars(
                     (
                         f"{child['label'] or f'Entry {index + 1}'} "
@@ -2663,6 +2683,17 @@ def _render_intake(st: Any) -> None:
                 value="75.00",
                 key=f"budget_{index}",
             )
+            budget_texts[child["child_id"]] = budget_text
+            budget_error = budget_entry_error(budget_text)
+            if budget_error is not None:
+                child_budget_error = (
+                    f"{child['label'] or f'Entry {index + 1}'}: "
+                    f"{budget_error}"
+                )
+                budget_entry_errors.append(child_budget_error)
+                budget_column.error(
+                    escape_streamlit_dollars(child_budget_error)
+                )
 
     st.subheader("How you want to shop")
     mode_label = st.selectbox(
@@ -2734,25 +2765,29 @@ def _render_intake(st: Any) -> None:
     )
 
     if st.button("Continue to the lists", type="primary"):
-        errors: list[str] = []
+        errors: list[str] = list(budget_entry_errors)
         if any(not child["label"] for child in children):
             errors.append("Every entry needs a short label.")
         if any(not child["grade"] for child in children):
             errors.append("Every entry needs a grade.")
-        try:
-            if budget_mode == "combined":
-                budget_total = money_to_cents(combined_budget)
-                budget_allocations: dict[str, int] = {}
-            else:
-                budget_allocations = {
-                    child_id: money_to_cents(value)
-                    for child_id, value in budget_texts.items()
-                }
-                budget_total = sum(budget_allocations.values())
-        except ValueError as error:
-            errors.append(str(error))
+        if budget_entry_errors:
             budget_total = 0
             budget_allocations = {}
+        else:
+            try:
+                if budget_mode == "combined":
+                    budget_total = money_to_cents(combined_budget)
+                    budget_allocations = {}
+                else:
+                    budget_allocations = {
+                        child_id: money_to_cents(value)
+                        for child_id, value in budget_texts.items()
+                    }
+                    budget_total = sum(budget_allocations.values())
+            except ValueError as error:
+                errors.append(str(error))
+                budget_total = 0
+                budget_allocations = {}
         try:
             tax_basis_points = tax_percent_to_basis_points(tax_rate_text)
         except ValueError as error:

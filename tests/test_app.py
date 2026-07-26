@@ -291,6 +291,16 @@ def test_invalid_budget_input_has_a_clear_validation_error(value: str) -> None:
         app.money_to_cents(value)
 
 
+def test_budget_entry_validation_reports_before_continue() -> None:
+    """E-37: the intake can show validation as soon as the field changes."""
+
+    assert app.budget_entry_error("85") is None
+    assert app.budget_entry_error("0") == "Budget must be greater than zero."
+    assert app.budget_entry_error("abc") == (
+        "Enter a budget such as 150 or 75.50."
+    )
+
+
 def test_upload_validation_checks_type_size_and_file_signature() -> None:
     """FR-06/E-35: only validated PDF, JPG, PNG, and TXT reach extraction."""
 
@@ -356,7 +366,9 @@ def test_radius_table_explains_pickup_scope_and_delivery_exception() -> None:
     )
 
     assert pickup_rows[0]["Pickup trip"] == "Outside radius"
+    assert pickup_rows[0]["Simulated distance"] == "8.0 miles"
     assert pickup_rows[0]["Current scope"] == "Not included"
+    assert pickup_rows[1]["Simulated distance"] == "Online only"
     assert pickup_rows[1]["Current scope"] == "Not included"
     assert delivery_rows[0]["Current scope"] == (
         "Included for delivery; radius does not apply"
