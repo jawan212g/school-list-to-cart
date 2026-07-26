@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal, Self
+from collections.abc import Mapping
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -123,3 +124,15 @@ class ExtractionEnvelope(BaseModel):
             }:
                 normalized.append(cleaned)
         return tuple(normalized)
+
+
+def validate_extraction_envelope(
+    value: ExtractionEnvelope | BaseModel | Mapping[str, Any],
+) -> ExtractionEnvelope:
+    """Return the current extraction contract at every boundary (FR-07)."""
+
+    if isinstance(value, ExtractionEnvelope):
+        return value
+    if isinstance(value, BaseModel):
+        value = value.model_dump()
+    return ExtractionEnvelope.model_validate(value)

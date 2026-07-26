@@ -1,13 +1,105 @@
 """Import-safe structural checks for the Streamlit application."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 import app
-from agent.gate import ApprovalBatch
-from agent.schema import ExtractionEnvelope
-from data.loader import Store
+from agent.match import StructuredSuitabilityJudge
+from agent.pipeline import ListInput, PipelineResult, PipelineSession, run_pipeline
+from agent.schema import ExtractionEnvelope, Requirement
+from data.loader import Offer, Store
+
+
+@dataclass(frozen=True)
+class _ParsedResponse:
+    output_parsed: object
+
+
+class _StructuredResponses:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def parse(self, **kwargs: object) -> _ParsedResponse:
+        assert kwargs["text_format"] is ExtractionEnvelope
+        return _ParsedResponse(output_parsed=self.payload)
+
+
+class _StructuredExtractionClient:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.responses = _StructuredResponses(payload)
+
+
+def _real_pipeline_result(stated_grade: str) -> PipelineResult:
+    """Run the actual extraction and pipeline contracts without a model call."""
+
+    payload: dict[str, object] = {
+        "stated_grades": [stated_grade],
+        "stated_teachers": ["Ms. Rivera"],
+        "requirements": [
+            {
+                "req_id": "pencils",
+                "child_id": "model-output",
+                "raw_text": "1 pencil",
+                "canonical_item": "pencils",
+                "quantity": 1,
+                "quantity_is_range": False,
+                "quantity_max": None,
+                "unit_type": "each",
+                "brand_lock": None,
+                "exclusions": [],
+                "is_required": True,
+                "is_purchasable": True,
+                "requirement_type": "required",
+                "attributes": {},
+                "extraction_confidence": 1.0,
+            }
+        ],
+        "manual_review_required": False,
+        "review_reasons": [],
+        "deferred_review_reasons": [],
+    }
+    store = Store(
+        store_id="S",
+        name="Fixture Store",
+        distance_miles=1.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=0,
+        delivery_minimum=0,
+        tax_applies=False,
+    )
+    offer = Offer(
+        sku="PENCIL-ONE",
+        store_id="S",
+        brand="Generic",
+        title="Single Pencil",
+        category="pencils",
+        pack_size=1,
+        unit_price=100,
+        pack_price=100,
+        stock_qty=5,
+        is_returnable=True,
+        attributes={},
+    )
+    return run_pipeline(
+        PipelineSession(
+            session_id="app-contract",
+            children=("child-1",),
+            budget_total=1_000,
+            fulfillment_pref="pickup",
+            tax_basis_points=0,
+        ),
+        (ListInput(child_id="child-1", source="Grade list"),),
+        stores=(store,),
+        offers=(offer,),
+        model_client=_StructuredExtractionClient(payload),  # type: ignore[arg-type]
+        suitability_judge=StructuredSuitabilityJudge(),
+    )
 
 
 def test_money_and_tax_inputs_convert_at_the_interface_boundary() -> None:
@@ -173,12 +265,10 @@ def test_development_diagnostic_is_hidden_without_explicit_debug(
 
 
 def test_wrong_list_grade_warns_before_cart_build() -> None:
-    """List metadata warns on a grade mismatch without blocking continuation."""
+    """A real extraction result warns on a grade mismatch before cart build."""
 
-    extraction = ExtractionEnvelope(
-        stated_grades=("Grade 5",),
-        stated_teachers=("Ms. Rivera",),
-    )
+    mismatch_result = _real_pipeline_result("Grade 5")
+    extraction = mismatch_result.extractions["child-1"]
     children = (
         {
             "child_id": "child-1",
@@ -198,14 +288,148 @@ def test_wrong_list_grade_warns_before_cart_build() -> None:
         "Continue anyway?"
     )
     assert warnings[0].stated_teachers == ("Ms. Rivera",)
+    assert type(extraction) is ExtractionEnvelope
+    assert tuple(type(extraction).model_fields) == (
+        "stated_grades",
+        "stated_teachers",
+        "requirements",
+        "manual_review_required",
+        "review_reasons",
+        "deferred_review_reasons",
+    )
+
+    matching_result = _real_pipeline_result("Grade 2")
     assert app.detect_list_identity_warnings(
-        {
-            "child-1": extraction.model_copy(
-                update={"stated_grades": ("Grade 2",)}
-            )
-        },
+        matching_result.extractions,
         children,
     ) == ()
+
+
+def test_prior_schema_extraction_cannot_crash_identity_check() -> None:
+    """A pre-metadata Pydantic session object is upgraded at the boundary."""
+
+    class PriorExtractionEnvelope(BaseModel):
+        model_config = ConfigDict(extra="forbid", frozen=True)
+
+        requirements: tuple[Requirement, ...] = ()
+        manual_review_required: bool = False
+        review_reasons: tuple[str, ...] = ()
+        deferred_review_reasons: tuple[str, ...] = ()
+
+    warnings = app.detect_list_identity_warnings(
+        {"child-1": PriorExtractionEnvelope()},
+        (
+            {
+                "child_id": "child-1",
+                "label": "Sam",
+                "grade": "2",
+            },
+        ),
+    )
+
+    assert warnings == ()
+
+
+def test_working_screen_renders_grade_warning_from_real_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The post-extraction working screen renders without a schema error."""
+
+    result = _real_pipeline_result("Grade 5")
+
+    def unexpected_build(*args: object, **kwargs: object) -> object:
+        raise AssertionError("cart build must wait for mismatch confirmation")
+
+    monkeypatch.setattr(
+        app,
+        "_run_pipeline_from_cached_extractions",
+        unexpected_build,
+    )
+
+    class FakeStreamlit:
+        def __init__(self) -> None:
+            self.session_state = {
+                "intake": {
+                    "children": (
+                        {
+                            "child_id": "child-1",
+                            "label": "Sam",
+                            "grade": "2",
+                        },
+                    )
+                },
+                "list_inputs": (
+                    ListInput(child_id="child-1", source="Grade list"),
+                ),
+                "extracted_lists": result.extractions,
+                "extraction_errors": {},
+                "extraction_cache_ready": True,
+                "list_identity_confirmed": False,
+                "result": None,
+                "approval_outcomes": {},
+                "screen": "working",
+            }
+            self.headers: list[str] = []
+            self.warnings: list[str] = []
+            self.rerun_count = 0
+
+        def __enter__(self) -> FakeStreamlit:
+            return self
+
+        def __exit__(
+            self,
+            exc_type: object,
+            exc_value: object,
+            traceback: object,
+        ) -> None:
+            return None
+
+        def header(self, value: str) -> None:
+            self.headers.append(value)
+
+        def write(self, value: str) -> None:
+            del value
+
+        def warning(self, value: str) -> None:
+            self.warnings.append(value)
+
+        def caption(self, value: str) -> None:
+            del value
+
+        def container(self, **kwargs: object) -> FakeStreamlit:
+            del kwargs
+            return self
+
+        def form(self, name: str) -> FakeStreamlit:
+            del name
+            return self
+
+        def columns(self, count: int) -> tuple[FakeStreamlit, ...]:
+            return tuple(self for _ in range(count))
+
+        def form_submit_button(
+            self,
+            label: str,
+            **kwargs: object,
+        ) -> bool:
+            del label, kwargs
+            return False
+
+        def rerun(self) -> None:
+            self.rerun_count += 1
+
+    st = FakeStreamlit()
+
+    app._render_working(st)
+
+    assert st.headers == ["Check the list details"]
+    assert st.warnings == [
+        (
+            "Sam: This list appears to be for grade 5, but you entered "
+            "grade 2. Continue anyway?"
+        )
+    ]
+    assert st.rerun_count == 0
 
 
 def test_child_display_uses_parent_label_not_internal_id() -> None:
@@ -230,11 +454,7 @@ def test_working_screen_reuses_cached_pipeline_result(
         "_run_pipeline_from_cached_extractions",
         unexpected_rebuild,
     )
-    result = SimpleNamespace(
-        extractions={"child-1": ExtractionEnvelope()},
-        extraction_failures={},
-        approval_batch=ApprovalBatch(interrupts=()),
-    )
+    result = _real_pipeline_result("Grade 2")
 
     class FakeStreamlit:
         def __init__(self) -> None:
@@ -244,11 +464,12 @@ def test_working_screen_reuses_cached_pipeline_result(
                         {
                             "child_id": "child-1",
                             "label": "Grade 2",
+                            "grade": "2",
                         },
                     )
                 },
                 "list_inputs": (
-                    SimpleNamespace(child_id="child-1"),
+                    ListInput(child_id="child-1", source="Grade list"),
                 ),
                 "result": result,
                 "approval_outcomes": {},

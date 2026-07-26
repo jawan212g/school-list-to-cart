@@ -27,7 +27,11 @@ from agent.rules import (
     MAX_UPLOAD_BYTES,
     NON_PURCHASABLE_CATEGORY,
 )
-from agent.schema import ExtractionEnvelope, Requirement
+from agent.schema import (
+    ExtractionEnvelope,
+    Requirement,
+    validate_extraction_envelope,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -368,7 +372,7 @@ def _call_model(
         raise ExtractionValidationError(
             "The model returned no schema-validated extraction"
         )
-    return ExtractionEnvelope.model_validate(parsed)
+    return validate_extraction_envelope(parsed)
 
 
 def _call_model_with_service_errors(
@@ -476,6 +480,7 @@ def apply_extraction_security_filters(
 ) -> ExtractionEnvelope:
     """Enforce category and injection defenses at the pipeline boundary."""
 
+    envelope = validate_extraction_envelope(envelope)
     accepted = []
     reasons = [
         reason

@@ -50,7 +50,10 @@ from agent.rules import (
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     SUBSTITUTION_NONE,
 )
-from agent.schema import ExtractionEnvelope
+from agent.schema import (
+    ExtractionEnvelope,
+    validate_extraction_envelope,
+)
 from agent.store_scope import (
     FulfillmentPreference,
     pickup_trip_is_within_radius,
@@ -398,7 +401,7 @@ def _grade_display(value: str) -> str:
 
 
 def detect_list_identity_warnings(
-    extractions: Mapping[str, ExtractionEnvelope],
+    extractions: Mapping[str, object],
     children: Sequence[Mapping[str, Any]],
 ) -> tuple[ListIdentityWarning, ...]:
     """Compare extracted list grades with intake grades before cart build."""
@@ -406,8 +409,11 @@ def detect_list_identity_warnings(
     warnings: list[ListIdentityWarning] = []
     for child in children:
         child_id = str(child["child_id"])
-        extraction = extractions.get(child_id)
-        if extraction is None or not extraction.stated_grades:
+        extracted_value = extractions.get(child_id)
+        if extracted_value is None:
+            continue
+        extraction = validate_extraction_envelope(extracted_value)
+        if not extraction.stated_grades:
             continue
         entered_grade = str(child["grade"])
         if any(
@@ -1854,10 +1860,14 @@ def _extract_list_inputs(
     errors: dict[str, Exception] = {}
     for list_input in list_inputs:
         try:
-            extractions[list_input.child_id] = extract_document(
-                list_input.source,
-                child_id=list_input.child_id,
-                mime_type=list_input.mime_type,
+            extractions[list_input.child_id] = (
+                validate_extraction_envelope(
+                    extract_document(
+                        list_input.source,
+                        child_id=list_input.child_id,
+                        mime_type=list_input.mime_type,
+                    )
+                )
             )
         except Exception as error:
             errors[list_input.child_id] = error

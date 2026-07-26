@@ -1,10 +1,9 @@
 """Presentation-option tests that leave the seven-condition gate unchanged."""
 
-from types import SimpleNamespace
-
 import pytest
 
 import app
+from agent.addons import AddOnProposal
 from agent.aggregate import UnitNeed
 from agent.approval_options import (
     build_catalog_approval_choices,
@@ -19,7 +18,7 @@ from agent.optimize import (
     OptimizationResult,
     optimize_cart,
 )
-from agent.pipeline import PipelineSession
+from agent.pipeline import PipelineResult, PipelineSession
 from data.loader import Offer, Store
 
 
@@ -118,6 +117,37 @@ def _approval_fixture(
         )
     )
     return matches, optimization, batch
+
+
+def _pipeline_result(
+    *,
+    session: PipelineSession,
+    needs: tuple[UnitNeed, ...],
+    matches: MatchResult,
+    optimization: OptimizationResult,
+    batch: ApprovalBatch,
+) -> PipelineResult:
+    """Build the real pipeline result contract used by app presentation code."""
+
+    normalization = NormalizationResult(requirements=())
+    return PipelineResult(
+        session=session,
+        extractions={},
+        normalization=normalization,
+        unit_needs=needs,
+        purchase_needs=needs,
+        matches=matches,
+        proposed_cart=optimization,
+        approval_batch=batch,
+        approval_flags=(),
+        decisions=(),
+        extraction_failures={},
+        addon_proposal=AddOnProposal(
+            eligible=False,
+            reason="No optional or donation items were found.",
+            items=(),
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -222,7 +252,7 @@ def test_no_exact_match_keeps_catalog_choices_and_self_source_last(
         alternative_offer.pack_price - current_offer.pack_price,
     )
 
-    result = SimpleNamespace(
+    result = _pipeline_result(
         session=PipelineSession(
             session_id="approval-test",
             children=("grade5",),
@@ -230,11 +260,10 @@ def test_no_exact_match_keeps_catalog_choices_and_self_source_last(
             fulfillment_pref="pickup",
             tax_basis_points=0,
         ),
-        proposed_cart=optimization,
+        needs=(need,),
         matches=matches,
-        purchase_needs=(need,),
-        approval_batch=batch,
-        normalization=NormalizationResult(requirements=()),
+        optimization=optimization,
+        batch=batch,
     )
     presentation = app.build_approval_presentations(
         result,
@@ -347,7 +376,7 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
     assert context.fee_returns_cents == 749
     assert context.fee_threshold_cents == 4_900
 
-    result = SimpleNamespace(
+    result = _pipeline_result(
         session=PipelineSession(
             session_id="approval-headphones",
             children=("grade2", "grade5"),
@@ -355,12 +384,10 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
             fulfillment_pref="delivery",
             tax_basis_points=700,
         ),
-        proposed_cart=optimization,
+        needs=needs,
         matches=matches,
-        purchase_needs=needs,
-        approval_batch=batch,
-        normalization=NormalizationResult(requirements=()),
-        decisions=(),
+        optimization=optimization,
+        batch=batch,
     )
     presentation = app.build_approval_presentations(
         result,
