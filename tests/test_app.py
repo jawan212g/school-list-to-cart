@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 import app
+from agent.gate import ApprovalBatch
+from agent.schema import ExtractionEnvelope
 from data.loader import Store
 
 
@@ -149,3 +151,118 @@ def test_openai_probe_reports_the_exact_failure(
     )
     assert "network blocked" in caplog.text
     assert "DNS lookup failed" in caplog.text
+
+
+def test_development_diagnostic_is_hidden_without_explicit_debug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deployment diagnostics stay off the normal landing page."""
+
+    monkeypatch.delenv(app.DEVELOPMENT_DEBUG_ENV, raising=False)
+    assert app.development_diagnostics_enabled(
+        SimpleNamespace(query_params={})
+    ) is False
+    assert app.development_diagnostics_enabled(
+        SimpleNamespace(query_params={"debug": "1"})
+    ) is True
+
+    monkeypatch.setenv(app.DEVELOPMENT_DEBUG_ENV, "true")
+    assert app.development_diagnostics_enabled(
+        SimpleNamespace(query_params={})
+    ) is True
+
+
+def test_wrong_list_grade_warns_before_cart_build() -> None:
+    """List metadata warns on a grade mismatch without blocking continuation."""
+
+    extraction = ExtractionEnvelope(
+        stated_grades=("Grade 5",),
+        stated_teachers=("Ms. Rivera",),
+    )
+    children = (
+        {
+            "child_id": "child-1",
+            "label": "Sam",
+            "grade": "2",
+        },
+    )
+
+    warnings = app.detect_list_identity_warnings(
+        {"child-1": extraction},
+        children,
+    )
+
+    assert len(warnings) == 1
+    assert warnings[0].message == (
+        "This list appears to be for grade 5, but you entered grade 2. "
+        "Continue anyway?"
+    )
+    assert warnings[0].stated_teachers == ("Ms. Rivera",)
+    assert app.detect_list_identity_warnings(
+        {
+            "child-1": extraction.model_copy(
+                update={"stated_grades": ("Grade 2",)}
+            )
+        },
+        children,
+    ) == ()
+
+
+def test_child_display_uses_parent_label_not_internal_id() -> None:
+    """Parent-facing tables never fall back to raw child identifiers."""
+
+    labels = {"child-1": "Grade 2"}
+
+    assert app._child_display_label("child-1", labels) == "Grade 2"
+    assert app._child_display_label("child-2", labels) == "Unknown entry"
+
+
+def test_working_screen_reuses_cached_pipeline_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Widget reruns route the stored result without rebuilding the pipeline."""
+
+    def unexpected_rebuild(*args: object, **kwargs: object) -> object:
+        raise AssertionError("pipeline should not be recomputed")
+
+    monkeypatch.setattr(
+        app,
+        "_run_pipeline_from_cached_extractions",
+        unexpected_rebuild,
+    )
+    result = SimpleNamespace(
+        extractions={"child-1": ExtractionEnvelope()},
+        extraction_failures={},
+        approval_batch=ApprovalBatch(interrupts=()),
+    )
+
+    class FakeStreamlit:
+        def __init__(self) -> None:
+            self.session_state = {
+                "intake": {
+                    "children": (
+                        {
+                            "child_id": "child-1",
+                            "label": "Grade 2",
+                        },
+                    )
+                },
+                "list_inputs": (
+                    SimpleNamespace(child_id="child-1"),
+                ),
+                "result": result,
+                "approval_outcomes": {},
+                "screen": "working",
+            }
+            self.rerun_count = 0
+
+        def rerun(self) -> None:
+            self.rerun_count += 1
+
+    st = FakeStreamlit()
+
+    app._render_working(st)
+
+    assert st.session_state["result"] is result
+    assert st.session_state["screen"] == "summary"
+    assert st.rerun_count == 1

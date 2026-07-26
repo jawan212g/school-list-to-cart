@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -23,6 +24,7 @@ from agent.decisions import Decision, DecisionLog
 from agent.extract import (
     MODEL_NAME,
     create_model_client,
+    extract_document,
     get_api_key_diagnostic,
 )
 from agent.gate import ApprovalBatch, ApprovalInterrupt
@@ -48,6 +50,7 @@ from agent.rules import (
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     SUBSTITUTION_NONE,
 )
+from agent.schema import ExtractionEnvelope
 from agent.store_scope import (
     FulfillmentPreference,
     pickup_trip_is_within_radius,
@@ -64,6 +67,8 @@ MAX_STORE_RADIUS_MILES = 25.0
 MAX_CLASSROOM_STUDENTS = 100
 DEFAULT_BUDGET_TEXT = "150.00"
 DEFAULT_RADIUS_MILES = 10.0
+DEVELOPMENT_DEBUG_ENV = "SCHOOL_CART_DEBUG"
+DEBUG_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 SUPPORTED_UPLOADS: Mapping[str, str] = {
     ".pdf": "application/pdf",
     ".jpg": "image/jpeg",
@@ -133,6 +138,25 @@ SUBSTITUTION_SEVERITY_LABELS: Mapping[str, str] = {
     "minor": "Equivalent alternative",
     "none": "Exact match",
 }
+GRADE_NAME_VALUES: Mapping[str, str] = {
+    "prekindergarten": "pk",
+    "pre-kindergarten": "pk",
+    "pre k": "pk",
+    "pre-k": "pk",
+    "kindergarten": "k",
+    "first": "1",
+    "second": "2",
+    "third": "3",
+    "fourth": "4",
+    "fifth": "5",
+    "sixth": "6",
+    "seventh": "7",
+    "eighth": "8",
+    "ninth": "9",
+    "tenth": "10",
+    "eleventh": "11",
+    "twelfth": "12",
+}
 
 
 @dataclass(frozen=True)
@@ -160,6 +184,17 @@ class ApprovalDisplayDecision:
     recommendation: str
     affected_children: tuple[str, ...]
     options: tuple[ApprovalDisplayOption, ...]
+
+
+@dataclass(frozen=True)
+class ListIdentityWarning:
+    """A non-blocking warning that list metadata differs from intake."""
+
+    child_label: str
+    entered_grade: str
+    stated_grades: tuple[str, ...]
+    stated_teachers: tuple[str, ...]
+    message: str
 
 
 def money_to_cents(value: str) -> int:
@@ -258,6 +293,148 @@ def format_streamlit_cost_delta(cents: int) -> str:
     """Format a landed-cost delta safely for Streamlit rendering."""
 
     return escape_streamlit_dollars(format_cost_delta(cents))
+
+
+def development_diagnostics_enabled(st: Any) -> bool:
+    """Keep deployment diagnostics hidden unless explicitly requested."""
+
+    query_value: object = None
+    query_params = getattr(st, "query_params", {})
+    try:
+        query_value = query_params.get("debug")
+    except (AttributeError, TypeError):
+        query_value = None
+    if isinstance(query_value, Sequence) and not isinstance(
+        query_value,
+        str,
+    ):
+        query_value = query_value[-1] if query_value else None
+    if (
+        isinstance(query_value, str)
+        and query_value.strip().casefold() in DEBUG_ENABLED_VALUES
+    ):
+        return True
+    return (
+        os.getenv(DEVELOPMENT_DEBUG_ENV, "").strip().casefold()
+        in DEBUG_ENABLED_VALUES
+    )
+
+
+def _grade_tokens(value: str) -> frozenset[str]:
+    """Normalize common grade spellings for deterministic comparison."""
+
+    cleaned = re.sub(r"[.,:()]", " ", value.casefold())
+    tokens: set[str] = set()
+    for name, canonical in GRADE_NAME_VALUES.items():
+        if re.search(rf"\b{re.escape(name)}\b", cleaned):
+            tokens.add(canonical)
+    if re.search(r"\b(?:grade\s*)?k\b", cleaned):
+        tokens.add("k")
+    tokens.update(
+        match.group(1)
+        for match in re.finditer(
+            r"\b(?:grade\s*)?(1[0-2]|[1-9])(?:st|nd|rd|th)?\b",
+            cleaned,
+        )
+    )
+    return frozenset(tokens)
+
+
+def _grade_rank(value: str) -> int | None:
+    if value == "pk":
+        return -1
+    if value == "k":
+        return 0
+    if value.isdigit():
+        return int(value)
+    return None
+
+
+def _grade_statement_matches(
+    entered_grade: str,
+    stated_grade: str,
+) -> bool:
+    entered = _grade_tokens(entered_grade)
+    stated = _grade_tokens(stated_grade)
+    if entered.intersection(stated):
+        return True
+
+    range_match = re.search(
+        (
+            r"\b(k|1[0-2]|[1-9])(?:st|nd|rd|th)?\s*"
+            r"(?:-|–|—|through|to)\s*"
+            r"(k|1[0-2]|[1-9])(?:st|nd|rd|th)?\b"
+        ),
+        stated_grade.casefold(),
+    )
+    if range_match is None:
+        return False
+    start = _grade_rank(range_match.group(1))
+    end = _grade_rank(range_match.group(2))
+    entered_ranks = tuple(
+        rank
+        for token in entered
+        if (rank := _grade_rank(token)) is not None
+    )
+    if start is None or end is None:
+        return False
+    lower, upper = sorted((start, end))
+    return any(lower <= rank <= upper for rank in entered_ranks)
+
+
+def _grade_display(value: str) -> str:
+    tokens = _grade_tokens(value)
+    if len(tokens) == 1:
+        token = next(iter(tokens))
+        if token == "pk":
+            return "pre-K"
+        if token == "k":
+            return "kindergarten"
+        return f"grade {token}"
+    cleaned = value.strip()
+    if cleaned.casefold().startswith(("grade ", "grades ")):
+        return cleaned.casefold()
+    return f"grade {cleaned}"
+
+
+def detect_list_identity_warnings(
+    extractions: Mapping[str, ExtractionEnvelope],
+    children: Sequence[Mapping[str, Any]],
+) -> tuple[ListIdentityWarning, ...]:
+    """Compare extracted list grades with intake grades before cart build."""
+
+    warnings: list[ListIdentityWarning] = []
+    for child in children:
+        child_id = str(child["child_id"])
+        extraction = extractions.get(child_id)
+        if extraction is None or not extraction.stated_grades:
+            continue
+        entered_grade = str(child["grade"])
+        if any(
+            _grade_statement_matches(entered_grade, stated_grade)
+            for stated_grade in extraction.stated_grades
+        ):
+            continue
+        stated_text = _join_names(
+            tuple(
+                _grade_display(grade)
+                for grade in extraction.stated_grades
+            )
+        )
+        entered_text = _grade_display(entered_grade)
+        warnings.append(
+            ListIdentityWarning(
+                child_label=str(child["label"]),
+                entered_grade=entered_grade,
+                stated_grades=extraction.stated_grades,
+                stated_teachers=extraction.stated_teachers,
+                message=(
+                    f"This list appears to be for {stated_text}, but you "
+                    f"entered {entered_text}. Continue anyway?"
+                ),
+            )
+        )
+    return tuple(warnings)
 
 
 def store_radius_rows(
@@ -505,6 +682,15 @@ def _join_names(names: Sequence[str]) -> str:
     return ", ".join(names[:-1]) + f", and {names[-1]}"
 
 
+def _child_display_label(
+    child_id: str,
+    child_labels: Mapping[str, str],
+) -> str:
+    """Return a parent-entered label without exposing an internal ID."""
+
+    return child_labels.get(child_id, "Unknown entry")
+
+
 def _affected_children(
     result: PipelineResult,
     interrupt: ApprovalInterrupt,
@@ -530,7 +716,7 @@ def _affected_children(
                 if child_id not in affected_ids:
                     affected_ids.append(child_id)
     return tuple(
-        child_labels.get(child_id, child_id)
+        _child_display_label(child_id, child_labels)
         for child_id in affected_ids
     )
 
@@ -782,7 +968,7 @@ def _approval_options(
             )
         return tuple(options)
 
-    return tuple(
+    fallback_options = tuple(
         ApprovalDisplayOption(
             alternative_id=alternative.alternative_id,
             label=_fallback_option_label(
@@ -802,6 +988,12 @@ def _approval_options(
             ),
         )
         for alternative in interrupt.alternatives
+    )
+    return tuple(
+        sorted(
+            fallback_options,
+            key=lambda option: option.leaves_required_unmet,
+        )
     )
 
 
@@ -947,16 +1139,26 @@ def build_approval_presentations(
     return tuple(presentations)
 
 
-def approval_option_markdown(option: ApprovalDisplayOption) -> str:
-    """Render one radio choice and its own explanation safely."""
+def approval_option_label(option: ApprovalDisplayOption) -> str:
+    """Render one concise radio label safely."""
 
-    label = (
-        f"{option.label} "
+    separator = "────────  \n" if option.leaves_required_unmet else ""
+    return escape_streamlit_dollars(
+        f"{separator}{option.label} "
         f"({format_streamlit_cost_delta(option.cost_delta_cents)})"
     )
-    if option.explanation:
-        label += f"  \n{option.explanation}"
-    return escape_streamlit_dollars(label)
+
+
+def approval_option_caption(option: ApprovalDisplayOption) -> str:
+    """Attach explanatory text to the corresponding radio option."""
+
+    explanation = option.explanation or "Current recommended product."
+    if option.leaves_required_unmet:
+        explanation = (
+            "Source-it-yourself choice — required item remains unmet. "
+            + explanation
+        )
+    return escape_streamlit_dollars(explanation)
 
 
 def _selected_approval_options(
@@ -1110,13 +1312,13 @@ def build_text_summary(
             store_name = stores_by_id.get(order.store_id)
             lines.append(
                 (
-                    f"{store_name.name if store_name else order.store_id} "
+                    f"{store_name.name if store_name else 'Unknown store'} "
                     f"— {order.fulfillment_method.title()}"
                 )
             )
             for cart_line in order.lines:
                 allocations = ", ".join(
-                    f"{child_labels.get(child_id, child_id)}: {units}"
+                    f"{_child_display_label(child_id, child_labels)}: {units}"
                     for child_id, units in cart_line.allocated_to.items()
                 )
                 lines.append(
@@ -1166,6 +1368,10 @@ def _initialize_state(st: Any) -> None:
         "child_count": 1,
         "intake": None,
         "list_inputs": (),
+        "extracted_lists": {},
+        "extraction_errors": {},
+        "extraction_cache_ready": False,
+        "list_identity_confirmed": False,
         "result": None,
         "approval_outcomes": {},
         "parent_decisions": (),
@@ -1250,7 +1456,8 @@ def _render_development_diagnostic(st: Any) -> None:
 
 def _render_intake(st: Any) -> None:
     st.header("Set up this shopping session")
-    _render_development_diagnostic(st)
+    if development_diagnostics_enabled(st):
+        _render_development_diagnostic(st)
     st.write(
         "Use labels such as “Grade 2” instead of full child names. "
         "Nothing is saved after this session."
@@ -1472,6 +1679,7 @@ def _render_intake(st: Any) -> None:
             "tax_basis_points": tax_basis_points,
         }
         st.session_state["result"] = None
+        st.session_state["list_identity_confirmed"] = False
         st.session_state["approval_outcomes"] = {}
         st.session_state["parent_decisions"] = ()
         st.session_state["checkout_confirmation"] = None
@@ -1552,6 +1760,7 @@ def _render_lists(st: Any) -> None:
         st.success("Your previously supplied lists are still available.")
         if st.button("Rebuild using the saved lists"):
             st.session_state["result"] = None
+            st.session_state["list_identity_confirmed"] = False
             st.session_state["screen"] = "working"
             st.rerun()
     for index, child in enumerate(children):
@@ -1595,6 +1804,10 @@ def _render_lists(st: Any) -> None:
                 st.error(escape_streamlit_dollars(message))
             return
         st.session_state["list_inputs"] = list_inputs
+        st.session_state["extracted_lists"] = {}
+        st.session_state["extraction_errors"] = {}
+        st.session_state["extraction_cache_ready"] = False
+        st.session_state["list_identity_confirmed"] = False
         st.session_state["result"] = None
         st.session_state["screen"] = "working"
         st.rerun()
@@ -1623,61 +1836,126 @@ def _pipeline_session(intake: Mapping[str, Any]) -> PipelineSession:
     )
 
 
-def _render_working(st: Any) -> None:
-    st.header("Building the cart")
-    st.write("This usually takes one to three minutes for multiple lists.")
-    intake = st.session_state["intake"]
-    list_inputs = st.session_state["list_inputs"]
-    if intake is None or not list_inputs:
-        st.error("Session setup or supply lists are missing.")
+def _extract_list_inputs(
+    list_inputs: Sequence[ListInput],
+) -> tuple[
+    dict[str, ExtractionEnvelope],
+    dict[str, Exception],
+]:
+    """Extract each list once so identity checks precede cart construction."""
+
+    extractions: dict[str, ExtractionEnvelope] = {}
+    errors: dict[str, Exception] = {}
+    for list_input in list_inputs:
+        try:
+            extractions[list_input.child_id] = extract_document(
+                list_input.source,
+                child_id=list_input.child_id,
+                mime_type=list_input.mime_type,
+            )
+        except Exception as error:
+            errors[list_input.child_id] = error
+    return extractions, errors
+
+
+def _run_pipeline_from_cached_extractions(
+    session: PipelineSession,
+    list_inputs: Sequence[ListInput],
+    extractions: Mapping[str, ExtractionEnvelope],
+    extraction_errors: Mapping[str, Exception],
+    offers: Sequence[Offer],
+) -> PipelineResult:
+    """Run later pipeline stages without making a second extraction call."""
+
+    def cached_extractor(
+        source: str | Path | bytes,
+        *,
+        child_id: str,
+        mime_type: str | None,
+        client: object | None,
+    ) -> ExtractionEnvelope:
+        del source, mime_type, client
+        error = extraction_errors.get(child_id)
+        if error is not None:
+            raise error
+        return extractions[child_id]
+
+    return run_pipeline(
+        session,
+        list_inputs,
+        offers=offers,
+        extractor=cached_extractor,
+    )
+
+
+def _render_list_identity_warnings(
+    st: Any,
+    warnings: Sequence[ListIdentityWarning],
+) -> None:
+    """Show extracted grade conflicts as one non-blocking confirmation."""
+
+    st.header("Check the list details")
+    st.write(
+        "The list can still be used. Confirm that you want to continue before "
+        "the cart is built."
+    )
+    for warning in warnings:
+        with st.container(border=True):
+            st.warning(
+                escape_streamlit_dollars(
+                    f"{warning.child_label}: {warning.message}"
+                )
+            )
+            if warning.stated_teachers:
+                st.caption(
+                    escape_streamlit_dollars(
+                        "Teacher named on the list: "
+                        + _join_names(warning.stated_teachers)
+                    )
+                )
+    with st.form("list_identity_confirmation"):
+        left, right = st.columns(2)
+        continue_anyway = left.form_submit_button(
+            "Continue anyway",
+            type="primary",
+            use_container_width=True,
+        )
+        return_to_lists = right.form_submit_button(
+            "Return to lists",
+            use_container_width=True,
+        )
+    if continue_anyway:
+        st.session_state["list_identity_confirmed"] = True
+        st.rerun()
+    if return_to_lists:
+        st.session_state["screen"] = "lists"
+        st.rerun()
+
+
+def _route_pipeline_result(
+    st: Any,
+    result: PipelineResult,
+    child_labels: Mapping[str, str],
+) -> None:
+    """Store and route a completed result without rebuilding it."""
+
+    st.session_state["result"] = result
+    if not result.extractions:
+        st.error(
+            "Every list failed extraction. Return to the lists screen and "
+            "check the files or pasted text."
+        )
+        for child_id, reason in result.extraction_failures.items():
+            st.warning(
+                escape_streamlit_dollars(
+                    f"{_child_display_label(child_id, child_labels)}: {reason}"
+                )
+            )
         if st.button("Return to lists"):
             st.session_state["screen"] = "lists"
             st.rerun()
         return
-    with st.status("Reading and planning…", expanded=True) as status:
-        st.write("Reading and validating each list")
-        st.write("Normalizing quantities and combining shared needs")
-        st.write("Matching products from the simulated catalog")
-        st.write("Optimizing packages, stores, tax, and fulfillment")
-        st.write("Checking the approval gate and optional add-ons")
-        offers = _active_catalog_offers(
-            frozenset(st.session_state["stockout_skus"])
-        )
-        try:
-            result = run_pipeline(
-                _pipeline_session(intake),
-                list_inputs,
-                offers=offers,
-            )
-        except Exception as error:
-            status.update(label="Cart build stopped", state="error")
-            st.error(
-                escape_streamlit_dollars(
-                    "The cart could not be built. Your setup and lists are "
-                    "still available. Technical detail: "
-                    f"{type(error).__name__}: {error}"
-                )
-            )
-            if st.button("Return to lists"):
-                st.session_state["screen"] = "lists"
-                st.rerun()
-            return
-        if not result.extractions:
-            status.update(label="No lists could be extracted", state="error")
-            st.error(
-                "Every list failed extraction. Return to the lists screen and "
-                "check the files or pasted text."
-            )
-            for child_id, reason in result.extraction_failures.items():
-                st.warning(
-                    escape_streamlit_dollars(f"{child_id}: {reason}")
-                )
-            if st.button("Return to lists"):
-                st.session_state["screen"] = "lists"
-                st.rerun()
-            return
-        status.update(label="Cart proposal ready", state="complete")
-    st.session_state["result"] = result
+
     valid_interrupt_ids = {
         interrupt.interrupt_id
         for interrupt in _all_interrupts(result.approval_batch)
@@ -1696,6 +1974,87 @@ def _render_working(st: Any) -> None:
         "approval" if unresolved else "summary"
     )
     st.rerun()
+
+
+def _render_working(st: Any) -> None:
+    intake = st.session_state["intake"]
+    list_inputs = st.session_state["list_inputs"]
+    if intake is None or not list_inputs:
+        st.error("Session setup or supply lists are missing.")
+        if st.button("Return to lists"):
+            st.session_state["screen"] = "lists"
+            st.rerun()
+        return
+    child_labels = {
+        child["child_id"]: child["label"]
+        for child in intake["children"]
+    }
+    cached_result: PipelineResult | None = st.session_state["result"]
+    if cached_result is not None:
+        _route_pipeline_result(st, cached_result, child_labels)
+        return
+
+    if not st.session_state["extraction_cache_ready"]:
+        st.header("Reading the supply lists")
+        with st.status("Extracting list details…", expanded=True) as status:
+            st.write("Reading and validating each list")
+            extractions, extraction_errors = _extract_list_inputs(
+                list_inputs
+            )
+            st.session_state["extracted_lists"] = extractions
+            st.session_state["extraction_errors"] = extraction_errors
+            st.session_state["extraction_cache_ready"] = True
+            status.update(
+                label="List extraction complete",
+                state="complete",
+            )
+
+    extractions = st.session_state["extracted_lists"]
+    extraction_errors = st.session_state["extraction_errors"]
+    identity_warnings = detect_list_identity_warnings(
+        extractions,
+        intake["children"],
+    )
+    if (
+        identity_warnings
+        and not st.session_state["list_identity_confirmed"]
+    ):
+        _render_list_identity_warnings(st, identity_warnings)
+        return
+
+    st.header("Building the cart")
+    st.write("This usually takes one to three minutes for multiple lists.")
+    with st.status("Planning the cart…", expanded=True) as status:
+        st.write("Normalizing quantities and combining shared needs")
+        st.write("Matching products from the simulated catalog")
+        st.write("Optimizing packages, stores, tax, and fulfillment")
+        st.write("Checking the approval gate and optional add-ons")
+        offers = _active_catalog_offers(
+            frozenset(st.session_state["stockout_skus"])
+        )
+        try:
+            result = _run_pipeline_from_cached_extractions(
+                _pipeline_session(intake),
+                list_inputs,
+                extractions,
+                extraction_errors,
+                offers=offers,
+            )
+        except Exception as error:
+            status.update(label="Cart build stopped", state="error")
+            st.error(
+                escape_streamlit_dollars(
+                    "The cart could not be built. Your setup and lists are "
+                    "still available. Technical detail: "
+                    f"{type(error).__name__}: {error}"
+                )
+            )
+            if st.button("Return to lists"):
+                st.session_state["screen"] = "lists"
+                st.rerun()
+            return
+        status.update(label="Cart proposal ready", state="complete")
+    _route_pipeline_result(st, result, child_labels)
 
 
 def _render_approval(st: Any) -> None:
@@ -1727,47 +2086,57 @@ def _render_approval(st: Any) -> None:
         "The recommended choice appears first."
     )
     selections: dict[str, ApprovalDisplayOption] = {}
-    for index, presentation in enumerate(presentations):
-        interrupt = presentation.interrupt
-        with st.container(border=True):
-            st.subheader(
-                escape_streamlit_dollars(
-                    f"{index + 1}. {presentation.heading}"
-                )
-            )
-            st.caption(
-                escape_streamlit_dollars(
-                    "Affects: "
-                    f"{_join_names(presentation.affected_children)}"
-                )
-            )
-            st.write(escape_streamlit_dollars(presentation.message))
-            st.info(
-                escape_streamlit_dollars(
-                    f"Recommendation: {presentation.recommendation}"
-                )
-            )
-            existing = st.session_state["approval_outcomes"].get(
-                interrupt.interrupt_id
-            )
-            default_index = next(
-                (
-                    alternative_index
-                    for alternative_index, option in enumerate(
-                        presentation.options
+    with st.form("approval_decisions", border=False):
+        for index, presentation in enumerate(presentations):
+            interrupt = presentation.interrupt
+            with st.container(border=True):
+                st.subheader(
+                    escape_streamlit_dollars(
+                        f"{index + 1}. {presentation.heading}"
                     )
-                    if option.alternative_id == existing
-                ),
-                0,
-            )
-            selections[interrupt.interrupt_id] = st.radio(
-                "Choose one",
-                presentation.options,
-                index=default_index,
-                format_func=approval_option_markdown,
-                key=f"approval_{interrupt.interrupt_id}",
-            )
-    if st.button("Save decisions and continue", type="primary"):
+                )
+                st.caption(
+                    escape_streamlit_dollars(
+                        "Affects: "
+                        f"{_join_names(presentation.affected_children)}"
+                    )
+                )
+                st.write(escape_streamlit_dollars(presentation.message))
+                st.info(
+                    escape_streamlit_dollars(
+                        f"Recommendation: {presentation.recommendation}"
+                    )
+                )
+                existing = st.session_state["approval_outcomes"].get(
+                    interrupt.interrupt_id
+                )
+                default_index = next(
+                    (
+                        alternative_index
+                        for alternative_index, option in enumerate(
+                            presentation.options
+                        )
+                        if option.alternative_id == existing
+                    ),
+                    0,
+                )
+                selections[interrupt.interrupt_id] = st.radio(
+                    "Choose one",
+                    presentation.options,
+                    index=default_index,
+                    format_func=approval_option_label,
+                    captions=tuple(
+                        approval_option_caption(option)
+                        for option in presentation.options
+                    ),
+                    key=f"approval_{interrupt.interrupt_id}",
+                )
+        submitted = st.form_submit_button(
+            "Save decisions and continue",
+            type="primary",
+            use_container_width=True,
+        )
+    if submitted:
         outcomes = dict(st.session_state["approval_outcomes"])
         response_log = DecisionLog(
             f"{result.session.session_id}-parent"
@@ -1872,7 +2241,7 @@ def _render_store_breakdown(
     for plan in _plans(optimization):
         for order in plan.store_orders:
             store = stores_by_id.get(order.store_id)
-            store_name = store.name if store else order.store_id
+            store_name = store.name if store else "Unknown store"
             with st.expander(
                 escape_streamlit_dollars(
                     (
@@ -1887,7 +2256,7 @@ def _render_store_breakdown(
                 rows = []
                 for line in order.lines:
                     allocations = ", ".join(
-                        f"{child_labels.get(child_id, child_id)}: {units}"
+                        f"{_child_display_label(child_id, child_labels)}: {units}"
                         for child_id, units in line.allocated_to.items()
                     )
                     rows.append(
@@ -2001,7 +2370,11 @@ def _render_substitutions(
         st.write("No substitutions were made.")
 
 
-def _render_addons(st: Any, result: PipelineResult) -> None:
+def _render_addons(
+    st: Any,
+    result: PipelineResult,
+    child_labels: Mapping[str, str],
+) -> None:
     proposal = result.addon_proposal
     st.subheader("Optional classroom add-ons")
     if not proposal.items:
@@ -2017,7 +2390,10 @@ def _render_addons(st: Any, result: PipelineResult) -> None:
     st.table(
         escape_streamlit_data([
             {
-                "For": item.child_id,
+                "For": _child_display_label(
+                    item.child_id,
+                    child_labels,
+                ),
                 "Type": item.requirement_type.title(),
                 "List item": item.raw_text,
             }
@@ -2177,11 +2553,12 @@ def _render_summary(st: Any) -> None:
         for child_id, reason in result.extraction_failures.items():
             st.write(
                 escape_streamlit_dollars(
-                    f"- {child_labels.get(child_id, child_id)}: {reason}"
+                    f"- {_child_display_label(child_id, child_labels)}: "
+                    f"{reason}"
                 )
             )
 
-    _render_addons(st, result)
+    _render_addons(st, result, child_labels)
     optimization, matches = _effective_cart(
         st,
         result,
@@ -2207,6 +2584,43 @@ def _render_summary(st: Any) -> None:
     _render_substitutions(st, optimization, matches, stores)
     _render_approvals_summary(st, approval_presentations)
 
+    st.subheader("Demonstrate live re-planning")
+    with st.container(border=True):
+        st.write(
+            "Choose a product from this cart and mark it out of stock. The "
+            "agent will rebuild the plan from the cached lists using the "
+            "remaining catalog inventory."
+        )
+        selected_skus = tuple(
+            dict.fromkeys(
+                line.sku
+                for plan in _plans(optimization)
+                for line in plan.lines
+            )
+        )
+        if selected_skus:
+            stockout_sku = st.selectbox(
+                "Product to mark out of stock",
+                selected_skus,
+                format_func=lambda sku: escape_streamlit_dollars(
+                    _catalog_product_label(sku, offers, stores)
+                ),
+            )
+            if st.button(
+                "Mark out of stock and re-plan",
+                type="primary",
+            ):
+                st.session_state["stockout_skus"] = (
+                    frozenset(st.session_state["stockout_skus"])
+                    | {stockout_sku}
+                )
+                st.session_state["checkout_confirmation"] = None
+                st.session_state["result"] = None
+                st.session_state["screen"] = "working"
+                st.rerun()
+        else:
+            st.info("There are no selected cart products to mark out of stock.")
+
     display_only = result.normalization.display_only_requirements
     if display_only:
         with st.expander("List notes that are not shopping items"):
@@ -2214,7 +2628,7 @@ def _render_summary(st: Any) -> None:
                 st.write(
                     escape_streamlit_dollars(
                         "- "
-                        f"{child_labels.get(requirement.source.child_id, requirement.source.child_id)}: "
+                        f"{_child_display_label(requirement.source.child_id, child_labels)}: "
                         f"{requirement.source.raw_text}"
                     )
                 )
@@ -2258,31 +2672,6 @@ def _render_summary(st: Any) -> None:
         file_name="school-supply-cart.txt",
         mime="text/plain",
     )
-
-    with st.expander("Demonstrate a stockout and re-plan"):
-        selected_skus = tuple(
-            dict.fromkeys(
-                line.sku
-                for plan in _plans(optimization)
-                for line in plan.lines
-            )
-        )
-        stockout_sku = st.selectbox(
-            "Mark one selected product out of stock",
-            selected_skus,
-            format_func=lambda sku: escape_streamlit_dollars(
-                _catalog_product_label(sku, offers, stores)
-            ),
-        )
-        if st.button("Inject stockout and rebuild"):
-            st.session_state["stockout_skus"] = (
-                frozenset(st.session_state["stockout_skus"])
-                | {stockout_sku}
-            )
-            st.session_state["checkout_confirmation"] = None
-            st.session_state["result"] = None
-            st.session_state["screen"] = "working"
-            st.rerun()
 
     st.subheader("Simulated checkout")
     checkout_label = "Place simulated order"
@@ -2353,6 +2742,11 @@ def main() -> None:
             border-radius: 0.75rem;
             padding: 0.8rem;
             background: #ffffff;
+        }
+        [data-testid="stForm"] [role="radiogroup"] > label {
+            align-items: flex-start;
+            margin-bottom: 0.7rem;
+            padding: 0.55rem 0;
         }
         </style>
         """,

@@ -447,8 +447,8 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
     assert "source it myself" in decision_log.entries[0].rationale
 
 
-def test_radio_option_places_escaped_short_explanation_beneath_choice() -> None:
-    """Streamlit receives escaped money and an inline second explanation row."""
+def test_radio_option_uses_escaped_label_and_attached_caption() -> None:
+    """Streamlit receives separate escaped radio labels and captions."""
 
     option = app.ApprovalDisplayOption(
         alternative_id="binder-two",
@@ -457,11 +457,33 @@ def test_radio_option_places_escaped_short_explanation_beneath_choice() -> None:
         explanation="Adds $3.00 landed ($2.80 item, $0.20 tax)",
     )
 
-    rendered = app.approval_option_markdown(option)
+    label = app.approval_option_label(option)
+    caption = app.approval_option_caption(option)
 
-    assert rendered == (
+    assert label == (
         "Choose Avery 2-Inch Binder — Value Depot "
-        "(adds \\$3.00)  \n"
+        "(adds \\$3.00)"
+    )
+    assert caption == (
         "Adds \\$3.00 landed (\\$2.80 item, \\$0.20 tax)"
     )
-    assert "$" not in rendered.replace("\\$", "")
+    assert "$" not in (label + caption).replace("\\$", "")
+
+
+def test_self_source_option_is_visually_separated() -> None:
+    """The parent-sourcing option is distinguished from product choices."""
+
+    option = app.ApprovalDisplayOption(
+        alternative_id="binder-parent-remove",
+        label="Do not buy this — I will source it myself",
+        cost_delta_cents=-300,
+        explanation="No exact catalog match is available. Saves $3.00.",
+        leaves_required_unmet=True,
+    )
+
+    label = app.approval_option_label(option)
+    caption = app.approval_option_caption(option)
+
+    assert label.startswith("────────  \nDo not buy this")
+    assert caption.startswith("Source-it-yourself choice")
+    assert "Saves \\$3.00" in caption

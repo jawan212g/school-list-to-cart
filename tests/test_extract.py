@@ -42,6 +42,8 @@ def test_optional_model_review_flag_is_deferred_by_deterministic_gate() -> None:
     """BR-10: model-proposed add-on review cannot interrupt the base cart."""
 
     model_output = ExtractionEnvelope(
+        stated_grades=("Grade 5",),
+        stated_teachers=("Ms. Rivera",),
         requirements=(
             _requirement(
                 req_id="donation",
@@ -60,6 +62,8 @@ def test_optional_model_review_flag_is_deferred_by_deterministic_gate() -> None:
     assert secured.deferred_review_reasons == (
         "Low-confidence extraction requires review: donation item",
     )
+    assert secured.stated_grades == ("Grade 5",)
+    assert secured.stated_teachers == ("Ms. Rivera",)
 
 
 def test_required_low_confidence_review_remains_immediate() -> None:

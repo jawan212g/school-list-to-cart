@@ -100,7 +100,26 @@ class ExtractionEnvelope(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    stated_grades: tuple[str, ...] = ()
+    stated_teachers: tuple[str, ...] = ()
     requirements: tuple[Requirement, ...] = ()
     manual_review_required: bool = False
     review_reasons: tuple[str, ...] = ()
     deferred_review_reasons: tuple[str, ...] = ()
+
+    @field_validator("stated_grades", "stated_teachers")
+    @classmethod
+    def normalize_document_metadata(
+        cls,
+        values: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Keep stated list metadata concise, unique, and display-safe."""
+
+        normalized: list[str] = []
+        for value in values:
+            cleaned = value.strip()
+            if cleaned and cleaned.casefold() not in {
+                item.casefold() for item in normalized
+            }:
+                normalized.append(cleaned)
+        return tuple(normalized)
