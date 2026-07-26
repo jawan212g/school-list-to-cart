@@ -118,6 +118,7 @@ def propose_addons(
         stores,
         allowed_store_ids=config.allowed_store_ids,
         store_radius_miles=config.store_radius_miles,
+        fulfillment_preference=config.fulfillment_preference,
     )
     combined_needs = tuple(base_purchase_needs) + optional_needs
     combined_matches = MatchResult(

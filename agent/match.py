@@ -13,6 +13,10 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent.aggregate import UnitNeed
+from agent.store_scope import (
+    FulfillmentPreference,
+    store_supports_fulfillment,
+)
 from agent.extract import MODEL_NAME, create_model_client
 from agent.rules import (
     ATTRIBUTE_SENSITIVE_FIELDS,
@@ -377,18 +381,18 @@ def _store_is_in_scope(
     store: Store,
     allowed_store_ids: frozenset[str] | None,
     store_radius_miles: float | None,
+    fulfillment_preference: FulfillmentPreference,
 ) -> bool:
     if (
         allowed_store_ids is not None
         and store.store_id not in allowed_store_ids
     ):
         return False
-    if (
-        store_radius_miles is not None
-        and store.distance_miles > store_radius_miles
-    ):
-        return False
-    return True
+    return store_supports_fulfillment(
+        store,
+        store_radius_miles,
+        fulfillment_preference,
+    )
 
 
 def _prefilter_cases(
@@ -397,6 +401,7 @@ def _prefilter_cases(
     stores: Sequence[Store],
     allowed_store_ids: frozenset[str] | None,
     store_radius_miles: float | None,
+    fulfillment_preference: FulfillmentPreference,
 ) -> tuple[SuitabilityCase, ...]:
     stores_by_id = {
         store.store_id: store
@@ -405,6 +410,7 @@ def _prefilter_cases(
             store,
             allowed_store_ids,
             store_radius_miles,
+            fulfillment_preference,
         )
     }
     cases: list[SuitabilityCase] = []
@@ -568,6 +574,7 @@ def match_offers(
     *,
     allowed_store_ids: frozenset[str] | None = None,
     store_radius_miles: float | None = None,
+    fulfillment_preference: FulfillmentPreference = "either",
     judge: SuitabilityJudge | None = None,
 ) -> MatchResult:
     """Filter, judge, and classify candidate offers (FR-17–FR-20, E-12)."""
@@ -578,6 +585,7 @@ def match_offers(
         stores,
         allowed_store_ids,
         store_radius_miles,
+        fulfillment_preference,
     )
     active_judge = judge or StructuredSuitabilityJudge()
     decisions = active_judge.judge(cases)

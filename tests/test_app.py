@@ -3,6 +3,7 @@
 import pytest
 
 import app
+from data.loader import Store
 
 
 def test_money_and_tax_inputs_convert_at_the_interface_boundary() -> None:
@@ -48,3 +49,50 @@ def test_upload_validation_checks_type_size_and_file_signature() -> None:
         app.validate_uploaded_document("malware.pdf", b"MZ executable")
     with pytest.raises(ValueError, match="PDF, JPG, PNG, or TXT"):
         app.validate_uploaded_document("list.exe", b"MZ")
+
+
+def test_radius_table_explains_pickup_scope_and_delivery_exception() -> None:
+    """FR-04: intake scope is visible and delivery ignores pickup distance."""
+
+    pickup_store = Store(
+        store_id="P",
+        name="Pickup Store",
+        distance_miles=8.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=0,
+        delivery_minimum=0,
+        tax_applies=False,
+    )
+    online_store = Store(
+        store_id="D",
+        name="Online Store",
+        distance_miles=100.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=0,
+        delivery_minimum=0,
+        tax_applies=False,
+        pickup_available=False,
+    )
+
+    pickup_rows = app.store_radius_rows(
+        [pickup_store, online_store],
+        5.0,
+        "pickup",
+    )
+    delivery_rows = app.store_radius_rows(
+        [pickup_store, online_store],
+        5.0,
+        "delivery",
+    )
+
+    assert pickup_rows[0]["Pickup trip"] == "Outside radius"
+    assert pickup_rows[0]["Current scope"] == "Not included"
+    assert pickup_rows[1]["Current scope"] == "Not included"
+    assert delivery_rows[0]["Current scope"] == (
+        "Included for delivery; radius does not apply"
+    )
+    assert delivery_rows[1]["Current scope"] == (
+        "Included for delivery; radius does not apply"
+    )

@@ -121,11 +121,42 @@ def test_fr17_fr20_filters_store_radius_brand_exclusions_and_stock() -> None:
         offers,
         stores,
         store_radius_miles=5.0,
+        fulfillment_preference="pickup",
     )
 
     assert tuple(
         candidate.offer.sku for candidate in result.needs[0].candidates
     ) == ("GOOD",)
+
+
+def test_delivery_only_store_is_not_filtered_by_pickup_radius() -> None:
+    """FR-04/17: a distant shipper remains matchable for delivery."""
+
+    need = _need("pencils")
+    store = Store(
+        store_id="SHIP",
+        name="Distant online store",
+        distance_miles=100.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=500,
+        delivery_minimum=0,
+        tax_applies=False,
+        pickup_available=False,
+    )
+    offer = _offer("SHIP-PENCILS", "SHIP", "pencils")
+
+    result = match_offers(
+        [need],
+        [offer],
+        [store],
+        store_radius_miles=1.0,
+        fulfillment_preference="either",
+    )
+
+    assert tuple(
+        candidate.offer.sku for candidate in result.needs[0].candidates
+    ) == ("SHIP-PENCILS",)
 
 
 def test_fr19_any_acceptable_color_is_an_exact_attribute_match() -> None:

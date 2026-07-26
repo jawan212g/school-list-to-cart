@@ -17,11 +17,15 @@ from agent.rules import (
     PERCENT_DENOMINATOR,
     TAX_ROUNDING_OFFSET,
 )
+from agent.store_scope import (
+    FulfillmentPreference,
+    pickup_trip_is_within_radius,
+    store_supports_fulfillment,
+)
 from data.loader import Offer, Store
 
 
 ShoppingMode = Literal["budget", "single_stop", "custom"]
-FulfillmentPreference = Literal["pickup", "delivery", "either"]
 FulfillmentMethod = Literal["pickup", "delivery"]
 
 
@@ -337,9 +341,13 @@ def _choose_fulfillment(
     store: Store,
     item_subtotal: int,
     preference: FulfillmentPreference,
+    store_radius_miles: float | None,
 ) -> tuple[FulfillmentMethod, int] | None:
     choices: list[tuple[FulfillmentMethod, int]] = []
-    if preference in {"pickup", "either"} and store.pickup_available:
+    if (
+        preference in {"pickup", "either"}
+        and pickup_trip_is_within_radius(store, store_radius_miles)
+    ):
         choices.append(
             (
                 "pickup",
@@ -505,6 +513,7 @@ def _build_plan(
             store,
             item_subtotal,
             config.fulfillment_preference,
+            config.store_radius_miles,
         )
         if fulfillment is None:
             raise ValueError(
@@ -574,11 +583,6 @@ def _stores_in_scope(
             and store.store_id not in config.allowed_store_ids
         ):
             continue
-        if (
-            config.store_radius_miles is not None
-            and store.distance_miles > config.store_radius_miles
-        ):
-            continue
         in_scope.append(store)
     return tuple(sorted(in_scope, key=lambda store: store.store_id))
 
@@ -589,9 +593,10 @@ def _eligible_stores(
 ) -> tuple[Store, ...]:
     eligible = []
     for store in _stores_in_scope(stores, config):
-        if (
-            config.fulfillment_preference == "pickup"
-            and not store.pickup_available
+        if not store_supports_fulfillment(
+            store,
+            config.store_radius_miles,
+            config.fulfillment_preference,
         ):
             continue
         eligible.append(store)
@@ -762,7 +767,10 @@ def _fulfillment_tradeoffs(
     delivery_config = replace(config, fulfillment_preference="delivery")
     tradeoffs: list[FulfillmentTradeoff] = []
     for store in stores:
-        if store.pickup_available:
+        if pickup_trip_is_within_radius(
+            store,
+            config.store_radius_miles,
+        ):
             continue
         store_candidates = _candidate_selections(
             unit_needs,

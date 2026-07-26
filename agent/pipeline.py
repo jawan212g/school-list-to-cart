@@ -378,6 +378,7 @@ def run_pipeline(
         active_stores,
         allowed_store_ids=session.allowed_stores,
         store_radius_miles=session.store_radius_miles,
+        fulfillment_preference=session.fulfillment_pref,
         judge=(
             suitability_judge
             or OpenAISuitabilityJudge(model_client)

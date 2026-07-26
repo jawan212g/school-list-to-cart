@@ -467,6 +467,42 @@ def test_delivery_fee_is_charged_below_and_waived_above_minimum() -> None:
     assert above_minimum.plan.store_orders[0].fulfillment_method == "delivery"
 
 
+def test_delivery_only_store_ignores_pickup_trip_radius() -> None:
+    """FR-04/25: 100-mile online store ships despite a 1-mile trip radius."""
+
+    store = Store(
+        store_id="SHIP",
+        name="Distant online store",
+        distance_miles=100.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=250,
+        delivery_minimum=2_000,
+        tax_applies=False,
+        pickup_available=False,
+    )
+    offer = _offer("SHIP-PENCILS", "SHIP", "pencils", 8, 1_000)
+    config = OptimizationConfig(
+        shopping_mode="budget",
+        fulfillment_preference="either",
+        store_radius_miles=1.0,
+        tax_basis_points=0,
+    )
+
+    result = optimize_cart(
+        [_unit_need("pencils", {"child-a": 8})],
+        [offer],
+        [store],
+        config,
+    )
+
+    assert result.gap_items == ()
+    assert result.plan.item_subtotal == 1_000
+    assert result.plan.fulfillment_fees == 250
+    assert result.landed_cost == 1_250
+    assert result.plan.store_orders[0].fulfillment_method == "delivery"
+
+
 def test_e27_pickup_preference_surfaces_cheaper_delivery_only_tradeoff() -> None:
     """E-27: pickup selects $10 at P and reports the excluded $5 delivery cart."""
 

@@ -27,6 +27,11 @@ from agent.rules import (
     MINIMUM_BUDGET_CENTS,
     SUBSTITUTION_NONE,
 )
+from agent.store_scope import (
+    FulfillmentPreference,
+    pickup_trip_is_within_radius,
+    store_supports_fulfillment,
+)
 from data.loader import Store, load_catalog, load_stores
 
 
@@ -117,6 +122,51 @@ def format_cost_delta(cents: int) -> str:
         return "no cost change"
     direction = "adds" if cents > 0 else "saves"
     return f"{direction} {format_money(abs(cents))}"
+
+
+def store_radius_rows(
+    stores: Sequence[Store],
+    radius_miles: float,
+    fulfillment_preference: FulfillmentPreference,
+) -> tuple[Mapping[str, str], ...]:
+    """Describe simulated pickup-radius scope for the intake screen (FR-04)."""
+
+    rows: list[Mapping[str, str]] = []
+    for store in stores:
+        pickup_in_radius = pickup_trip_is_within_radius(
+            store,
+            radius_miles,
+        )
+        if not store.pickup_available:
+            pickup_status = "Not offered (online-only)"
+        elif pickup_in_radius:
+            pickup_status = "Inside radius"
+        else:
+            pickup_status = "Outside radius"
+
+        included = store_supports_fulfillment(
+            store,
+            radius_miles,
+            fulfillment_preference,
+        )
+        if fulfillment_preference == "delivery":
+            current_scope = "Included for delivery; radius does not apply"
+        elif fulfillment_preference == "either" and not pickup_in_radius:
+            current_scope = "Included for delivery only"
+        elif included:
+            current_scope = "Included"
+        else:
+            current_scope = "Not included"
+
+        rows.append(
+            {
+                "Store": store.name,
+                "Simulated distance": f"{store.distance_miles:.1f} miles",
+                "Pickup trip": pickup_status,
+                "Current scope": current_scope,
+            }
+        )
+    return tuple(rows)
 
 
 def validate_uploaded_document(
@@ -284,7 +334,10 @@ def _initialize_state(st: Any) -> None:
 def _persistent_notice(st: Any) -> None:
     st.info(
         "This prototype uses a simulated catalog and fictional stores. "
-        "Checkout is simulated, and no payment information is collected."
+        "Store distances are simulated from a notional home location; no "
+        "address is collected and no geocoding occurs. The radius applies to "
+        "pickup trips only, never delivery. Checkout is simulated, and no "
+        "payment information is collected."
     )
     st.caption(
         "Tax uses the rate you enter. State-specific tax rules and tax "
@@ -439,16 +492,35 @@ def _render_intake(st: Any) -> None:
         )
     radius = float(
         st.number_input(
-            "Store radius (miles)",
+            "Pickup-trip radius (simulated miles)",
             min_value=0.0,
             max_value=MAX_STORE_RADIUS_MILES,
             value=DEFAULT_RADIUS_MILES,
             step=0.5,
+            help=(
+                "This limits trips to pickup locations. It does not limit "
+                "stores that can deliver."
+            ),
         )
     )
     fulfillment_label = st.selectbox(
         "Fulfillment preference",
         tuple(FULFILLMENT_OPTIONS),
+    )
+    fulfillment_preference = FULFILLMENT_OPTIONS[fulfillment_label]
+    st.caption(
+        "These are fixed, simulated distances from a notional home location. "
+        "They are not calculated from an address. Delivery remains available "
+        "outside the pickup-trip radius."
+    )
+    st.dataframe(
+        store_radius_rows(
+            stores,
+            radius,
+            fulfillment_preference,
+        ),
+        use_container_width=True,
+        hide_index=True,
     )
     tax_rate_text = st.text_input(
         "Sales tax rate (%)",
@@ -496,7 +568,7 @@ def _render_intake(st: Any) -> None:
             "store_radius_miles": radius,
             "allowed_stores": allowed_stores,
             "max_stores": max_stores,
-            "fulfillment_pref": FULFILLMENT_OPTIONS[fulfillment_label],
+            "fulfillment_pref": fulfillment_preference,
             "tax_basis_points": tax_basis_points,
         }
         st.session_state["result"] = None
