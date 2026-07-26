@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent.approval_options import (
+    CatalogApprovalChoice,
+    RemovalCostContext,
+    build_catalog_approval_choices,
+    removal_cost_context,
+)
 from agent.decisions import Decision, DecisionLog
 from agent.extract import (
     MODEL_NAME,
@@ -19,7 +26,12 @@ from agent.extract import (
 )
 from agent.gate import ApprovalBatch, ApprovalInterrupt
 from agent.match import MatchResult
-from agent.optimize import CartPlan, OptimizationResult
+from agent.optimize import (
+    CartLine,
+    CartPlan,
+    OptimizationConfig,
+    OptimizationResult,
+)
 from agent.pipeline import (
     ListInput,
     PipelineResult,
@@ -31,6 +43,7 @@ from agent.rules import (
     MAX_CHILDREN_PER_SESSION,
     MAX_UPLOAD_BYTES,
     MINIMUM_BUDGET_CENTS,
+    NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     SUBSTITUTION_NONE,
 )
 from agent.store_scope import (
@@ -38,7 +51,7 @@ from agent.store_scope import (
     pickup_trip_is_within_radius,
     store_supports_fulfillment,
 )
-from data.loader import Store, load_catalog, load_stores
+from data.loader import Offer, Store, load_catalog, load_stores
 
 
 LOGGER = logging.getLogger(__name__)
@@ -67,6 +80,79 @@ FULFILLMENT_OPTIONS: Mapping[str, str] = {
     "Pickup only": "pickup",
     "Delivery only": "delivery",
 }
+ITEM_DISPLAY_NAMES: Mapping[str, str] = {
+    "backpacks": "Backpack",
+    "binders": "Binder",
+    "colored_pencils": "Colored pencils",
+    "composition_notebooks": "Composition notebook",
+    "crayons": "Crayons",
+    "dividers": "Dividers",
+    "glue_sticks": "Glue sticks",
+    "headphones": "Headphones",
+    "highlighters": "Highlighters",
+    "notebook_paper": "Notebook paper",
+    "pencil_boxes": "Pencil box",
+    "pencils": "Pencils",
+    "pens": "Pens",
+    "rulers": "Ruler",
+    "scissors": "Scissors",
+    "tissues": "Tissues",
+}
+ATTRIBUTE_DISPLAY_NAMES: Mapping[str, str] = {
+    "acceptable_colors": "color",
+    "character": "character",
+    "connector": "connector",
+    "material": "material",
+    "ruling": "ruling",
+    "sharpened": "sharpening",
+    "size": "size",
+    "style": "style",
+    "tab_count": "tab count",
+    "tip_style": "tip style",
+}
+SUBSTITUTION_REASON_LABELS: Mapping[str, str] = {
+    "allowed_pack_size": "Package size is within the allowed overage",
+    "attribute_change:acceptable_colors": "Requested color differs",
+    "attribute_change:character": "Requested character differs",
+    "attribute_change:connector": "Requested connector differs",
+    "attribute_change:material": "Requested material differs",
+    "attribute_change:ruling": "Requested ruling differs",
+    "attribute_change:sharpened": "Requested sharpening differs",
+    "attribute_change:size": "Requested size differs",
+    "attribute_change:style": "Requested style differs",
+    "attribute_change:tab_count": "Requested tab count differs",
+    "attribute_change:tip_style": "Requested tip style differs",
+    "brand_lock_break": "Required brand differs",
+    "different_unlocked_brand": "Different brand; no brand was required",
+    "pack_count_difference": "Package count differs materially",
+}
+SUBSTITUTION_SEVERITY_LABELS: Mapping[str, str] = {
+    "major": "Parent approval required",
+    "minor": "Equivalent alternative",
+    "none": "Exact match",
+}
+
+
+@dataclass(frozen=True)
+class ApprovalDisplayOption:
+    """One parent-facing choice with cents retained until rendering."""
+
+    alternative_id: str
+    label: str
+    cost_delta_cents: int
+    explanation: str | None = None
+
+
+@dataclass(frozen=True)
+class ApprovalDisplayDecision:
+    """Plain-language approval content assembled without changing the gate."""
+
+    interrupt: ApprovalInterrupt
+    heading: str
+    message: str
+    recommendation: str
+    affected_children: tuple[str, ...]
+    options: tuple[ApprovalDisplayOption, ...]
 
 
 def money_to_cents(value: str) -> int:
@@ -254,6 +340,499 @@ def _all_interrupts(batch: ApprovalBatch) -> tuple[ApprovalInterrupt, ...]:
     return tuple(visible)
 
 
+def _active_catalog_offers(
+    stockout_skus: frozenset[str],
+) -> tuple[Offer, ...]:
+    return tuple(
+        replace(offer, stock_qty=0)
+        if offer.sku in stockout_skus
+        else offer
+        for offer in load_catalog()
+    )
+
+
+def _optimization_config(result: PipelineResult) -> OptimizationConfig:
+    session = result.session
+    return OptimizationConfig(
+        shopping_mode=session.shopping_mode,
+        budget_cents=session.budget_total,
+        allowed_store_ids=session.allowed_stores,
+        max_stores=session.max_stores,
+        store_radius_miles=session.store_radius_miles,
+        fulfillment_preference=session.fulfillment_pref,
+        tax_basis_points=session.tax_basis_points,
+    )
+
+
+def _interrupt_line(
+    result: PipelineResult,
+    interrupt: ApprovalInterrupt,
+) -> CartLine | None:
+    affected = frozenset(interrupt.affected_lines)
+    return next(
+        (
+            line
+            for plan in _plans(result.proposed_cart)
+            for line in plan.lines
+            if line.line_id in affected
+        ),
+        None,
+    )
+
+
+def _item_display_name(canonical_item: str) -> str:
+    return ITEM_DISPLAY_NAMES.get(
+        canonical_item,
+        canonical_item.replace("_", " ").title(),
+    )
+
+
+def _product_name(line: CartLine, matches: MatchResult) -> str:
+    candidate = matches.candidate(
+        line.source_requirement_ids,
+        line.sku,
+    )
+    if candidate is not None:
+        return candidate.offer.title
+    return _item_display_name(line.canonical_item)
+
+
+def _substitution_reason(reason: str) -> str:
+    return SUBSTITUTION_REASON_LABELS.get(
+        reason,
+        reason.replace("_", " ").capitalize(),
+    )
+
+
+def _humanize_internal_text(
+    text: str,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+) -> str:
+    visible = text
+    for offer in sorted(offers, key=lambda item: -len(item.sku)):
+        visible = visible.replace(offer.sku, offer.title)
+    for store in sorted(stores, key=lambda item: -len(item.store_id)):
+        visible = visible.replace(store.store_id, store.name)
+    for internal, label in SUBSTITUTION_REASON_LABELS.items():
+        visible = visible.replace(internal, label.lower())
+    for internal, label in SUBSTITUTION_SEVERITY_LABELS.items():
+        visible = re.sub(
+            rf"\b{re.escape(internal)}\b",
+            label.lower(),
+            visible,
+        )
+    return re.sub(
+        r"(-?\d+) cents\b",
+        lambda match: format_money(int(match.group(1))),
+        visible,
+    )
+
+
+def _catalog_product_label(
+    sku: str,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+) -> str:
+    offer = next(
+        (candidate for candidate in offers if candidate.sku == sku),
+        None,
+    )
+    if offer is None:
+        return "Selected product"
+    store = next(
+        (
+            candidate
+            for candidate in stores
+            if candidate.store_id == offer.store_id
+        ),
+        None,
+    )
+    store_name = store.name if store is not None else "Unknown store"
+    return f"{offer.title} — {store_name}"
+
+
+def _join_names(names: Sequence[str]) -> str:
+    if not names:
+        return "the selected entries"
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return ", ".join(names[:-1]) + f", and {names[-1]}"
+
+
+def _affected_children(
+    result: PipelineResult,
+    interrupt: ApprovalInterrupt,
+    child_labels: Mapping[str, str],
+) -> tuple[str, ...]:
+    affected_ids: list[str] = []
+    affected_lines = frozenset(interrupt.affected_lines)
+    for plan in _plans(result.proposed_cart):
+        for line in plan.lines:
+            if line.line_id not in affected_lines:
+                continue
+            for child_id in line.allocated_to:
+                if child_id not in affected_ids:
+                    affected_ids.append(child_id)
+    if not affected_ids:
+        requirement_ids = frozenset(interrupt.source_requirement_ids)
+        for need in result.purchase_needs:
+            if not requirement_ids.intersection(
+                need.source_requirement_ids
+            ):
+                continue
+            for child_id in need.allocated_to:
+                if child_id not in affected_ids:
+                    affected_ids.append(child_id)
+    return tuple(
+        child_labels.get(child_id, child_id)
+        for child_id in affected_ids
+    )
+
+
+def _attribute_labels(
+    result: PipelineResult,
+    line: CartLine | None,
+) -> tuple[str, ...]:
+    if line is None:
+        return ()
+    candidate = result.matches.candidate(
+        line.source_requirement_ids,
+        line.sku,
+    )
+    if candidate is None:
+        return ()
+    prefix = "attribute_change:"
+    return tuple(
+        ATTRIBUTE_DISPLAY_NAMES.get(
+            reason.removeprefix(prefix),
+            reason.removeprefix(prefix).replace("_", " "),
+        )
+        for reason in candidate.substitution_reasons
+        if reason.startswith(prefix)
+    )
+
+
+def _source_lines(
+    result: PipelineResult,
+    interrupt: ApprovalInterrupt,
+) -> tuple[str, ...]:
+    source_ids = frozenset(interrupt.source_requirement_ids)
+    return tuple(
+        dict.fromkeys(
+            requirement.source.raw_text
+            for requirement in result.normalization.cart_requirements
+            if requirement.source.req_id in source_ids
+        )
+    )
+
+
+def _component_effect(label: str, cents: int) -> str:
+    if cents == 0:
+        verb = "do" if label.endswith("fees") else "does"
+        return f"{label} {verb} not change"
+    return f"{label} {format_cost_delta(cents)}"
+
+
+def _catalog_choice_explanation(
+    choice: CatalogApprovalChoice,
+) -> str | None:
+    if choice.is_current:
+        return None
+    return (
+        "Full-cart effect: "
+        f"{_component_effect('item subtotal', choice.item_subtotal_delta_cents)}; "
+        f"{_component_effect('tax', choice.tax_delta_cents)}; "
+        f"{_component_effect('fulfillment fees', choice.fulfillment_fee_delta_cents)}."
+    )
+
+
+def _removal_explanation(
+    cost_delta_cents: int,
+    context: RemovalCostContext | None,
+    stores_by_id: Mapping[str, Store],
+) -> str | None:
+    if (
+        context is None
+        or cost_delta_cents == -context.line_cost_cents
+    ):
+        return None
+    store = stores_by_id.get(context.store_id)
+    store_name = store.name if store is not None else "The store"
+    if (
+        context.fee_returns_cents
+        and context.fee_threshold_cents is not None
+    ):
+        return (
+            "This saves the item and its tax, but "
+            f"{store_name}'s "
+            f"{format_money(context.fee_returns_cents)} "
+            f"{context.fulfillment_method} fee returns because the remaining "
+            "item subtotal falls below "
+            f"{format_money(context.fee_threshold_cents)}."
+        )
+    if context.tax_changes:
+        return (
+            "This differs from the item price because the cart's sales tax "
+            "changes too."
+        )
+    return (
+        "This is the change to the full landed cart, including fulfillment "
+        "fees."
+    )
+
+
+def _fallback_option_label(
+    result: PipelineResult,
+    interrupt: ApprovalInterrupt,
+    alternative_id: str,
+    original_label: str,
+    item_name: str,
+) -> str:
+    if alternative_id.endswith("-raise"):
+        return (
+            "Raise the budget by "
+            f"{format_money(result.proposed_cart.shortfall_cents)}"
+        )
+    if alternative_id.endswith(("-omit", "-parent-remove")):
+        return f"Remove required {item_name} from the cart"
+    if alternative_id.endswith("-approve"):
+        return f"Keep the recommended {item_name.lower()}"
+    return original_label
+
+
+def _approval_options(
+    result: PipelineResult,
+    interrupt: ApprovalInterrupt,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+) -> tuple[ApprovalDisplayOption, ...]:
+    line = _interrupt_line(result, interrupt)
+    item_name = (
+        _item_display_name(line.canonical_item)
+        if line is not None
+        else "item"
+    )
+    offers_by_sku = {offer.sku: offer for offer in offers}
+    stores_by_id = {store.store_id: store for store in stores}
+    catalog_choices = build_catalog_approval_choices(
+        interrupt,
+        result.proposed_cart,
+        result.matches,
+        result.purchase_needs,
+        offers,
+        stores,
+        _optimization_config(result),
+    )
+    if catalog_choices:
+        options = []
+        for choice in catalog_choices:
+            offer = offers_by_sku[choice.sku]
+            store = stores_by_id.get(choice.store_id)
+            store_name = store.name if store is not None else "Unknown store"
+            verb = "Keep" if choice.is_current else "Choose"
+            options.append(
+                ApprovalDisplayOption(
+                    alternative_id=(
+                        f"{interrupt.interrupt_id}-catalog-{choice.sku}"
+                    ),
+                    label=f"{verb} {offer.title} — {store_name}",
+                    cost_delta_cents=choice.cost_delta_cents,
+                    explanation=_catalog_choice_explanation(choice),
+                )
+            )
+        if len(catalog_choices) > 1:
+            return tuple(options)
+
+        removal = next(
+            (
+                alternative
+                for alternative in interrupt.alternatives
+                if alternative.alternative_id.endswith("-omit")
+            ),
+            None,
+        )
+        if removal is not None:
+            context = removal_cost_context(
+                interrupt,
+                result.proposed_cart,
+                stores,
+            )
+            cost_explanation = _removal_explanation(
+                removal.cost_delta_cents,
+                context,
+                stores_by_id,
+            )
+            options.append(
+                ApprovalDisplayOption(
+                    alternative_id=removal.alternative_id,
+                    label=f"Remove required {item_name} from the cart",
+                    cost_delta_cents=removal.cost_delta_cents,
+                    explanation=(
+                        "No other stocked catalog match is available. "
+                        + (
+                            cost_explanation
+                            or "This removes the required item from the cart."
+                        )
+                    ),
+                )
+            )
+        return tuple(options)
+
+    return tuple(
+        ApprovalDisplayOption(
+            alternative_id=alternative.alternative_id,
+            label=_fallback_option_label(
+                result,
+                interrupt,
+                alternative.alternative_id,
+                alternative.label,
+                item_name,
+            ),
+            cost_delta_cents=alternative.cost_delta_cents,
+        )
+        for alternative in interrupt.alternatives
+    )
+
+
+def _approval_heading(
+    result: PipelineResult,
+    interrupt: ApprovalInterrupt,
+    line: CartLine | None,
+) -> str:
+    item_name = (
+        _item_display_name(line.canonical_item)
+        if line is not None
+        else "Cart"
+    )
+    if interrupt.kind == "non_returnable_threshold":
+        return (
+            f"{item_name} — non-returnable, over "
+            f"{format_money(NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS)}"
+        )
+    attributes = _attribute_labels(result, line)
+    if attributes:
+        detail = _join_names(attributes) if attributes else "requested details"
+        return f"{item_name} — choose an acceptable {detail}"
+    if interrupt.kind == "major_substitution":
+        return f"{item_name} — choose an acceptable substitute"
+    if interrupt.kind == "brand_lock_break":
+        return f"{item_name} — required brand is unavailable"
+    if interrupt.kind == "budget_exceeded":
+        return "Budget — the complete required cart costs more"
+    if interrupt.kind == "low_confidence":
+        return f"{item_name} — confirm the list interpretation"
+    return f"{item_name} — required item is unavailable"
+
+
+def _approval_message(
+    result: PipelineResult,
+    interrupt: ApprovalInterrupt,
+    line: CartLine | None,
+    offers_by_sku: Mapping[str, Offer],
+    stores_by_id: Mapping[str, Store],
+) -> str:
+    if line is not None:
+        offer = offers_by_sku.get(line.sku)
+        store = stores_by_id.get(line.store_id)
+        product_name = (
+            offer.title if offer is not None else _item_display_name(
+                line.canonical_item
+            )
+        )
+        store_name = store.name if store is not None else "the selected store"
+        if interrupt.kind == "non_returnable_threshold":
+            return (
+                f"{product_name} from {store_name} costs "
+                f"{format_money(line.line_cost)} and cannot be returned."
+            )
+        if _attribute_labels(result, line):
+            source_lines = _source_lines(result, interrupt)
+            request = source_lines[0] if source_lines else line.canonical_item
+            return (
+                f'The list requests “{request}.” Choose from the stocked '
+                "catalog matches below."
+            )
+        return (
+            f"{product_name} from {store_name} needs your approval before "
+            "the required item can proceed."
+        )
+    if interrupt.kind == "budget_exceeded":
+        return (
+            "The complete required cart is over budget by "
+            f"{format_money(result.proposed_cart.shortfall_cents)}."
+        )
+    return interrupt.message.replace("_", " ")
+
+
+def _approval_recommendation(
+    result: PipelineResult,
+    interrupt: ApprovalInterrupt,
+    line: CartLine | None,
+    options: Sequence[ApprovalDisplayOption],
+) -> str:
+    recommended = options[0].label if options else "Leave this decision pending"
+    if interrupt.kind == "non_returnable_threshold":
+        return (
+            f"{recommended}, but only after confirming that the exact product "
+            "is wanted because it cannot be returned."
+        )
+    attribute_labels = _attribute_labels(result, line)
+    if attribute_labels:
+        return (
+            f"{recommended}; it is the current lowest-landed-cost stocked "
+            "match, but the parent should choose the acceptable "
+            f"{_join_names(attribute_labels)}."
+        )
+    if line is not None:
+        return f"{recommended}; it preserves coverage for the required item."
+    return interrupt.recommendation.replace("_", " ")
+
+
+def build_approval_presentations(
+    result: PipelineResult,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    child_labels: Mapping[str, str],
+) -> tuple[ApprovalDisplayDecision, ...]:
+    """Build the parent-facing FR-28 decision batch without changing the gate."""
+
+    offers_by_sku = {offer.sku: offer for offer in offers}
+    stores_by_id = {store.store_id: store for store in stores}
+    presentations = []
+    for interrupt in _all_interrupts(result.approval_batch):
+        line = _interrupt_line(result, interrupt)
+        options = _approval_options(result, interrupt, offers, stores)
+        presentations.append(
+            ApprovalDisplayDecision(
+                interrupt=interrupt,
+                heading=_approval_heading(result, interrupt, line),
+                message=_approval_message(
+                    result,
+                    interrupt,
+                    line,
+                    offers_by_sku,
+                    stores_by_id,
+                ),
+                recommendation=_approval_recommendation(
+                    result,
+                    interrupt,
+                    line,
+                    options,
+                ),
+                affected_children=_affected_children(
+                    result,
+                    interrupt,
+                    child_labels,
+                ),
+                options=options,
+            )
+        )
+    return tuple(presentations)
+
+
 def _combined_costs(
     optimization: OptimizationResult,
 ) -> tuple[int, int, int]:
@@ -284,6 +863,7 @@ def build_text_summary(
     """Build the manual-shopping export artifact (FR-34, FR-36)."""
 
     stores_by_id = {store.store_id: store for store in stores}
+    catalog_offers = tuple(load_catalog())
     item_subtotal, tax, fees = _combined_costs(optimization)
     lines = [
         "SCHOOL SUPPLY CART",
@@ -311,7 +891,7 @@ def build_text_summary(
                 )
                 lines.append(
                     (
-                        f"  {cart_line.canonical_item} | {cart_line.sku} | "
+                        f"  {_product_name(cart_line, matches)} | "
                         f"{cart_line.packs_purchased} pack(s) | "
                         f"{cart_line.units_needed} needed / "
                         f"{cart_line.units_purchased} bought | "
@@ -342,7 +922,8 @@ def build_text_summary(
     lines.extend(
         (
             f"  {decision.timestamp.isoformat()} | {decision.actor} | "
-            f"{decision.type} | {decision.rationale}"
+            f"{decision.type.replace('_', ' ').title()} | "
+            f"{_humanize_internal_text(decision.rationale, catalog_offers, stores)}"
         )
         for decision in _decision_log(result, parent_decisions)
     )
@@ -804,15 +1385,9 @@ def _render_working(st: Any) -> None:
         st.write("Matching products from the simulated catalog")
         st.write("Optimizing packages, stores, tax, and fulfillment")
         st.write("Checking the approval gate and optional add-ons")
-        offers = tuple(load_catalog())
-        stockout_skus = st.session_state["stockout_skus"]
-        if stockout_skus:
-            offers = tuple(
-                replace(offer, stock_qty=0)
-                if offer.sku in stockout_skus
-                else offer
-                for offer in offers
-            )
+        offers = _active_catalog_offers(
+            frozenset(st.session_state["stockout_skus"])
+        )
         try:
             result = run_pipeline(
                 _pipeline_session(intake),
@@ -865,58 +1440,83 @@ def _render_working(st: Any) -> None:
 
 def _render_approval(st: Any) -> None:
     result: PipelineResult | None = st.session_state["result"]
+    intake = st.session_state["intake"]
     if result is None:
         st.session_state["screen"] = "working"
         st.rerun()
-    interrupts = _all_interrupts(result.approval_batch)
+    if intake is None:
+        st.session_state["screen"] = "intake"
+        st.rerun()
+    child_labels = {
+        child["child_id"]: child["label"]
+        for child in intake["children"]
+    }
+    stores = tuple(load_stores())
+    offers = _active_catalog_offers(
+        frozenset(st.session_state["stockout_skus"])
+    )
+    presentations = build_approval_presentations(
+        result,
+        offers,
+        stores,
+        child_labels,
+    )
     st.header("Review the decisions")
     st.write(
         "Everything needing your input is collected here. "
         "The recommended choice appears first."
     )
-    selections: dict[str, Any] = {}
-    for index, interrupt in enumerate(interrupts):
+    selections: dict[str, ApprovalDisplayOption] = {}
+    for index, presentation in enumerate(presentations):
+        interrupt = presentation.interrupt
         with st.container(border=True):
-            st.subheader(
-                f"{index + 1}. {interrupt.kind.replace('_', ' ').title()}"
+            st.subheader(f"{index + 1}. {presentation.heading}")
+            st.caption(
+                "Affects: "
+                f"{_join_names(presentation.affected_children)}"
             )
-            st.write(interrupt.message)
-            st.info(f"Recommendation: {interrupt.recommendation}")
-            alternatives = interrupt.alternatives
+            st.write(presentation.message)
+            st.info(
+                f"Recommendation: {presentation.recommendation}"
+            )
             existing = st.session_state["approval_outcomes"].get(
                 interrupt.interrupt_id
             )
             default_index = next(
                 (
                     alternative_index
-                    for alternative_index, alternative in enumerate(
-                        alternatives
+                    for alternative_index, option in enumerate(
+                        presentation.options
                     )
-                    if alternative.alternative_id == existing
+                    if option.alternative_id == existing
                 ),
                 0,
             )
             selections[interrupt.interrupt_id] = st.radio(
                 "Choose one",
-                alternatives,
+                presentation.options,
                 index=default_index,
-                format_func=lambda alternative: (
-                    f"{alternative.label} "
-                    f"({format_cost_delta(alternative.cost_delta_cents)})"
+                format_func=lambda option: (
+                    f"{option.label} "
+                    f"({format_cost_delta(option.cost_delta_cents)})"
                 ),
                 key=f"approval_{interrupt.interrupt_id}",
             )
+            for option in presentation.options:
+                if option.explanation:
+                    st.caption(f"{option.label}: {option.explanation}")
     if st.button("Save decisions and continue", type="primary"):
         outcomes = dict(st.session_state["approval_outcomes"])
         response_log = DecisionLog(
             f"{result.session.session_id}-parent"
         )
-        for interrupt in interrupts:
+        for presentation in presentations:
+            interrupt = presentation.interrupt
             alternative = selections[interrupt.interrupt_id]
             outcomes[interrupt.interrupt_id] = alternative.alternative_id
             response_log.record_approval_response(
                 (
-                    f"{interrupt.kind.replace('_', ' ')}: "
+                    f"{presentation.heading}: "
                     f"{alternative.label} "
                     f"({format_cost_delta(alternative.cost_delta_cents)})."
                 ),
@@ -967,6 +1567,7 @@ def _render_cost_summary(
 def _render_store_breakdown(
     st: Any,
     optimization: OptimizationResult,
+    matches: MatchResult,
     stores: Sequence[Store],
     child_labels: Mapping[str, str],
 ) -> None:
@@ -991,8 +1592,7 @@ def _render_store_breakdown(
                     )
                     rows.append(
                         {
-                            "Item": line.canonical_item.replace("_", " ").title(),
-                            "SKU": line.sku,
+                            "Product": _product_name(line, matches),
                             "Packs": line.packs_purchased,
                             "Needed": line.units_needed,
                             "Bought": line.units_purchased,
@@ -1045,8 +1645,10 @@ def _render_substitutions(
     st: Any,
     optimization: OptimizationResult,
     matches: MatchResult,
+    stores: Sequence[Store],
 ) -> None:
     st.subheader("Substitutions and package choices")
+    stores_by_id = {store.store_id: store for store in stores}
     rows = []
     for plan in _plans(optimization):
         for line in plan.lines:
@@ -1061,12 +1663,24 @@ def _render_substitutions(
                 if candidate is not None
                 else ()
             )
+            store = stores_by_id.get(line.store_id)
             rows.append(
                 {
-                    "Item": line.canonical_item.replace("_", " ").title(),
-                    "SKU": line.sku,
-                    "Severity": line.substitution_type,
-                    "Reason": ", ".join(reasons) or "package-size overage",
+                    "Product": _product_name(line, matches),
+                    "Store": (
+                        store.name if store is not None else "Unknown store"
+                    ),
+                    "Review": SUBSTITUTION_SEVERITY_LABELS.get(
+                        line.substitution_type,
+                        "Package choice",
+                    ),
+                    "Reason": (
+                        "; ".join(
+                            _substitution_reason(reason)
+                            for reason in reasons
+                        )
+                        or "Package-size overage"
+                    ),
                 }
             )
     if rows:
@@ -1131,28 +1745,33 @@ def _render_addons(st: Any, result: PipelineResult) -> None:
     )
 
 
-def _render_approvals_summary(st: Any, result: PipelineResult) -> None:
+def _render_approvals_summary(
+    st: Any,
+    presentations: Sequence[ApprovalDisplayDecision],
+) -> None:
     st.subheader("Approval outcomes")
     outcomes = st.session_state["approval_outcomes"]
-    interrupts = _all_interrupts(result.approval_batch)
-    if not interrupts:
+    if not presentations:
         st.write("No approvals were required.")
         return
     rows = []
-    for interrupt in interrupts:
+    for presentation in presentations:
+        interrupt = presentation.interrupt
         selected_id = outcomes.get(interrupt.interrupt_id)
         alternative = next(
             (
                 option
-                for option in interrupt.alternatives
+                for option in presentation.options
                 if option.alternative_id == selected_id
             ),
             None,
         )
         rows.append(
             {
-                "Decision": interrupt.kind.replace("_", " ").title(),
-                "Issue": interrupt.message,
+                "Decision": presentation.heading,
+                "Affects": _join_names(
+                    presentation.affected_children
+                ),
                 "Outcome": (
                     alternative.label if alternative else "Pending"
                 ),
@@ -1162,21 +1781,22 @@ def _render_approvals_summary(st: Any, result: PipelineResult) -> None:
 
 
 def _approval_outcome_labels(
-    result: PipelineResult,
+    presentations: Sequence[ApprovalDisplayDecision],
     outcomes: Mapping[str, str],
 ) -> dict[str, str]:
     labels: dict[str, str] = {}
-    for interrupt in _all_interrupts(result.approval_batch):
+    for presentation in presentations:
+        interrupt = presentation.interrupt
         selected_id = outcomes.get(interrupt.interrupt_id)
         selected = next(
             (
                 alternative
-                for alternative in interrupt.alternatives
+                for alternative in presentation.options
                 if alternative.alternative_id == selected_id
             ),
             None,
         )
-        labels[interrupt.interrupt_id] = (
+        labels[presentation.heading] = (
             selected.label if selected is not None else "Pending"
         )
     return labels
@@ -1193,6 +1813,15 @@ def _render_summary(st: Any) -> None:
         child["child_id"]: child["label"] for child in children
     }
     stores = tuple(load_stores())
+    offers = _active_catalog_offers(
+        frozenset(st.session_state["stockout_skus"])
+    )
+    approval_presentations = build_approval_presentations(
+        result,
+        offers,
+        stores,
+        child_labels,
+    )
     st.header("Your proposed shopping plan")
     if result.extraction_failures:
         st.warning(
@@ -1205,15 +1834,21 @@ def _render_summary(st: Any) -> None:
     _render_addons(st, result)
     optimization, matches = _effective_cart(st, result)
     _render_cost_summary(st, optimization, int(intake["budget_total"]))
-    _render_store_breakdown(st, optimization, stores, child_labels)
+    _render_store_breakdown(
+        st,
+        optimization,
+        matches,
+        stores,
+        child_labels,
+    )
     _render_per_child(
         st,
         optimization,
         children,
         intake["budget_allocations"],
     )
-    _render_substitutions(st, optimization, matches)
-    _render_approvals_summary(st, result)
+    _render_substitutions(st, optimization, matches, stores)
+    _render_approvals_summary(st, approval_presentations)
 
     display_only = result.normalization.display_only_requirements
     if display_only:
@@ -1234,7 +1869,11 @@ def _render_summary(st: Any) -> None:
                     ),
                     "Actor": decision.actor.title(),
                     "Type": decision.type.replace("_", " ").title(),
-                    "Rationale": decision.rationale,
+                    "Rationale": _humanize_internal_text(
+                        decision.rationale,
+                        offers,
+                        stores,
+                    ),
                 }
                 for decision in _decision_log(result, parent_decisions)
             ]
@@ -1247,7 +1886,7 @@ def _render_summary(st: Any) -> None:
         stores,
         child_labels,
         _approval_outcome_labels(
-            result,
+            approval_presentations,
             st.session_state["approval_outcomes"],
         ),
         parent_decisions,
@@ -1268,8 +1907,13 @@ def _render_summary(st: Any) -> None:
             )
         )
         stockout_sku = st.selectbox(
-            "Mark one selected SKU out of stock",
+            "Mark one selected product out of stock",
             selected_skus,
+            format_func=lambda sku: _catalog_product_label(
+                sku,
+                offers,
+                stores,
+            ),
         )
         if st.button("Inject stockout and rebuild"):
             st.session_state["stockout_skus"] = (
