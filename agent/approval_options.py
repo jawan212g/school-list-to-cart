@@ -43,6 +43,20 @@ class RemovalCostContext:
     fee_threshold_cents: int | None
 
 
+@dataclass(frozen=True)
+class RequiredItemRemovalChoice:
+    """One parent-authorized required-item omission priced as a full cart."""
+
+    canonical_item: str
+    source_requirement_ids: tuple[str, ...]
+    affected_line_ids: tuple[str, ...]
+    allocated_to: Mapping[str, int]
+    cost_delta_cents: int
+    item_subtotal_delta_cents: int
+    tax_delta_cents: int
+    fulfillment_fee_delta_cents: int
+
+
 def _plans(
     optimization: OptimizationResult,
 ) -> tuple[CartPlan, ...]:
@@ -169,6 +183,79 @@ def build_catalog_approval_choices(
                 not choice.is_current,
                 choice.cost_delta_cents,
                 choice.sku,
+            ),
+        )
+    )
+
+
+def build_required_item_removal_choices(
+    optimization: OptimizationResult,
+    matches: MatchResult,
+    unit_needs: Sequence[UnitNeed],
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    config: OptimizationConfig,
+) -> tuple[RequiredItemRemovalChoice, ...]:
+    """Price each parent-authorized required-item omission (BR-04, FR-28)."""
+
+    baseline_item, baseline_tax, baseline_fees = _cost_components(
+        optimization
+    )
+    lines_by_need: dict[tuple[str, ...], list[CartLine]] = {}
+    for line in _selected_lines(optimization):
+        lines_by_need.setdefault(
+            line.source_requirement_ids,
+            [],
+        ).append(line)
+
+    choices: list[RequiredItemRemovalChoice] = []
+    for need in unit_needs:
+        affected_lines = tuple(
+            lines_by_need.get(need.source_requirement_ids, ())
+        )
+        if not affected_lines:
+            continue
+        remaining_needs = tuple(
+            candidate
+            for candidate in unit_needs
+            if (
+                candidate.source_requirement_ids
+                != need.source_requirement_ids
+            )
+        )
+        alternative = optimize_cart(
+            remaining_needs,
+            offers,
+            stores,
+            config,
+            candidate_skus_by_need=matches.candidate_skus_by_need,
+        )
+        item_subtotal, tax, fees = _cost_components(alternative)
+        choices.append(
+            RequiredItemRemovalChoice(
+                canonical_item=need.canonical_item,
+                source_requirement_ids=need.source_requirement_ids,
+                affected_line_ids=tuple(
+                    line.line_id for line in affected_lines
+                ),
+                allocated_to=need.allocated_to,
+                cost_delta_cents=(
+                    alternative.landed_cost - optimization.landed_cost
+                ),
+                item_subtotal_delta_cents=(
+                    item_subtotal - baseline_item
+                ),
+                tax_delta_cents=tax - baseline_tax,
+                fulfillment_fee_delta_cents=fees - baseline_fees,
+            )
+        )
+    return tuple(
+        sorted(
+            choices,
+            key=lambda choice: (
+                choice.cost_delta_cents,
+                choice.canonical_item,
+                choice.source_requirement_ids,
             ),
         )
     )

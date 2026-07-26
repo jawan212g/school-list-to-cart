@@ -18,6 +18,7 @@ from agent.approval_options import (
     CatalogApprovalChoice,
     RemovalCostContext,
     build_catalog_approval_choices,
+    build_required_item_removal_choices,
     removal_cost_context,
 )
 from agent.decisions import Decision, DecisionLog
@@ -172,8 +173,12 @@ class ApprovalDisplayOption:
     explanation: str | None = None
     sku: str | None = None
     source_requirement_ids: tuple[str, ...] = ()
+    affected_lines: tuple[str, ...] = ()
+    affected_children: tuple[str, ...] = ()
+    item_name: str | None = None
     is_current_product: bool = False
     leaves_required_unmet: bool = False
+    is_recommended: bool = False
 
 
 @dataclass(frozen=True)
@@ -198,6 +203,16 @@ class ListIdentityWarning:
     stated_grades: tuple[str, ...]
     stated_teachers: tuple[str, ...]
     message: str
+
+
+@dataclass(frozen=True)
+class SelfSourcedSelection:
+    """One required item the parent chose to obtain outside this cart."""
+
+    presentation: ApprovalDisplayDecision
+    option: ApprovalDisplayOption
+    item_name: str
+    affected_children: tuple[str, ...]
 
 
 def money_to_cents(value: str) -> int:
@@ -714,13 +729,18 @@ def _affected_children(
     if not affected_ids:
         requirement_ids = frozenset(interrupt.source_requirement_ids)
         for need in result.purchase_needs:
-            if not requirement_ids.intersection(
-                need.source_requirement_ids
+            if (
+                requirement_ids
+                and not requirement_ids.intersection(
+                    need.source_requirement_ids
+                )
             ):
                 continue
             for child_id in need.allocated_to:
                 if child_id not in affected_ids:
                     affected_ids.append(child_id)
+    if not affected_ids:
+        affected_ids.extend(result.session.children)
     return tuple(
         _child_display_label(child_id, child_labels)
         for child_id in affected_ids
@@ -799,25 +819,39 @@ def _catalog_choice_explanation(
 ) -> str | None:
     if choice.is_current:
         return None
+    return _landed_delta_explanation(
+        choice.cost_delta_cents,
+        choice.item_subtotal_delta_cents,
+        choice.tax_delta_cents,
+        choice.fulfillment_fee_delta_cents,
+    )
+
+
+def _landed_delta_explanation(
+    cost_delta_cents: int,
+    item_subtotal_delta_cents: int,
+    tax_delta_cents: int,
+    fulfillment_fee_delta_cents: int,
+) -> str:
     components = tuple(
         component
         for component in (
             _short_cost_component(
                 "item",
-                choice.item_subtotal_delta_cents,
+                item_subtotal_delta_cents,
             ),
-            _short_cost_component("tax", choice.tax_delta_cents),
+            _short_cost_component("tax", tax_delta_cents),
             _short_cost_component(
                 "fees",
-                choice.fulfillment_fee_delta_cents,
+                fulfillment_fee_delta_cents,
             ),
         )
         if component is not None
     )
-    direction = "Adds" if choice.cost_delta_cents > 0 else "Saves"
+    direction = "Adds" if cost_delta_cents > 0 else "Saves"
     detail = f" ({', '.join(components)})" if components else ""
     return (
-        f"{direction} {format_money(abs(choice.cost_delta_cents))} "
+        f"{direction} {format_money(abs(cost_delta_cents))} "
         f"landed{detail}"
     )
 
@@ -879,12 +913,241 @@ def _fallback_option_label(
     return original_label
 
 
+def _with_one_recommended_option(
+    options: Sequence[ApprovalDisplayOption],
+) -> tuple[ApprovalDisplayOption, ...]:
+    """Mark exactly one non-removal choice as the recommendation."""
+
+    if not options:
+        return ()
+    covered_indices = tuple(
+        index
+        for index, option in enumerate(options)
+        if not option.leaves_required_unmet
+    )
+    if not covered_indices:
+        raise ValueError(
+            "Every approval decision needs a covered or pending recommendation"
+        )
+    recommended_index = next(
+        (
+            index
+            for index, option in enumerate(options)
+            if option.is_recommended and not option.leaves_required_unmet
+        ),
+        covered_indices[0],
+    )
+    return tuple(
+        replace(
+            option,
+            is_recommended=(index == recommended_index),
+        )
+        for index, option in enumerate(options)
+    )
+
+
+def _budget_approval_content(
+    result: PipelineResult,
+    interrupt: ApprovalInterrupt,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    child_labels: Mapping[str, str],
+) -> tuple[str, tuple[ApprovalDisplayOption, ...]]:
+    """Build item-specific BR-04 evidence and actionable budget choices."""
+
+    optimization = result.proposed_cart
+    config = _optimization_config(result)
+    offers_by_sku = {offer.sku: offer for offer in offers}
+    stores_by_id = {store.store_id: store for store in stores}
+    lines_by_id = {
+        line.line_id: line
+        for plan in _plans(optimization)
+        for line in plan.lines
+    }
+    removal_choices = build_required_item_removal_choices(
+        optimization,
+        result.matches,
+        result.purchase_needs,
+        offers,
+        stores,
+        config,
+    )
+    affected_child_ids = tuple(
+        dict.fromkeys(
+            child_id
+            for removal in removal_choices
+            for child_id in removal.allocated_to
+        )
+    ) or result.session.children
+    all_children = tuple(
+        _child_display_label(child_id, child_labels)
+        for child_id in affected_child_ids
+    )
+    options: list[ApprovalDisplayOption] = [
+        ApprovalDisplayOption(
+            alternative_id=f"{interrupt.interrupt_id}-raise",
+            label=(
+                "Raise the budget by "
+                f"{format_money(optimization.shortfall_cents)}"
+            ),
+            cost_delta_cents=0,
+            explanation=(
+                "Keeps every required item covered at the minimum achievable "
+                f"landed cost of {format_money(optimization.landed_cost)}."
+            ),
+            affected_children=all_children,
+            is_recommended=True,
+        )
+    ]
+    ranked_lines: list[str] = []
+    substitution_options: list[ApprovalDisplayOption] = []
+    self_source_options: list[ApprovalDisplayOption] = []
+    for rank, removal in enumerate(removal_choices, start=1):
+        line = next(
+            (
+                lines_by_id[line_id]
+                for line_id in removal.affected_line_ids
+                if line_id in lines_by_id
+            ),
+            None,
+        )
+        if line is None:
+            continue
+        item_name = _item_display_name(removal.canonical_item)
+        affected_children = tuple(
+            _child_display_label(child_id, child_labels)
+            for child_id in removal.allocated_to
+        )
+        line_interrupt = replace(
+            interrupt,
+            affected_lines=removal.affected_line_ids,
+            source_requirement_ids=removal.source_requirement_ids,
+            sku=line.sku,
+        )
+        cheaper_choices = tuple(
+            choice
+            for choice in build_catalog_approval_choices(
+                line_interrupt,
+                optimization,
+                result.matches,
+                result.purchase_needs,
+                offers,
+                stores,
+                config,
+            )
+            if not choice.is_current and choice.cost_delta_cents < 0
+        )
+        cheaper_descriptions = []
+        for choice in cheaper_choices:
+            offer = offers_by_sku[choice.sku]
+            store = stores_by_id.get(choice.store_id)
+            store_name = store.name if store is not None else "Unknown store"
+            cheaper_descriptions.append(
+                (
+                    f"{offer.title} from {store_name}, saving "
+                    f"{format_money(abs(choice.cost_delta_cents))} landed"
+                )
+            )
+            substitution_options.append(
+                ApprovalDisplayOption(
+                    alternative_id=(
+                        f"{interrupt.interrupt_id}-item-{rank}-catalog-"
+                        f"{choice.sku}"
+                    ),
+                    label=(
+                        f"Switch {item_name} for "
+                        f"{_join_names(affected_children)} to "
+                        f"{offer.title} — {store_name}"
+                    ),
+                    cost_delta_cents=choice.cost_delta_cents,
+                    explanation=_catalog_choice_explanation(choice),
+                    sku=choice.sku,
+                    source_requirement_ids=(
+                        removal.source_requirement_ids
+                    ),
+                    affected_lines=removal.affected_line_ids,
+                    affected_children=affected_children,
+                    item_name=item_name,
+                )
+            )
+        cheaper_text = (
+            "; ".join(cheaper_descriptions)
+            if cheaper_descriptions
+            else "none available"
+        )
+        contribution = abs(min(removal.cost_delta_cents, 0))
+        ranked_lines.append(
+            (
+                f"{rank}. {item_name} for "
+                f"{_join_names(affected_children)} — "
+                f"{format_money(contribution)} marginal landed "
+                "contribution. Cheaper catalog alternatives: "
+                f"{cheaper_text}."
+            )
+        )
+        self_source_options.append(
+            ApprovalDisplayOption(
+                alternative_id=(
+                    f"{interrupt.interrupt_id}-item-{rank}-self-source"
+                ),
+                label=(
+                    f"Do not buy {item_name} for "
+                    f"{_join_names(affected_children)} — "
+                    "I will source it myself "
+                    "(leaves a required item unmet)"
+                ),
+                cost_delta_cents=removal.cost_delta_cents,
+                explanation=_landed_delta_explanation(
+                    removal.cost_delta_cents,
+                    removal.item_subtotal_delta_cents,
+                    removal.tax_delta_cents,
+                    removal.fulfillment_fee_delta_cents,
+                ),
+                source_requirement_ids=removal.source_requirement_ids,
+                affected_lines=removal.affected_line_ids,
+                affected_children=affected_children,
+                item_name=item_name,
+                leaves_required_unmet=True,
+            )
+        )
+    message_lines = [
+        (
+            "Minimum achievable landed cost: "
+            f"{format_money(optimization.landed_cost)}."
+        ),
+        (
+            f"Entered budget: {format_money(result.session.budget_total or 0)}. "
+            f"Shortfall: {format_money(optimization.shortfall_cents)}."
+        ),
+        "",
+        "Required lines ranked by marginal landed contribution:",
+        *ranked_lines,
+    ]
+    options.extend(substitution_options)
+    options.extend(self_source_options)
+    return (
+        "\n".join(message_lines),
+        _with_one_recommended_option(options),
+    )
+
+
 def _approval_options(
     result: PipelineResult,
     interrupt: ApprovalInterrupt,
     offers: Sequence[Offer],
     stores: Sequence[Store],
+    child_labels: Mapping[str, str],
 ) -> tuple[ApprovalDisplayOption, ...]:
+    if interrupt.kind == "budget_exceeded":
+        _, options = _budget_approval_content(
+            result,
+            interrupt,
+            offers,
+            stores,
+            child_labels,
+        )
+        return options
+
     line = _interrupt_line(result, interrupt)
     item_name = (
         _item_display_name(line.canonical_item)
@@ -919,7 +1182,9 @@ def _approval_options(
                     explanation=_catalog_choice_explanation(choice),
                     sku=choice.sku,
                     source_requirement_ids=line.source_requirement_ids,
+                    affected_lines=(line.line_id,),
                     is_current_product=choice.is_current,
+                    is_recommended=choice.is_current,
                 )
             )
         should_offer_self_source = (
@@ -927,7 +1192,7 @@ def _approval_options(
             or len(catalog_choices) <= 1
         )
         if not should_offer_self_source:
-            return tuple(options)
+            return _with_one_recommended_option(options)
 
         removal = next(
             (
@@ -969,10 +1234,11 @@ def _approval_options(
                         )
                     ),
                     source_requirement_ids=line.source_requirement_ids,
+                    affected_lines=(line.line_id,),
                     leaves_required_unmet=True,
                 )
             )
-        return tuple(options)
+        return _with_one_recommended_option(options)
 
     fallback_options = tuple(
         ApprovalDisplayOption(
@@ -986,21 +1252,24 @@ def _approval_options(
             ),
             cost_delta_cents=alternative.cost_delta_cents,
             source_requirement_ids=interrupt.source_requirement_ids,
+            affected_lines=interrupt.affected_lines,
             leaves_required_unmet=(
                 bool(interrupt.source_requirement_ids)
                 and alternative.alternative_id.endswith(
                     ("-omit", "-parent-remove")
                 )
             ),
+            is_recommended=(index == 0),
         )
-        for alternative in interrupt.alternatives
+        for index, alternative in enumerate(interrupt.alternatives)
     )
-    return tuple(
+    ordered = tuple(
         sorted(
             fallback_options,
             key=lambda option: option.leaves_required_unmet,
         )
     )
+    return _with_one_recommended_option(ordered)
 
 
 def _approval_heading(
@@ -1079,7 +1348,15 @@ def _approval_recommendation(
     line: CartLine | None,
     options: Sequence[ApprovalDisplayOption],
 ) -> str:
-    recommended = options[0].label if options else "Leave this decision pending"
+    recommended_option = next(
+        (option for option in options if option.is_recommended),
+        None,
+    )
+    recommended = (
+        recommended_option.label
+        if recommended_option is not None
+        else "Leave this decision pending"
+    )
     if interrupt.kind == "non_returnable_threshold":
         return (
             f"{recommended}, but only after confirming that the exact product "
@@ -1115,19 +1392,35 @@ def build_approval_presentations(
             if line is not None
             else "Required item"
         )
-        options = _approval_options(result, interrupt, offers, stores)
+        if interrupt.kind == "budget_exceeded":
+            message, options = _budget_approval_content(
+                result,
+                interrupt,
+                offers,
+                stores,
+                child_labels,
+            )
+        else:
+            options = _approval_options(
+                result,
+                interrupt,
+                offers,
+                stores,
+                child_labels,
+            )
+            message = _approval_message(
+                result,
+                interrupt,
+                line,
+                offers_by_sku,
+                stores_by_id,
+            )
         presentations.append(
             ApprovalDisplayDecision(
                 interrupt=interrupt,
                 item_name=item_name,
                 heading=_approval_heading(result, interrupt, line),
-                message=_approval_message(
-                    result,
-                    interrupt,
-                    line,
-                    offers_by_sku,
-                    stores_by_id,
-                ),
+                message=message,
                 recommendation=_approval_recommendation(
                     result,
                     interrupt,
@@ -1148,9 +1441,8 @@ def build_approval_presentations(
 def approval_option_label(option: ApprovalDisplayOption) -> str:
     """Render one concise radio label safely."""
 
-    separator = "────────  \n" if option.leaves_required_unmet else ""
     return escape_streamlit_dollars(
-        f"{separator}{option.label} "
+        f"{option.label} "
         f"({format_streamlit_cost_delta(option.cost_delta_cents)})"
     )
 
@@ -1158,13 +1450,33 @@ def approval_option_label(option: ApprovalDisplayOption) -> str:
 def approval_option_caption(option: ApprovalDisplayOption) -> str:
     """Attach explanatory text to the corresponding radio option."""
 
-    explanation = option.explanation or "Current recommended product."
+    parts = []
+    if option.is_recommended:
+        parts.append("Recommended.")
     if option.leaves_required_unmet:
-        explanation = (
-            "Source-it-yourself choice — required item remains unmet. "
-            + explanation
+        parts.append(
+            "Source-it-yourself choice — required item remains unmet."
         )
-    return escape_streamlit_dollars(explanation)
+    if option.explanation:
+        parts.append(option.explanation)
+    if not parts:
+        parts.append("Alternative.")
+    return escape_streamlit_dollars(" ".join(parts))
+
+
+def approval_default_index(
+    options: Sequence[ApprovalDisplayOption],
+) -> int:
+    """Default every interrupt to its sole recommended, covered choice."""
+
+    return next(
+        (
+            index
+            for index, option in enumerate(options)
+            if option.is_recommended and not option.leaves_required_unmet
+        ),
+        0,
+    )
 
 
 def _selected_approval_options(
@@ -1193,15 +1505,30 @@ def _selected_approval_options(
 def _self_sourced_decisions(
     presentations: Sequence[ApprovalDisplayDecision],
     outcomes: Mapping[str, str],
-) -> tuple[ApprovalDisplayDecision, ...]:
-    return tuple(
-        presentation
-        for presentation, option in _selected_approval_options(
-            presentations,
-            outcomes,
+) -> tuple[SelfSourcedSelection, ...]:
+    selections = []
+    seen_requirement_ids: set[tuple[str, ...]] = set()
+    for presentation, option in _selected_approval_options(
+        presentations,
+        outcomes,
+    ):
+        if not option.leaves_required_unmet:
+            continue
+        if option.source_requirement_ids in seen_requirement_ids:
+            continue
+        seen_requirement_ids.add(option.source_requirement_ids)
+        selections.append(
+            SelfSourcedSelection(
+                presentation=presentation,
+                option=option,
+                item_name=option.item_name or presentation.item_name,
+                affected_children=(
+                    option.affected_children
+                    or presentation.affected_children
+                ),
+            )
         )
-        if option.leaves_required_unmet
-    )
+    return tuple(selections)
 
 
 def _apply_approval_outcomes(
@@ -1273,7 +1600,7 @@ def build_text_summary(
     stores: Sequence[Store],
     child_labels: Mapping[str, str],
     approval_outcomes: Mapping[str, str],
-    self_sourced_decisions: Sequence[ApprovalDisplayDecision],
+    self_sourced_decisions: Sequence[SelfSourcedSelection],
     parent_decisions: Sequence[Decision],
 ) -> str:
     """Build the manual-shopping export artifact (FR-34, FR-36)."""
@@ -1283,6 +1610,20 @@ def build_text_summary(
     item_subtotal, tax, fees = _combined_costs(optimization)
     lines = [
         "SCHOOL SUPPLY CART",
+    ]
+    if result.session.budget_total is not None:
+        variance = result.session.budget_total - optimization.landed_cost
+        lines.append(
+            (
+                f"BUDGET REMAINING: {format_money(variance)}"
+                if variance >= 0
+                else (
+                    "BUDGET SHORTFALL: "
+                    f"{format_money(abs(variance))}"
+                )
+            )
+        )
+    lines.extend([
         "Simulated catalog; fictional stores; no payment was collected.",
         "",
         f"ITEM SUBTOTAL: {format_money(item_subtotal)}",
@@ -1290,7 +1631,7 @@ def build_text_summary(
         f"FULFILLMENT FEES: {format_money(fees)}",
         f"LANDED COST: {format_money(optimization.landed_cost)}",
         "",
-    ]
+    ])
     if self_sourced_decisions:
         lines.extend(
             [
@@ -1304,11 +1645,11 @@ def build_text_summary(
         )
         lines.extend(
             (
-                f"  {decision.item_name} | "
-                f"{_join_names(decision.affected_children)} | "
+                f"  {selection.item_name} | "
+                f"{_join_names(selection.affected_children)} | "
                 "UNFULFILLED BY PARENT CHOICE"
             )
-            for decision in self_sourced_decisions
+            for selection in self_sourced_decisions
         )
         lines.append("")
     else:
@@ -2123,23 +2464,12 @@ def _render_approval(st: Any) -> None:
                         f"Recommendation: {presentation.recommendation}"
                     )
                 )
-                existing = st.session_state["approval_outcomes"].get(
-                    interrupt.interrupt_id
-                )
-                default_index = next(
-                    (
-                        alternative_index
-                        for alternative_index, option in enumerate(
-                            presentation.options
-                        )
-                        if option.alternative_id == existing
-                    ),
-                    0,
-                )
                 selections[interrupt.interrupt_id] = st.radio(
                     "Choose one",
                     presentation.options,
-                    index=default_index,
+                    index=approval_default_index(
+                        presentation.options
+                    ),
                     format_func=approval_option_label,
                     captions=tuple(
                         approval_option_caption(option)
@@ -2167,7 +2497,10 @@ def _render_approval(st: Any) -> None:
                     f"{alternative.label} "
                     f"({format_cost_delta(alternative.cost_delta_cents)})."
                 ),
-                affected_lines=interrupt.affected_lines,
+                affected_lines=(
+                    alternative.affected_lines
+                    or interrupt.affected_lines
+                ),
             )
         st.session_state["approval_outcomes"] = outcomes
         st.session_state["parent_decisions"] = (
@@ -2217,7 +2550,6 @@ def _effective_cart(
 def _render_cost_summary(
     st: Any,
     optimization: OptimizationResult,
-    budget_cents: int,
 ) -> None:
     item_subtotal, tax, fees = _combined_costs(optimization)
     columns = st.columns(4)
@@ -2234,6 +2566,15 @@ def _render_cost_summary(
         "Landed cost",
         format_streamlit_money(optimization.landed_cost),
     )
+
+
+def _render_budget_status(
+    st: Any,
+    optimization: OptimizationResult,
+    budget_cents: int,
+) -> None:
+    """Lead the summary with the effective landed-cost budget status."""
+
     variance = budget_cents - optimization.landed_cost
     if variance >= 0:
         st.success(
@@ -2392,13 +2733,10 @@ def _render_addons(
     child_labels: Mapping[str, str],
 ) -> None:
     proposal = result.addon_proposal
-    st.subheader("Optional classroom add-ons")
-    if not proposal.items:
-        st.write("No donation or optional items were found.")
-        return
     if not proposal.eligible:
-        st.caption(escape_streamlit_dollars(proposal.reason))
+        st.session_state["include_addons"] = False
         return
+    st.subheader("Optional classroom add-ons")
     st.success(
         "The required-item cart is at or below 90% of the budget, so these "
         "wish-list items can be considered."
@@ -2478,7 +2816,12 @@ def _render_approvals_summary(
             {
                 "Decision": presentation.heading,
                 "Affects": _join_names(
-                    presentation.affected_children
+                    (
+                        alternative.affected_children
+                        if alternative is not None
+                        and alternative.affected_children
+                        else presentation.affected_children
+                    )
                 ),
                 "Outcome": (
                     alternative.label if alternative else "Pending"
@@ -2490,9 +2833,9 @@ def _render_approvals_summary(
 
 def _render_self_sourced_items(
     st: Any,
-    decisions: Sequence[ApprovalDisplayDecision],
+    selections: Sequence[SelfSourcedSelection],
 ) -> None:
-    if not decisions:
+    if not selections:
         return
     st.subheader("Items you chose to source yourself")
     st.warning(
@@ -2502,14 +2845,14 @@ def _render_self_sourced_items(
     st.table(
         escape_streamlit_data([
             {
-                "Required item": decision.item_name,
-                "For": _join_names(decision.affected_children),
+                "Required item": selection.item_name,
+                "For": _join_names(selection.affected_children),
                 "Status": (
                     "Unfulfilled by parent choice — you will source this "
                     "item separately"
                 ),
             }
-            for decision in decisions
+            for selection in selections
         ])
     )
 
@@ -2560,7 +2903,19 @@ def _render_summary(st: Any) -> None:
         approval_presentations,
         st.session_state["approval_outcomes"],
     )
+    optimization, matches = _effective_cart(
+        st,
+        result,
+        approval_presentations,
+        offers,
+        stores,
+    )
     st.header("Your proposed shopping plan")
+    _render_budget_status(
+        st,
+        optimization,
+        int(intake["budget_total"]),
+    )
     if result.extraction_failures:
         st.warning(
             "The cart was built from the lists that succeeded. "
@@ -2574,16 +2929,9 @@ def _render_summary(st: Any) -> None:
                 )
             )
 
-    _render_addons(st, result, child_labels)
-    optimization, matches = _effective_cart(
-        st,
-        result,
-        approval_presentations,
-        offers,
-        stores,
-    )
     _render_self_sourced_items(st, self_sourced_decisions)
-    _render_cost_summary(st, optimization, int(intake["budget_total"]))
+    _render_cost_summary(st, optimization)
+    _render_addons(st, result, child_labels)
     _render_store_breakdown(
         st,
         optimization,
