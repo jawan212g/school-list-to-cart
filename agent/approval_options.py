@@ -15,6 +15,11 @@ from agent.optimize import (
     OptimizationResult,
     optimize_cart,
 )
+from agent.rules import (
+    OVERAGE_ABSOLUTE_UNITS,
+    OVERAGE_PERCENT,
+    PERCENT_DENOMINATOR,
+)
 from data.loader import Offer, Store
 
 
@@ -107,6 +112,26 @@ def _line_for_interrupt(
     )
 
 
+def _offer_within_overage_ceiling(
+    unit_need: UnitNeed,
+    offer: Offer,
+) -> bool:
+    """Apply BR-06 to one forced-SKU approval alternative."""
+
+    packs = (
+        unit_need.quantity + offer.pack_size - 1
+    ) // offer.pack_size
+    purchased_units = packs * offer.pack_size
+    relative_allowance = (
+        unit_need.quantity * OVERAGE_PERCENT // PERCENT_DENOMINATOR
+    )
+    allowed_overage = max(
+        relative_allowance,
+        OVERAGE_ABSOLUTE_UNITS,
+    )
+    return purchased_units <= unit_need.quantity + allowed_overage
+
+
 def build_catalog_approval_choices(
     interrupt: ApprovalInterrupt,
     optimization: OptimizationResult,
@@ -132,6 +157,14 @@ def build_catalog_approval_choices(
     )
     if need_matches is None:
         return ()
+    compliant_skus = frozenset(
+        candidate.offer.sku
+        for candidate in need_matches.candidates
+        if _offer_within_overage_ceiling(
+            need_matches.unit_need,
+            candidate.offer,
+        )
+    )
 
     baseline_item, baseline_tax, baseline_fees = _cost_components(
         optimization
@@ -143,6 +176,8 @@ def build_catalog_approval_choices(
     choices: list[CatalogApprovalChoice] = []
     for candidate in need_matches.candidates:
         offer = candidate.offer
+        if compliant_skus and offer.sku not in compliant_skus:
+            continue
         is_current = offer.sku == line.sku
         if is_current:
             alternative = optimization

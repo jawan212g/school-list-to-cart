@@ -9,7 +9,9 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 import app
+from agent.aggregate import UnitNeed
 from agent.match import StructuredSuitabilityJudge
+from agent.normalize import NormalizationResult, NormalizedRequirement
 from agent.pipeline import ListInput, PipelineResult, PipelineSession, run_pipeline
 from agent.schema import ExtractionEnvelope, Requirement
 from data.loader import Offer, Store
@@ -188,6 +190,97 @@ def test_visible_navigation_uses_three_ready_set_school_phases() -> None:
         "School · decisions to review"
     )
     assert app.screen_phase_label("summary") == "School · your plan"
+
+
+def test_resolved_assumptions_do_not_create_a_needs_attention_heading() -> None:
+    """A complete plan keeps duplicate assumptions in one collapsed detail row."""
+
+    result = _real_pipeline_result("Grade 2")
+    sources = tuple(
+        Requirement(
+            req_id=f"paper-{index}",
+            child_id=child_id,
+            raw_text="1 pack notebook paper",
+            canonical_item="notebook_paper",
+            quantity=1,
+            extraction_confidence=1.0,
+        )
+        for index, child_id in enumerate(
+            ("child-1", "child-2"),
+            start=1,
+        )
+    )
+    normalized = tuple(
+        NormalizedRequirement(
+            source=source,
+            canonical_item="notebook_paper",
+            quantity=150,
+            quantity_is_range=False,
+            quantity_max=None,
+            unit_type="each",
+            attributes={},
+            assumption_flags=("standard_pack_count_assumed:150",),
+            is_cart_eligible=True,
+            is_budget_eligible=True,
+            is_display_only=False,
+            manual_review_required=False,
+            review_deferred=False,
+        )
+        for source in sources
+    )
+    result = replace(
+        result,
+        normalization=NormalizationResult(requirements=normalized),
+        purchase_needs=(
+            UnitNeed(
+                canonical_item="notebook_paper",
+                quantity=300,
+                brand_lock=None,
+                unit_type="each",
+                exclusions=(),
+                is_required=True,
+                attributes={},
+                allocated_to={"child-1": 150, "child-2": 150},
+                source_requirement_ids=tuple(
+                    source.req_id for source in sources
+                ),
+            ),
+        ),
+    )
+
+    assert app._has_genuine_attention(
+        result,
+        result.proposed_cart,
+        result.matches,
+        (),
+    ) is False
+
+    tables: list[tuple[dict[str, str], ...]] = []
+
+    class AssumptionStreamlit:
+        def write(self, value: str) -> None:
+            del value
+
+        def table(self, rows: tuple[dict[str, str], ...]) -> None:
+            tables.append(rows)
+
+    app._render_assumptions_and_notes(
+        AssumptionStreamlit(),
+        result,
+        {"child-1": "Grade 2", "child-2": "Grade 5"},
+    )
+
+    assert tables == [
+        (
+            {
+                "Item": "Notebook paper",
+                "For": "Grade 2 and Grade 5",
+                "Assumption": (
+                    "Assumed a standard package contains 150 units."
+                ),
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "abc", "1.001"])

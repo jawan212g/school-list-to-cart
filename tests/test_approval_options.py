@@ -11,6 +11,10 @@ from agent.approval_options import (
     build_catalog_approval_choices,
     removal_cost_context,
 )
+from agent.budget_plans import (
+    build_budget_analysis,
+    evaluate_budget_actions,
+)
 from agent.decisions import DecisionLog
 from agent.gate import (
     ApprovalAlternative,
@@ -839,6 +843,563 @@ def test_each_non_budget_interrupt_marks_one_safe_recommendation(
         "Recommended." in app.approval_option_caption(option)
         for option in presentation.options
     ) == 1
+
+
+def test_budget_omission_resolves_and_reactivates_headphones_interrupt() -> None:
+    """A current budget omission cannot coexist with a hidden Keep decision."""
+
+    stores = (_store("VALUE", "Value Depot"),)
+    needs = (
+        _need(
+            "headphones",
+            1,
+            {"grade2": 1},
+            {},
+            "grade2:headphones",
+        ),
+        _need(
+            "pencils",
+            1,
+            {"grade2": 1},
+            {},
+            "grade2:pencils",
+        ),
+    )
+    offers = (
+        _offer(
+            "HEADPHONES",
+            "VALUE",
+            "Classroom Headphones",
+            "headphones",
+            1,
+            2_000,
+            is_returnable=False,
+        ),
+        _offer(
+            "PENCILS",
+            "VALUE",
+            "Classroom Pencils",
+            "pencils",
+            1,
+            500,
+        ),
+    )
+    config = OptimizationConfig(
+        shopping_mode="budget",
+        budget_cents=1_000,
+        fulfillment_preference="pickup",
+        tax_basis_points=0,
+    )
+    matches, optimization, batch = _approval_fixture(
+        needs,
+        offers,
+        stores,
+        config,
+    )
+    analysis = build_budget_analysis(
+        optimization,
+        matches,
+        needs,
+        offers,
+        stores,
+        config,
+    )
+    assert analysis is not None
+    result = replace(
+        _pipeline_result(
+            session=PipelineSession(
+                session_id="linked-interrupts",
+                children=("grade2",),
+                budget_total=1_000,
+                fulfillment_pref="pickup",
+                tax_basis_points=0,
+            ),
+            needs=needs,
+            matches=matches,
+            optimization=optimization,
+            batch=batch,
+        ),
+        budget_analysis=analysis,
+    )
+    presentations = app.build_approval_presentations(
+        result,
+        offers,
+        stores,
+        {"grade2": "Grade 2"},
+    )
+    headphones = next(
+        presentation
+        for presentation in presentations
+        if presentation.interrupt.kind == "non_returnable_threshold"
+    )
+    keep = next(
+        option for option in headphones.options if option.is_recommended
+    )
+    omission_id = next(
+        action.action_id
+        for action in analysis.omission_actions
+        if action.canonical_item == "headphones"
+    )
+    requested_outcomes = {
+        headphones.interrupt.interrupt_id: keep.alternative_id
+    }
+    budget_saving, _ = app._evaluate_budget_action_margin(
+        result,
+        (),
+        analysis.actions_by_id[omission_id],
+        offers,
+        stores,
+    )
+    current = app._apply_approval_outcomes(
+        optimization,
+        matches,
+        needs,
+        presentations,
+        requested_outcomes,
+        offers,
+        stores,
+        config,
+        budget_analysis=analysis,
+    )
+    repriced_headphones = app._reprice_approval_presentation(
+        headphones,
+        result,
+        presentations,
+        requested_outcomes,
+        (),
+        current,
+        offers,
+        stores,
+    )
+    headphones_removal = next(
+        option
+        for option in repriced_headphones.options
+        if option.leaves_required_unmet
+    )
+    assert budget_saving == abs(
+        headphones_removal.cost_delta_cents
+    )
+
+    resolved = app.reconcile_interrupt_selections(
+        presentations,
+        analysis,
+        (omission_id,),
+        requested_outcomes,
+        offers,
+    )
+    assert headphones.interrupt.interrupt_id in resolved.resolutions
+    assert headphones.interrupt.interrupt_id not in resolved.active_outcomes
+    assert resolved.resolutions[
+        headphones.interrupt.interrupt_id
+    ].message == (
+        "Resolved by your budget choice — headphones will not be purchased."
+    )
+
+    reactivated = app.reconcile_interrupt_selections(
+        presentations,
+        analysis,
+        (),
+        requested_outcomes,
+        offers,
+    )
+    assert reactivated.resolutions == {}
+    assert reactivated.active_outcomes == requested_outcomes
+
+    submitted = app._apply_approval_outcomes(
+        optimization,
+        matches,
+        needs,
+        presentations,
+        resolved.active_outcomes,
+        offers,
+        stores,
+        config,
+        budget_analysis=analysis,
+        budget_action_ids=(omission_id,),
+    )
+    assert tuple(
+        line.canonical_item for line in submitted.plan.lines
+    ) == ("pencils",)
+    assert app.approval_selection_contradictions(
+        submitted,
+        presentations,
+        resolved.active_outcomes,
+    ) == ()
+    assert app.approval_selection_contradictions(
+        submitted,
+        presentations,
+        requested_outcomes,
+    ) == (headphones.interrupt.interrupt_id,)
+
+
+def test_approval_choices_apply_br06_before_forcing_one_sku() -> None:
+    """BR-06: a forced approval SKU cannot invent an only-option exception."""
+
+    stores = (_store("VALUE", "Value Depot"),)
+    need = _need(
+        "pencils",
+        5,
+        {"grade2": 5},
+        {},
+        "grade2:pencils",
+    )
+    offers = (
+        _offer(
+            "PACK-5",
+            "VALUE",
+            "Five Pencils",
+            "pencils",
+            5,
+            500,
+        ),
+        _offer(
+            "PACK-48",
+            "VALUE",
+            "Forty-Eight Pencils",
+            "pencils",
+            48,
+            100,
+        ),
+    )
+    config = OptimizationConfig(
+        shopping_mode="budget",
+        fulfillment_preference="pickup",
+        tax_basis_points=0,
+    )
+    matches = match_offers((need,), offers, stores)
+    optimization = optimize_cart(
+        (need,),
+        offers,
+        stores,
+        config,
+        candidate_skus_by_need=matches.candidate_skus_by_need,
+    )
+    interrupt = ApprovalInterrupt(
+        interrupt_id="overage-choice",
+        kind="major_substitution",
+        message="Choose",
+        recommendation="Keep",
+        alternatives=(),
+        cost_impact_cents=0,
+        affected_lines=(optimization.plan.lines[0].line_id,),
+        source_requirement_ids=need.source_requirement_ids,
+        sku=optimization.plan.lines[0].sku,
+    )
+
+    choices = build_catalog_approval_choices(
+        interrupt,
+        optimization,
+        matches,
+        (need,),
+        offers,
+        stores,
+        config,
+    )
+    assert tuple(choice.sku for choice in choices) == ("PACK-5",)
+
+    only_large_matches = match_offers(
+        (need,),
+        (offers[1],),
+        stores,
+    )
+    only_large_optimization = optimize_cart(
+        (need,),
+        (offers[1],),
+        stores,
+        config,
+        candidate_skus_by_need=(
+            only_large_matches.candidate_skus_by_need
+        ),
+    )
+    only_large_interrupt = replace(
+        interrupt,
+        affected_lines=(
+            only_large_optimization.plan.lines[0].line_id,
+        ),
+        sku="PACK-48",
+    )
+    only_large_choices = build_catalog_approval_choices(
+        only_large_interrupt,
+        only_large_optimization,
+        only_large_matches,
+        (need,),
+        (offers[1],),
+        stores,
+        config,
+    )
+    assert tuple(choice.sku for choice in only_large_choices) == (
+        "PACK-48",
+    )
+
+    binder_need = _need(
+        "binders",
+        1,
+        {"grade5": 1},
+        {"size": 1.5},
+        "grade5:binders",
+    )
+    binder_offers = (
+        _offer(
+            "BINDER-ONE",
+            "VALUE",
+            "Single Binder",
+            "binders",
+            1,
+            300,
+            attributes={"capacity_inches": 1},
+        ),
+        _offer(
+            "BINDER-FOUR",
+            "VALUE",
+            "Binders, 4 Pack",
+            "binders",
+            4,
+            1_000,
+            attributes={"capacity_inches": 1},
+        ),
+    )
+    binder_matches = match_offers(
+        (binder_need,),
+        binder_offers,
+        stores,
+    )
+    binder_optimization = optimize_cart(
+        (binder_need,),
+        binder_offers,
+        stores,
+        config,
+        candidate_skus_by_need=binder_matches.candidate_skus_by_need,
+    )
+    binder_interrupt = replace(
+        interrupt,
+        affected_lines=(binder_optimization.plan.lines[0].line_id,),
+        source_requirement_ids=binder_need.source_requirement_ids,
+        sku=binder_optimization.plan.lines[0].sku,
+    )
+    binder_choices = build_catalog_approval_choices(
+        binder_interrupt,
+        binder_optimization,
+        binder_matches,
+        (binder_need,),
+        binder_offers,
+        stores,
+        config,
+    )
+    assert tuple(choice.sku for choice in binder_choices) == (
+        "BINDER-ONE",
+        "BINDER-FOUR",
+    )
+
+
+def test_attribute_equivalent_approval_options_collapse_to_cheapest() -> None:
+    """FR-28: one cheapest binder per size stays visible with exact matches."""
+
+    stores = (_store("VALUE", "Value Depot"),)
+    need = _need(
+        "binders",
+        1,
+        {"grade5": 1},
+        {"size": 1.5},
+        "grade5:binders",
+    )
+    offers = (
+        _offer(
+            "EXACT-15",
+            "VALUE",
+            "Exact 1.5-Inch Binder",
+            "binders",
+            1,
+            400,
+            attributes={"capacity_inches": 1.5},
+        ),
+        _offer(
+            "ONE-CHEAP",
+            "VALUE",
+            "Value 1-Inch Binder",
+            "binders",
+            1,
+            240,
+            attributes={"capacity_inches": 1},
+        ),
+        _offer(
+            "ONE-MID",
+            "VALUE",
+            "Mid 1-Inch Binder",
+            "binders",
+            1,
+            349,
+            attributes={"capacity_inches": 1},
+        ),
+        _offer(
+            "ONE-PREMIUM",
+            "VALUE",
+            "Premium 1-Inch Binder",
+            "binders",
+            1,
+            599,
+            attributes={"capacity_inches": 1},
+        ),
+        _offer(
+            "TWO",
+            "VALUE",
+            "Durable 2-Inch Binder",
+            "binders",
+            1,
+            520,
+            attributes={"capacity_inches": 2},
+        ),
+    )
+    config = OptimizationConfig(
+        shopping_mode="budget",
+        fulfillment_preference="pickup",
+        tax_basis_points=0,
+    )
+    matches = match_offers((need,), offers, stores)
+    optimization = optimize_cart(
+        (need,),
+        offers,
+        stores,
+        config,
+        candidate_skus_by_need=matches.candidate_skus_by_need,
+    )
+    interrupt = ApprovalInterrupt(
+        interrupt_id="binder-size",
+        kind="major_substitution",
+        message="Choose a binder size",
+        recommendation="Keep the exact binder",
+        alternatives=(),
+        cost_impact_cents=0,
+        affected_lines=(optimization.plan.lines[0].line_id,),
+        source_requirement_ids=need.source_requirement_ids,
+        sku=optimization.plan.lines[0].sku,
+    )
+    result = _pipeline_result(
+        session=PipelineSession(
+            session_id="group-binders",
+            children=("grade5",),
+            budget_total=10_000,
+        ),
+        needs=(need,),
+        matches=matches,
+        optimization=optimization,
+        batch=ApprovalBatch(
+            interrupts=(interrupt,),
+            raw_interrupt_count=1,
+        ),
+    )
+    presentation = app.build_approval_presentations(
+        result,
+        offers,
+        stores,
+        {"grade5": "Grade 5"},
+    )[0]
+
+    primary, other = app.group_approval_options(
+        result,
+        presentation,
+        offers,
+    )
+    assert tuple(option.sku for option in primary) == (
+        "EXACT-15",
+        "ONE-CHEAP",
+        "TWO",
+    )
+    assert tuple(option.sku for option in other) == (
+        "ONE-MID",
+        "ONE-PREMIUM",
+    )
+
+
+def test_tier_one_strategy_maps_to_its_exact_tier_two_actions() -> None:
+    """The recommended whole plan and its pre-ticked boxes have one result."""
+
+    stores = (_store("VALUE", "Value Depot"),)
+    needs = (
+        _need(
+            "headphones",
+            1,
+            {"grade2": 1},
+            {},
+            "grade2:headphones",
+        ),
+        _need(
+            "pencils",
+            1,
+            {"grade2": 1},
+            {},
+            "grade2:pencils",
+        ),
+    )
+    offers = (
+        _offer(
+            "HEADPHONES",
+            "VALUE",
+            "Headphones",
+            "headphones",
+            1,
+            1_000,
+        ),
+        _offer(
+            "PENCILS",
+            "VALUE",
+            "Pencils",
+            "pencils",
+            1,
+            500,
+        ),
+    )
+    config = OptimizationConfig(
+        shopping_mode="budget",
+        budget_cents=700,
+        fulfillment_preference="pickup",
+        tax_basis_points=0,
+    )
+    matches, optimization, _ = _approval_fixture(
+        needs,
+        offers,
+        stores,
+        config,
+    )
+    analysis = build_budget_analysis(
+        optimization,
+        matches,
+        needs,
+        offers,
+        stores,
+        config,
+    )
+    assert analysis is not None
+    assert analysis.recommended_plan is not None
+    strategy = app.ApprovalDisplayOption(
+        alternative_id=analysis.recommended_plan.plan_id,
+        label="Recommended plan",
+        cost_delta_cents=0,
+        budget_action_ids=analysis.recommended_plan.action_ids,
+    )
+    checkbox_values = app.budget_strategy_checkbox_values(
+        strategy,
+        analysis.actions,
+    )
+    selected_ids = tuple(
+        action.action_id
+        for action in analysis.actions
+        if checkbox_values[action.action_id]
+    )
+    evaluation = evaluate_budget_actions(
+        analysis,
+        selected_ids,
+        optimization,
+        matches,
+        needs,
+        offers,
+        stores,
+        config,
+    )
+
+    assert selected_ids == analysis.recommended_plan.action_ids
+    assert evaluation.landed_cost_cents == (
+        analysis.recommended_plan.resulting_landed_cost_cents
+    )
 
 
 def test_ineligible_addons_render_no_empty_heading() -> None:
