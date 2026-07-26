@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
 from openai import OpenAI
 
+from agent.addons import AddOnProposal, propose_addons
 from agent.aggregate import UnitNeed, aggregate_requirements
 from agent.consolidate import consolidate_selected_skus
 from agent.decisions import Decision, DecisionLog
@@ -73,6 +74,8 @@ class PipelineSession:
     tax_basis_points: int = DEFAULT_TAX_BASIS_POINTS
     created_at: datetime | None = None
     max_stores: int | None = None
+    student_counts: Mapping[str, int] = field(default_factory=dict)
+    budget_allocations: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,8 @@ class PipelineResult:
     approval_batch: ApprovalBatch
     approval_flags: tuple[ApprovalFlag, ...]
     decisions: tuple[Decision, ...]
+    extraction_failures: Mapping[str, str]
+    addon_proposal: AddOnProposal
 
 
 Extractor = Callable[..., ExtractionEnvelope]
@@ -322,6 +327,7 @@ def run_pipeline(
     active_offers = tuple(offers) if offers is not None else tuple(load_catalog())
 
     extractions: dict[str, ExtractionEnvelope] = {}
+    extraction_failures: dict[str, str] = {}
     extracted_requirements = []
     for list_input in lists:
         if list_input.child_id not in session.children:
@@ -332,12 +338,18 @@ def run_pipeline(
             raise ValueError(
                 f"Only one list per child_id is supported: {list_input.child_id}"
             )
-        extraction = extractor(
-            list_input.source,
-            child_id=list_input.child_id,
-            mime_type=list_input.mime_type,
-            client=model_client,
-        )
+        try:
+            extraction = extractor(
+                list_input.source,
+                child_id=list_input.child_id,
+                mime_type=list_input.mime_type,
+                client=model_client,
+            )
+        except Exception as error:
+            extraction_failures[list_input.child_id] = (
+                f"{type(error).__name__}: {error}"
+            )
+            continue
         extraction = extraction.model_copy(
             update={
                 "requirements": tuple(
@@ -356,7 +368,10 @@ def run_pipeline(
         extracted_requirements.extend(extraction.requirements)
 
     normalization = normalize_requirements(extracted_requirements)
-    unit_needs = aggregate_requirements(normalization.budget_requirements)
+    unit_needs = aggregate_requirements(
+        normalization.budget_requirements,
+        student_counts_by_child=session.student_counts,
+    )
     matches = match_offers(
         unit_needs,
         active_offers,
@@ -424,6 +439,16 @@ def run_pipeline(
         ),
         decision_log=decision_log,
     )
+    addon_proposal = propose_addons(
+        normalization,
+        proposed_cart,
+        consolidation.unit_needs,
+        final_matches,
+        active_offers,
+        active_stores,
+        optimization_config,
+        student_counts_by_child=session.student_counts,
+    )
     approval_flags = _approval_flags(approval_batch)
     return PipelineResult(
         session=session,
@@ -436,4 +461,6 @@ def run_pipeline(
         approval_batch=approval_batch,
         approval_flags=approval_flags,
         decisions=decision_log.entries,
+        extraction_failures=extraction_failures,
+        addon_proposal=addon_proposal,
     )

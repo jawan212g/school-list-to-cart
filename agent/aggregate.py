@@ -112,10 +112,13 @@ def _effective_attributes(
 
 def aggregate_requirements(
     requirements: Iterable[Requirement | NormalizedRequirement],
+    *,
+    student_counts_by_child: Mapping[str, int] | None = None,
 ) -> tuple[UnitNeed, ...]:
     """Roll up needs and retain child attribution (FR-14, FR-15, FR-16)."""
 
     grouped: dict[tuple[Any, ...], _NeedAccumulator] = {}
+    student_counts = student_counts_by_child or {}
 
     for item in requirements:
         if isinstance(item, NormalizedRequirement):
@@ -145,6 +148,10 @@ def aggregate_requirements(
             raise ValueError(
                 f"Requirement {requirement.req_id} must have positive quantity"
             )
+        student_count = student_counts.get(requirement.child_id, 1)
+        if student_count <= 0:
+            raise ValueError("Classroom student counts must be positive")
+        quantity *= student_count
 
         normalized_brand = _normalized_brand(requirement.brand_lock)
         normalized_exclusions = _effective_exclusions(

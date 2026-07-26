@@ -111,6 +111,59 @@ def test_catalog_attribute_evidence_and_known_size_gaps() -> None:
     )
 
 
+def test_edited_constraints_retain_satisfying_and_nonmatching_choices() -> None:
+    """Catalog edits must not make large, size, or sharpened checks trivial."""
+
+    stocked = tuple(
+        offer for offer in load_catalog() if offer.stock_qty > 0
+    )
+    glue_sticks = tuple(
+        offer for offer in stocked if offer.category == "glue_sticks"
+    )
+    large_glue = tuple(
+        offer
+        for offer in glue_sticks
+        if offer.attributes.get("size_label") == "large"
+    )
+    small_glue = tuple(
+        offer
+        for offer in glue_sticks
+        if offer.attributes.get("size_label") == "standard"
+    )
+    pencil_boxes = tuple(
+        offer for offer in stocked if offer.category == "pencil_boxes"
+    )
+    ticonderoga = tuple(
+        offer
+        for offer in stocked
+        if offer.category == "pencils"
+        and offer.brand == "Ticonderoga"
+    )
+
+    assert {offer.sku for offer in large_glue}.isdisjoint(
+        offer.sku for offer in small_glue
+    )
+    assert min(offer.pack_price for offer in large_glue) > min(
+        offer.pack_price for offer in small_glue
+    )
+    assert any(
+        offer.attributes.get("length_inches") == 8
+        for offer in pencil_boxes
+    )
+    assert any(
+        offer.attributes.get("length_inches") != 8
+        for offer in pencil_boxes
+    )
+    assert any(
+        offer.attributes.get("pre_sharpened") is True
+        for offer in ticonderoga
+    )
+    assert any(
+        offer.attributes.get("pre_sharpened") is False
+        for offer in ticonderoga
+    )
+
+
 def test_catalog_includes_stockouts_and_high_value_nonreturnable_item() -> None:
     """The approval and availability paths have seeded data to exercise."""
 

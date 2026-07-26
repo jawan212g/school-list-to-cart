@@ -159,6 +159,80 @@ def test_pipeline_reports_required_item_with_no_equivalent() -> None:
     )
 
 
+def test_e33_one_failed_extraction_does_not_block_the_other_list() -> None:
+    """E-33: a failed list is reported while successful lists continue."""
+
+    def partial_extractor(
+        source: str,
+        *,
+        child_id: str,
+        mime_type: str | None,
+        client: object,
+    ) -> ExtractionEnvelope:
+        del mime_type, client
+        if source == "bad":
+            raise ValueError("Unreadable document")
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="pencils",
+                    child_id=child_id,
+                    raw_text="1 pencil",
+                    canonical_item="pencils",
+                    quantity=1,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+
+    store = Store(
+        store_id="S",
+        name="Store",
+        distance_miles=1.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=0,
+        delivery_minimum=0,
+        tax_applies=False,
+    )
+    offer = Offer(
+        sku="PENCIL",
+        store_id="S",
+        brand="Generic",
+        title="Pencil",
+        category="pencils",
+        pack_size=1,
+        unit_price=100,
+        pack_price=100,
+        stock_qty=1,
+        is_returnable=True,
+        attributes={},
+    )
+    result = run_pipeline(
+        PipelineSession(
+            session_id="session",
+            children=("good", "bad"),
+            budget_total=1_000,
+            fulfillment_pref="pickup",
+            tax_basis_points=0,
+        ),
+        [
+            ListInput(child_id="good", source="good"),
+            ListInput(child_id="bad", source="bad"),
+        ],
+        stores=[store],
+        offers=[offer],
+        suitability_judge=StructuredSuitabilityJudge(),
+        extractor=partial_extractor,
+    )
+
+    assert result.proposed_cart.landed_cost == 100
+    assert tuple(result.extractions) == ("good",)
+    assert result.extraction_failures == {
+        "bad": "ValueError: Unreadable document"
+    }
+
+
 def test_identical_cross_child_decision_is_returned_once() -> None:
     """BR-10: one SKU and one question produce one session decision."""
 

@@ -32,6 +32,8 @@ REQUIRED_ITEM_AUTO_DROP_ALLOWED = False  # BR-04: required items stay in the car
 
 OPTIONAL_ITEMS_INCLUDED_BY_DEFAULT = False  # BR-05: optional items start excluded.
 OPTIONAL_ITEM_HEADROOM_PERCENT = 90  # BR-05: add-ons appear at 90% of budget.
+MINIMUM_BUDGET_CENTS = 1  # E-37: zero and negative budgets are invalid.
+MAX_CHILDREN_PER_SESSION = 10  # E-38: reasonable live-session child limit.
 
 OVERAGE_PERCENT = 50  # BR-06: relative package overage ceiling.
 PERCENT_DENOMINATOR = 100  # BR-06: integer percentage scale.
