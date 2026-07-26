@@ -1384,6 +1384,12 @@ def _initialize_state(st: Any) -> None:
             st.session_state[key] = value
 
 
+def clear_session_data(st: Any) -> None:
+    """Remove every in-memory session value; nothing is persisted (BRD 11.3)."""
+
+    st.session_state.clear()
+
+
 def _persistent_notice(st: Any) -> None:
     st.info(
         "This prototype uses a simulated catalog and fictional stores. "
@@ -2718,7 +2724,7 @@ def _render_summary(st: Any) -> None:
         st.session_state["screen"] = "intake"
         st.rerun()
     if right.button("Start a new session"):
-        st.session_state.clear()
+        clear_session_data(st)
         st.rerun()
 
 

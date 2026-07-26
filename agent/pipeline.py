@@ -14,7 +14,10 @@ from agent.addons import AddOnProposal, propose_addons
 from agent.aggregate import UnitNeed, aggregate_requirements
 from agent.consolidate import consolidate_selected_skus
 from agent.decisions import Decision, DecisionLog
-from agent.extract import extract_document
+from agent.extract import (
+    apply_extraction_security_filters,
+    extract_document,
+)
 from agent.gate import (
     ApprovalBatch,
     GateContext,
@@ -350,6 +353,10 @@ def run_pipeline(
                 f"{type(error).__name__}: {error}"
             )
             continue
+        extraction = apply_extraction_security_filters(
+            extraction,
+            list_input.child_id,
+        )
         extraction = extraction.model_copy(
             update={
                 "requirements": tuple(

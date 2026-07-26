@@ -208,12 +208,16 @@ class OpenAISuitabilityJudge:
             }
             for case in cases
         ]
+        serialized_payload = json.dumps(
+            payload,
+            ensure_ascii=False,
+        ).replace("<", "\\u003c").replace(">", "\\u003e")
         response = self._client.responses.parse(
             model=MODEL_NAME,
             instructions=MATCH_SYSTEM_INSTRUCTION,
             input=(
                 f"{MATCH_DATA_START}\n"
-                f"{json.dumps(payload, ensure_ascii=False)}\n"
+                f"{serialized_payload}\n"
                 f"{MATCH_DATA_END}"
             ),
             text_format=SuitabilityEnvelope,
