@@ -63,14 +63,20 @@ class BudgetPlan:
 
 
 @dataclass(frozen=True)
-class BudgetPreview:
-    """Instant checkbox preview using only precomputed action deltas."""
+class BudgetSelectionEvaluation:
+    """Exact deterministic cart and budget status for checkbox choices."""
 
     selected_action_ids: tuple[str, ...]
-    predicted_landed_cost_cents: int
+    optimization: OptimizationResult
     budget_variance_cents: int
     unmet_item_count: int
     reaches_budget: bool
+
+    @property
+    def landed_cost_cents(self) -> int:
+        """Return the exact figure rendered by the approval screen."""
+
+        return self.optimization.landed_cost
 
 
 @dataclass(frozen=True)
@@ -170,11 +176,17 @@ def apply_budget_actions(
     )
 
 
-def preview_budget_actions(
+def evaluate_budget_actions(
     analysis: BudgetAnalysis,
     selected_action_ids: Sequence[str],
-) -> BudgetPreview:
-    """Preview checkbox choices without matching or optimization."""
+    optimization: OptimizationResult,
+    matches: MatchResult,
+    unit_needs: Sequence[UnitNeed],
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    config: OptimizationConfig,
+) -> BudgetSelectionEvaluation:
+    """Re-optimize cached candidates for an exact live checkbox total."""
 
     actions_by_id = analysis.actions_by_id
     selected = tuple(
@@ -183,13 +195,20 @@ def preview_budget_actions(
         if action_id in actions_by_id
     )
     selected_actions = tuple(actions_by_id[action_id] for action_id in selected)
-    predicted = analysis.baseline_landed_cost_cents + sum(
-        action.landed_delta_cents for action in selected_actions
+    exact = apply_budget_actions(
+        analysis,
+        selected,
+        optimization,
+        matches,
+        unit_needs,
+        offers,
+        stores,
+        config,
     )
-    variance = analysis.budget_cents - predicted
-    return BudgetPreview(
+    variance = analysis.budget_cents - exact.landed_cost
+    return BudgetSelectionEvaluation(
         selected_action_ids=selected,
-        predicted_landed_cost_cents=predicted,
+        optimization=exact,
         budget_variance_cents=variance,
         unmet_item_count=sum(
             action.kind == "omit" for action in selected_actions
@@ -405,19 +424,12 @@ def build_budget_analysis(
         stores,
         config,
     )
-    substitution_preview = preview_budget_actions(
-        stub,
-        preferred_substitutions,
-    )
-    substitutions_reach = (
-        substitution_preview.reaches_budget
-        and substitution_result.landed_cost <= budget_cents
-    )
+    substitutions_reach = substitution_result.landed_cost <= budget_cents
     if substitutions_reach:
         return replace(
             stub,
             substitution_only_landed_cost_cents=(
-                substitution_preview.predicted_landed_cost_cents
+                substitution_result.landed_cost
             ),
             substitutions_reach_budget=True,
         )
@@ -436,12 +448,6 @@ def build_budget_analysis(
             action_ids = preferred_substitutions + tuple(
                 action.action_id for action in bundle
             )
-            if (
-                preview_budget_actions(stub, action_ids)
-                .predicted_landed_cost_cents
-                > budget_cents
-            ):
-                continue
             plan = _plan_from_actions(
                 plan_id=f"budget-plan-{len(feasible) + 1}",
                 label="Meet the entered budget",
@@ -468,7 +474,7 @@ def build_budget_analysis(
         return replace(
             stub,
             substitution_only_landed_cost_cents=(
-                substitution_preview.predicted_landed_cost_cents
+                substitution_result.landed_cost
             ),
         )
 
@@ -513,32 +519,31 @@ def build_budget_analysis(
             ),
         ):
             running.append(action.action_id)
-            if preview_budget_actions(stub, running).reaches_budget:
-                alternate = _plan_from_actions(
-                    plan_id="budget-plan-preserve-largest",
-                    label=f"Keep {protected.canonical_item.replace('_', ' ')}",
-                    description=(
-                        "Preserve the largest item from the recommended plan "
-                        "and source several smaller required items separately."
-                    ),
-                    preserves=protected.canonical_item.replace("_", " "),
-                    action_ids=tuple(running),
-                    analysis_stub=stub,
-                    optimization=optimization,
-                    matches=matches,
-                    unit_needs=unit_needs,
-                    offers=offers,
-                    stores=stores,
-                    config=config,
-                )
-                if alternate is not None:
-                    alternatives.append(alternate)
-                    break
+            alternate = _plan_from_actions(
+                plan_id="budget-plan-preserve-largest",
+                label=f"Keep {protected.canonical_item.replace('_', ' ')}",
+                description=(
+                    "Preserve the largest item from the recommended plan "
+                    "and source several smaller required items separately."
+                ),
+                preserves=protected.canonical_item.replace("_", " "),
+                action_ids=tuple(running),
+                analysis_stub=stub,
+                optimization=optimization,
+                matches=matches,
+                unit_needs=unit_needs,
+                offers=offers,
+                stores=stores,
+                config=config,
+            )
+            if alternate is not None:
+                alternatives.append(alternate)
+                break
 
     return replace(
         stub,
         substitution_only_landed_cost_cents=(
-            substitution_preview.predicted_landed_cost_cents
+            substitution_result.landed_cost
         ),
         recommended_plan=recommended,
         alternative_plans=tuple(

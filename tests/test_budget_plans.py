@@ -4,7 +4,7 @@ from agent.aggregate import UnitNeed
 from agent.budget_plans import (
     apply_budget_actions,
     build_budget_analysis,
-    preview_budget_actions,
+    evaluate_budget_actions,
 )
 from agent.match import match_offers
 from agent.optimize import OptimizationConfig, optimize_cart
@@ -158,8 +158,8 @@ def test_no_required_item_drop_plan_when_substitution_alone_reaches() -> None:
     assert analysis.alternative_plans == ()
 
 
-def test_multiselect_preview_equals_submitted_plan() -> None:
-    """Two precomputed deltas predict and produce the exact $6.00 cart."""
+def test_displayed_running_total_equals_submitted_landed_cost() -> None:
+    """The multi-select display and submitted cart both equal exactly $6.00."""
 
     needs = (
         _need(
@@ -202,7 +202,16 @@ def test_multiselect_preview_equals_submitted_plan() -> None:
         + (headphone_omission,)
     )
 
-    preview = preview_budget_actions(analysis, selected)
+    displayed = evaluate_budget_actions(
+        analysis,
+        selected,
+        optimization,
+        matches,
+        needs,
+        offers,
+        stores,
+        config,
+    )
     submitted = apply_budget_actions(
         analysis,
         selected,
@@ -214,6 +223,10 @@ def test_multiselect_preview_equals_submitted_plan() -> None:
         config,
     )
 
-    assert preview.predicted_landed_cost_cents == 600
-    assert preview.unmet_item_count == 1
+    assert displayed.landed_cost_cents == 600
+    assert displayed.unmet_item_count == 1
     assert submitted.landed_cost == 600
+    assert (
+        displayed.landed_cost_cents
+        == submitted.landed_cost
+    )

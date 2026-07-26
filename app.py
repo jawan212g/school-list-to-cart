@@ -26,7 +26,8 @@ from agent.budget_plans import (
     BudgetAction,
     BudgetAnalysis,
     BudgetPlan,
-    preview_budget_actions,
+    BudgetSelectionEvaluation,
+    evaluate_budget_actions,
 )
 from agent.decisions import Decision, DecisionLog
 from agent.extract import (
@@ -1207,22 +1208,10 @@ def _budget_approval_content(
         return _join_names(tuple(details)) if details else "nothing"
 
     def plan_explanation(plan: BudgetPlan) -> str:
-        preview = preview_budget_actions(analysis, plan.action_ids)
-        cost_text = (
-            f"Result: {format_money(plan.resulting_landed_cost_cents)} landed."
+        return (
+            f"Result: {format_money(plan.resulting_landed_cost_cents)} landed. "
+            f"You would source: {unmet_text(plan)}."
         )
-        if (
-            preview.predicted_landed_cost_cents
-            != plan.resulting_landed_cost_cents
-        ):
-            cost_text = (
-                "Checkbox estimate: "
-                f"{format_money(preview.predicted_landed_cost_cents)}; exact "
-                "validated landed cost: "
-                f"{format_money(plan.resulting_landed_cost_cents)}. Store and "
-                "fulfillment interactions cause the difference."
-            )
-        return f"{cost_text} You would source: {unmet_text(plan)}."
 
     options: list[ApprovalDisplayOption] = []
     if analysis.substitutions_reach_budget:
@@ -1765,14 +1754,15 @@ def _apply_approval_outcomes(
     config: OptimizationConfig,
     budget_analysis: BudgetAnalysis | None = None,
     budget_action_ids: Sequence[str] = (),
+    precomputed_budget_optimization: OptimizationResult | None = None,
 ) -> OptimizationResult:
     selected = _selected_approval_options(presentations, outcomes)
-    unmet_source_ids = {
+    generic_unmet_source_ids = {
         option.source_requirement_ids
         for _, option in selected
         if option.leaves_required_unmet
     }
-    forced_skus = {
+    generic_forced_skus = {
         option.source_requirement_ids: frozenset({option.sku})
         for _, option in selected
         if (
@@ -1781,6 +1771,8 @@ def _apply_approval_outcomes(
             and not option.leaves_required_unmet
         )
     }
+    unmet_source_ids = set(generic_unmet_source_ids)
+    forced_skus = dict(generic_forced_skus)
     if budget_analysis is not None:
         actions_by_id = budget_analysis.actions_by_id
         for action_id in dict.fromkeys(budget_action_ids):
@@ -1799,6 +1791,12 @@ def _apply_approval_outcomes(
                     "Select only one cheaper substitution for each required line"
                 )
             forced_skus[action.source_requirement_ids] = replacement
+    if (
+        precomputed_budget_optimization is not None
+        and not generic_unmet_source_ids
+        and not generic_forced_skus
+    ):
+        return precomputed_budget_optimization
     if not unmet_source_ids and not forced_skus:
         return optimization
 
@@ -2899,6 +2897,8 @@ def _render_approval(st: Any) -> None:
     )
     selections: dict[str, ApprovalDisplayOption] = {}
     budget_selected_ids: tuple[str, ...] = ()
+    budget_evaluation: BudgetSelectionEvaluation | None = None
+    budget_selection_error: str | None = None
 
     for index, presentation in enumerate(presentations):
         interrupt = presentation.interrupt
@@ -3022,40 +3022,57 @@ def _render_approval(st: Any) -> None:
                         False,
                     )
                 )
-                preview = preview_budget_actions(
-                    result.budget_analysis,
-                    budget_selected_ids,
-                )
-                columns = st.columns(3)
-                columns[0].metric(
-                    "Predicted landed cost",
-                    format_streamlit_money(
-                        preview.predicted_landed_cost_cents
-                    ),
-                )
-                variance_label = (
-                    "Under budget" if preview.reaches_budget else "Still over"
-                )
-                columns[1].metric(
-                    variance_label,
-                    format_streamlit_money(
-                        abs(preview.budget_variance_cents)
-                    ),
-                )
-                columns[2].metric(
-                    "Required items unmet",
-                    str(preview.unmet_item_count),
-                )
-                if preview.reaches_budget:
-                    st.success("This selection reaches the entered budget.")
-                else:
-                    st.warning(
-                        escape_streamlit_dollars(
-                            "This selection is still "
-                            f"{format_money(abs(preview.budget_variance_cents))} "
-                            "over budget."
-                        )
+                try:
+                    budget_evaluation = evaluate_budget_actions(
+                        result.budget_analysis,
+                        budget_selected_ids,
+                        result.proposed_cart,
+                        result.matches,
+                        result.purchase_needs,
+                        offers,
+                        stores,
+                        _optimization_config(result),
                     )
+                except ValueError as error:
+                    budget_selection_error = str(error)
+                    st.error(
+                        escape_streamlit_dollars(budget_selection_error)
+                    )
+                else:
+                    columns = st.columns(3)
+                    columns[0].metric(
+                        "Landed cost",
+                        format_streamlit_money(
+                            budget_evaluation.landed_cost_cents
+                        ),
+                    )
+                    variance_label = (
+                        "Under budget"
+                        if budget_evaluation.reaches_budget
+                        else "Still over"
+                    )
+                    columns[1].metric(
+                        variance_label,
+                        format_streamlit_money(
+                            abs(budget_evaluation.budget_variance_cents)
+                        ),
+                    )
+                    columns[2].metric(
+                        "Required items unmet",
+                        str(budget_evaluation.unmet_item_count),
+                    )
+                    if budget_evaluation.reaches_budget:
+                        st.success(
+                            "This selection reaches the entered budget."
+                        )
+                    else:
+                        st.warning(
+                            escape_streamlit_dollars(
+                                "This selection is still "
+                                f"{format_money(abs(budget_evaluation.budget_variance_cents))} "
+                                "over budget."
+                            )
+                        )
                 continue
 
             st.info(
@@ -3081,6 +3098,7 @@ def _render_approval(st: Any) -> None:
         "Save decisions and continue",
         type="primary",
         use_container_width=True,
+        disabled=budget_selection_error is not None,
     )
     if not submitted:
         return
@@ -3142,6 +3160,11 @@ def _render_approval(st: Any) -> None:
             _optimization_config(result),
             budget_analysis=result.budget_analysis,
             budget_action_ids=budget_selected_ids,
+            precomputed_budget_optimization=(
+                None
+                if budget_evaluation is None
+                else budget_evaluation.optimization
+            ),
         )
     except ValueError as error:
         st.error(escape_streamlit_dollars(str(error)))
