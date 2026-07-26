@@ -91,6 +91,13 @@ def test_pipeline_wires_two_lists_through_one_optimized_cart() -> None:
     assert result.proposed_cart.plan.lines[0].sku == "PENCILS-5"
     assert result.proposed_cart.plan.lines[0].match_confidence == 1.0
     assert result.approval_flags == ()
+    assert [decision.type for decision in result.decisions] == [
+        "match",
+        "substitution",
+        "store_assignment",
+        "budget_action",
+    ]
+    assert all(decision.actor == "agent" for decision in result.decisions)
 
 
 def test_pipeline_reports_required_item_with_no_equivalent() -> None:
@@ -223,13 +230,24 @@ def test_identical_cross_child_decision_is_returned_once() -> None:
         extractor=headphones_extractor,
     )
 
-    assert len(result.proposed_cart.plan.lines) == 2
+    assert len(result.proposed_cart.plan.lines) == 1
+    shared_line = result.proposed_cart.plan.lines[0]
+    assert shared_line.packs_purchased == 2
+    assert shared_line.units_needed == 2
+    assert shared_line.allocated_to == {"a": 1, "b": 1}
+    assert shared_line.source_requirement_ids == (
+        "a:headphones",
+        "b:headphones",
+    )
     assert len(result.approval_flags) == 1
     assert result.approval_flags[0].kind == "non_returnable"
     assert result.approval_flags[0].source_requirement_ids == (
         "a:headphones",
         "b:headphones",
     )
+    assert result.decisions[-1].type == "approval_request"
+    assert result.decisions[-1].actor == "agent"
+    assert result.decisions[-1].affected_lines == ("line-1-1",)
 
 
 def test_e23_optional_item_is_never_added_to_cross_delivery_threshold() -> None:

@@ -36,6 +36,7 @@ MATCH_DATA_END = "</catalog_match_data>"
 
 ATTRIBUTE_OFFER_KEYS: Mapping[str, tuple[str, ...]] = {
     "acceptable_colors": ("ink_color", "color"),
+    "character": ("character",),
     "size": ("size_label", "size", "capacity_inches", "length_inches"),
     "ruling": ("ruling",),
     "tab_count": ("tab_count", "tabs_per_set"),

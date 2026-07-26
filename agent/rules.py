@@ -19,6 +19,7 @@ MAJOR_PACK_DIFFERENCE_PERCENT = 20  # BR-01: pack-count approval threshold.
 SUBSTITUTION_NONE = "none"  # BR-01: no substitution occurred.
 SUBSTITUTION_MINOR = "minor"  # BR-01: substitution may proceed automatically.
 SUBSTITUTION_MAJOR = "major"  # BR-01: substitution requires approval.
+EXACT_NON_RETURNABLE_ITEM_IS_SUBSTITUTION = False  # BR-01/BR-08 reconciliation: an exact item is not a swap; only BR-08 can interrupt based on its non-returnable price.
 
 DEFAULT_TAX_BASIS_POINTS = 700  # BR-02: default tax rate is 7.0%.
 BASIS_POINTS_DENOMINATOR = 10_000  # BR-02: integer tax-rate scale.
@@ -146,6 +147,7 @@ REAM_SHEET_COUNT = 500  # E-17: one ream contains 500 sheets.
 ATTRIBUTE_SENSITIVE_FIELDS = frozenset(
     {
         "acceptable_colors",
+        "character",
         "size",
         "ruling",
         "tab_count",
@@ -156,6 +158,10 @@ ATTRIBUTE_SENSITIVE_FIELDS = frozenset(
         "sharpened",
     }
 )  # FR-19: changes to specified preference-sensitive attributes need approval.
+
+PREFERENCE_DEPENDENT_ATTRIBUTES = frozenset(
+    {"acceptable_colors", "color", "character", "style"}
+)  # FR-26 condition 4: these parent preferences get their own interrupt type.
 
 CATEGORY_IMPLIED_EXCLUSION_TERMS = {
     "composition_notebooks": frozenset({"spiral"}),

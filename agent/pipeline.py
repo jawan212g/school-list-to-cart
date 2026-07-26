@@ -11,7 +11,15 @@ from typing import Literal
 from openai import OpenAI
 
 from agent.aggregate import UnitNeed, aggregate_requirements
+from agent.consolidate import consolidate_selected_skus
+from agent.decisions import Decision, DecisionLog
 from agent.extract import extract_document
+from agent.gate import (
+    ApprovalBatch,
+    GateContext,
+    InterruptKind,
+    evaluate_gate,
+)
 from agent.match import (
     CandidateMatch,
     MatchResult,
@@ -31,9 +39,9 @@ from agent.optimize import (
 )
 from agent.rules import (
     DEFAULT_TAX_BASIS_POINTS,
-    NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
+    SUBSTITUTION_NONE,
 )
 from agent.schema import ExtractionEnvelope
 from data.loader import Offer, Store, load_catalog, load_stores
@@ -47,7 +55,6 @@ ApprovalKind = Literal[
     "non_returnable",
     "low_confidence",
     "required_unavailable",
-    "package_overage",
 ]
 
 
@@ -95,9 +102,12 @@ class PipelineResult:
     extractions: Mapping[str, ExtractionEnvelope]
     normalization: NormalizationResult
     unit_needs: tuple[UnitNeed, ...]
+    purchase_needs: tuple[UnitNeed, ...]
     matches: MatchResult
     proposed_cart: OptimizationResult
+    approval_batch: ApprovalBatch
     approval_flags: tuple[ApprovalFlag, ...]
+    decisions: tuple[Decision, ...]
 
 
 Extractor = Callable[..., ExtractionEnvelope]
@@ -184,164 +194,116 @@ def _candidate_for_line(
     return matches.candidate(line.source_requirement_ids, line.sku)
 
 
+def _legacy_approval_kind(kind: InterruptKind) -> ApprovalKind:
+    return {
+        "budget_exceeded": "budget",
+        "major_substitution": "major_substitution",
+        "brand_lock_break": "major_substitution",
+        "attribute_choice": "attribute_choice",
+        "non_returnable_threshold": "non_returnable",
+        "low_confidence": "low_confidence",
+        "required_unavailable": "required_unavailable",
+    }[kind]  # type: ignore[return-value]
+
+
 def _approval_flags(
-    extractions: Mapping[str, ExtractionEnvelope],
-    normalization: NormalizationResult,
+    batch: ApprovalBatch,
+) -> tuple[ApprovalFlag, ...]:
+    return tuple(
+        ApprovalFlag(
+            kind=_legacy_approval_kind(interrupt.kind),
+            message=interrupt.message,
+            source_requirement_ids=interrupt.source_requirement_ids,
+            sku=interrupt.sku,
+        )
+        for interrupt in batch.interrupts
+    )
+
+
+def _record_cart_decisions(
+    log: DecisionLog,
     matches: MatchResult,
     optimization: OptimizationResult,
-    offers: Sequence[Offer],
-) -> tuple[ApprovalFlag, ...]:
-    flags: list[ApprovalFlag] = []
+) -> None:
+    """Record selected matches and all deterministic cart actions."""
 
-    for extraction in extractions.values():
-        flags.extend(
-            ApprovalFlag(kind="low_confidence", message=reason)
-            for reason in extraction.review_reasons
-        )
-
-    extraction_reason_text = frozenset(
-        reason
-        for extraction in extractions.values()
-        for reason in extraction.review_reasons
-    )
-    for requirement in normalization.manual_review_requirements:
-        message = (
-            "Required extraction needs review: "
-            f"{requirement.source.raw_text}"
-        )
-        if any(
-            requirement.source.raw_text in reason
-            for reason in extraction_reason_text
-        ):
-            continue
-        flags.append(
-            ApprovalFlag(
-                kind="low_confidence",
-                message=message,
-                source_requirement_ids=(requirement.source.req_id,),
-            )
-        )
-
-    for need_matches in matches.needs:
-        need = need_matches.unit_need
-        if need_matches.requires_confidence_review:
-            flags.append(
-                ApprovalFlag(
-                    kind="low_confidence",
-                    message=(
-                        f"Only below-confidence matches remain for {need.label}."
-                    ),
-                    source_requirement_ids=need.source_requirement_ids,
-                )
-            )
-        elif need_matches.unfulfillable:
-            flags.append(
-                ApprovalFlag(
-                    kind="required_unavailable",
-                    message=(
-                        f"No catalog equivalent is available for {need.label}."
-                    ),
-                    source_requirement_ids=need.source_requirement_ids,
-                )
-            )
-
-    offers_by_sku = {offer.sku: offer for offer in offers}
     for line in _selected_lines(optimization):
         candidate = _candidate_for_line(line, matches)
-        offer = offers_by_sku[line.sku]
-        non_returnable_above_threshold = (
-            not offer.is_returnable
-            and line.line_cost
-            > NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS
+        confidence_text = (
+            "catalog rules"
+            if candidate is None
+            else f"match confidence {candidate.match_confidence:.2f}"
         )
-        if (
-            candidate is not None
-            and candidate.substitution_type == SUBSTITUTION_MAJOR
-        ):
-            attribute_change = any(
-                reason.startswith("attribute_change:")
-                for reason in candidate.substitution_reasons
+        log.record(
+            "match",
+            (
+                f"Selected {line.sku} for {line.canonical_item} using "
+                f"{confidence_text}."
+            ),
+            actor="agent",
+            affected_lines=(line.line_id,),
+        )
+        if line.substitution_type != SUBSTITUTION_NONE:
+            reasons = (
+                ()
+                if candidate is None
+                else candidate.substitution_reasons
             )
-            flags.append(
-                ApprovalFlag(
-                    kind=(
-                        "attribute_choice"
-                        if attribute_change
-                        else "major_substitution"
-                    ),
-                    message=(
-                        f"{line.sku} is a major substitution for "
-                        f"{line.canonical_item}: "
-                        f"{', '.join(candidate.substitution_reasons)}."
-                    ),
-                    source_requirement_ids=line.source_requirement_ids,
-                    sku=line.sku,
-                )
-            )
-        elif (
-            line.approval_status == "pending"
-            and not non_returnable_above_threshold
-        ):
-            flags.append(
-                ApprovalFlag(
-                    kind="package_overage",
-                    message=(
-                        f"{line.sku} exceeds the normal package overage ceiling."
-                    ),
-                    source_requirement_ids=line.source_requirement_ids,
-                    sku=line.sku,
-                )
+            reason_text = ", ".join(reasons) or "package overage"
+            log.record(
+                "substitution",
+                (
+                    f"Classified {line.sku} as "
+                    f"{line.substitution_type}: {reason_text}."
+                ),
+                actor="agent",
+                affected_lines=(line.line_id,),
             )
 
-        if non_returnable_above_threshold:
-            flags.append(
-                ApprovalFlag(
-                    kind="non_returnable",
-                    message=(
-                        f"{line.sku} is non-returnable and costs more than "
-                        "the BR-08 threshold."
-                    ),
-                    source_requirement_ids=line.source_requirement_ids,
-                    sku=line.sku,
-                )
-            )
-
-    if optimization.within_budget is False:
-        flags.append(
-            ApprovalFlag(
-                kind="budget",
-                message=(
-                    f"The minimum landed cost exceeds the budget by "
-                    f"{optimization.shortfall_cents} cents."
+    plans = (optimization.plan,) + (
+        ()
+        if optimization.minimum_second_trip is None
+        else (optimization.minimum_second_trip,)
+    )
+    for plan in plans:
+        for order in plan.store_orders:
+            log.record(
+                "store_assignment",
+                (
+                    f"Assigned {len(order.lines)} cart line(s) to "
+                    f"{order.store_id} by {order.fulfillment_method}; "
+                    f"landed cost is {order.landed_cost} cents."
+                ),
+                actor="agent",
+                affected_lines=tuple(
+                    line.line_id for line in order.lines
                 ),
             )
-        )
 
-    unique: dict[
-        tuple[ApprovalKind, str | None, str],
-        ApprovalFlag,
-    ] = {}
-    for flag in flags:
-        key = (
-            flag.kind,
-            flag.sku,
-            flag.message,
+    if optimization.budget_cents is None:
+        rationale = (
+            f"No budget ceiling was set; minimum landed cost is "
+            f"{optimization.landed_cost} cents."
         )
-        existing = unique.get(key)
-        if existing is None:
-            unique[key] = flag
-            continue
-        combined_requirement_ids = tuple(
-            dict.fromkeys(
-                existing.source_requirement_ids
-                + flag.source_requirement_ids
-            )
+    elif optimization.within_budget:
+        rationale = (
+            f"The cart is within budget at "
+            f"{optimization.landed_cost} cents landed."
         )
-        unique[key] = replace(
-            existing,
-            source_requirement_ids=combined_requirement_ids,
+    else:
+        rationale = (
+            f"The minimum landed cost exceeds budget by "
+            f"{optimization.shortfall_cents} cents; no required item was "
+            "removed."
         )
-    return tuple(unique.values())
+    log.record(
+        "budget_action",
+        rationale,
+        actor="agent",
+        affected_lines=tuple(
+            line.line_id for line in _selected_lines(optimization)
+        ),
+    )
 
 
 def run_pipeline(
@@ -354,7 +316,7 @@ def run_pipeline(
     suitability_judge: SuitabilityJudge | None = None,
     extractor: Extractor = extract_document,
 ) -> PipelineResult:
-    """Build a proposed cart and approval flags (FR-06–FR-25)."""
+    """Build a proposed cart, approval batch, and log (FR-06–FR-30)."""
 
     active_stores = tuple(stores) if stores is not None else tuple(load_stores())
     active_offers = tuple(offers) if offers is not None else tuple(load_catalog())
@@ -406,35 +368,72 @@ def run_pipeline(
             or OpenAISuitabilityJudge(model_client)
         ),
     )
-    optimization = optimize_cart(
+    optimization_config = OptimizationConfig(
+        shopping_mode=session.shopping_mode,
+        budget_cents=session.budget_total,
+        allowed_store_ids=session.allowed_stores,
+        max_stores=session.max_stores,
+        store_radius_miles=session.store_radius_miles,
+        fulfillment_preference=session.fulfillment_pref,
+        tax_basis_points=session.tax_basis_points,
+    )
+    preliminary_optimization = optimize_cart(
         unit_needs,
         active_offers,
         active_stores,
-        OptimizationConfig(
-            shopping_mode=session.shopping_mode,
-            budget_cents=session.budget_total,
-            allowed_store_ids=session.allowed_stores,
-            max_stores=session.max_stores,
-            store_radius_miles=session.store_radius_miles,
-            fulfillment_preference=session.fulfillment_pref,
-            tax_basis_points=session.tax_basis_points,
-        ),
+        optimization_config,
         candidate_skus_by_need=matches.candidate_skus_by_need,
     )
-    proposed_cart = _decorate_optimization(optimization, matches)
-    approval_flags = _approval_flags(
-        extractions,
-        normalization,
+    consolidation = consolidate_selected_skus(
+        unit_needs,
         matches,
-        proposed_cart,
-        active_offers,
+        preliminary_optimization,
     )
+    final_matches = consolidation.matches
+    if consolidation.changed:
+        optimization = optimize_cart(
+            consolidation.unit_needs,
+            active_offers,
+            active_stores,
+            optimization_config,
+            candidate_skus_by_need=(
+                final_matches.candidate_skus_by_need
+            ),
+        )
+    else:
+        optimization = preliminary_optimization
+    proposed_cart = _decorate_optimization(optimization, final_matches)
+
+    decision_log = DecisionLog(session.session_id)
+    _record_cart_decisions(
+        decision_log,
+        final_matches,
+        proposed_cart,
+    )
+    approval_batch = evaluate_gate(
+        GateContext(
+            optimization=proposed_cart,
+            matches=final_matches,
+            normalization=normalization,
+            extractions=extractions,
+            offers=active_offers,
+            stores=active_stores,
+            tax_basis_points=session.tax_basis_points,
+            unit_needs=consolidation.unit_needs,
+            optimization_config=optimization_config,
+        ),
+        decision_log=decision_log,
+    )
+    approval_flags = _approval_flags(approval_batch)
     return PipelineResult(
         session=session,
         extractions=extractions,
         normalization=normalization,
         unit_needs=unit_needs,
-        matches=matches,
+        purchase_needs=consolidation.unit_needs,
+        matches=final_matches,
         proposed_cart=proposed_cart,
+        approval_batch=approval_batch,
         approval_flags=approval_flags,
+        decisions=decision_log.entries,
     )

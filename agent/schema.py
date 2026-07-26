@@ -21,6 +21,7 @@ class RequirementAttributes(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     acceptable_colors: tuple[str, ...] = ()
+    character: str | None = None
     size: str | None = None
     count: int | None = Field(default=None, ge=1)
     ruling: str | None = None
