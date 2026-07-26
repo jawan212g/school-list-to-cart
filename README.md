@@ -1,12 +1,14 @@
-# School List-to-Cart Agent
+# Ready, Set, School
 
-Turns school supply lists into an optimized multi-store shopping cart, with a human
-approval gate for the decisions a parent should actually make.
+**One list in. One cart out. One trip.**
+
+Ready, Set, School turns school supply lists into an optimized multi-store shopping
+plan, with a human approval gate for the decisions a parent should actually make.
 
 **Team 6 — BUKD-X500 Agentic AI Systems**
 Ian Demroff · Sarah Fritschy · Jawan Goodspeed · Marwa Gujarathi · Abhishek Singh
 
-## What it does
+## What Ready, Set, School does
 
 Upload or paste one supply list per child. Set a budget and a shopping mode. The agent
 extracts the requirements, aggregates them across children, matches them to products,

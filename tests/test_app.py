@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import pytest
@@ -114,6 +114,80 @@ def test_money_and_tax_inputs_convert_at_the_interface_boundary() -> None:
     assert app.escape_streamlit_dollars(
         r"Adds \$3.00 and $0.20"
     ) == r"Adds \$3.00 and \$0.20"
+
+
+def test_shortfall_state_renders_the_plain_summary_headings() -> None:
+    """A budget shortfall switches the whole summary to the plain register."""
+
+    result = _real_pipeline_result("Grade 2")
+    shortfall_cart = replace(
+        result.proposed_cart,
+        budget_cents=result.proposed_cart.landed_cost - 1,
+        within_budget=False,
+        shortfall_cents=1,
+    )
+    result = replace(result, proposed_cart=shortfall_cart)
+    tone_state = app.tone_state_from_session(
+        {
+            "result": result,
+            "approved_optimization": None,
+            "approval_outcomes": {},
+            "budget_action_ids": (),
+            "ui_error_active": False,
+        }
+    )
+    copy = app.select_copy_set(tone_state)
+    events: list[tuple[str, str]] = []
+
+    class MetricColumn:
+        def metric(self, label: str, value: str) -> None:
+            events.append((f"metric:{label}", value))
+
+    class HeadlineStreamlit:
+        def error(self, value: str) -> None:
+            events.append(("error", value))
+
+        def header(self, value: str) -> None:
+            events.append(("header", value))
+
+        def caption(self, value: str) -> None:
+            events.append(("caption", value))
+
+        def columns(self, count: int) -> tuple[MetricColumn, ...]:
+            return tuple(MetricColumn() for _ in range(count))
+
+    app._render_summary_headline(
+        HeadlineStreamlit(),
+        shortfall_cart,
+        shortfall_cart.landed_cost - 1,
+        True,
+        copy,
+    )
+
+    assert copy.register == "plain"
+    assert events[0][0] == "error"
+    assert ("header", "Shopping plan") in events
+    assert ("caption", "Plan status") in events
+    assert all(
+        "ready" not in value.casefold()
+        for kind, value in events
+        if kind in {"header", "caption"}
+    )
+
+
+def test_visible_navigation_uses_three_ready_set_school_phases() -> None:
+    """The five screens map to the three visible branded phases."""
+
+    assert app.screen_phase_label("intake") == "Ready · setup"
+    assert app.screen_phase_label("lists") == "Set · adding the lists"
+    assert (
+        app.screen_phase_label("working", "reading the lists")
+        == "Set · reading the lists"
+    )
+    assert app.screen_phase_label("approval") == (
+        "School · decisions to review"
+    )
+    assert app.screen_phase_label("summary") == "School · your plan"
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "abc", "1.001"])

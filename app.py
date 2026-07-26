@@ -1,4 +1,4 @@
-"""Streamlit interface for the school list-to-cart application."""
+"""Streamlit interface for Ready, Set, School."""
 
 from __future__ import annotations
 
@@ -73,6 +73,8 @@ from data.loader import Offer, Store, load_catalog, load_stores
 
 
 LOGGER = logging.getLogger(__name__)
+APP_NAME = "Ready, Set, School"
+APP_TAGLINE = "One list in. One cart out. One trip."
 CENTS_PER_DOLLAR = 100
 BASIS_POINTS_PER_PERCENT = 100
 MAX_TAX_PERCENT = Decimal("25")
@@ -90,6 +92,13 @@ SUPPORTED_UPLOADS: Mapping[str, str] = {
     ".txt": "text/plain",
 }
 SCREEN_ORDER = ("intake", "lists", "working", "approval", "summary")
+SCREEN_PHASES: Mapping[str, tuple[str, str]] = {
+    "intake": ("Ready", "setup"),
+    "lists": ("Set", "adding the lists"),
+    "working": ("Set", "building the cart"),
+    "approval": ("School", "decisions to review"),
+    "summary": ("School", "your plan"),
+}
 SHOPPING_MODES: Mapping[str, str] = {
     "Lowest landed cost": "budget",
     "Single store when possible": "single_stop",
@@ -223,6 +232,97 @@ class SelfSourcedSelection:
     option: ApprovalDisplayOption
     item_name: str
     affected_children: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ToneState:
+    """Plan conditions that switch the entire screen to plain language."""
+
+    has_shortfall: bool = False
+    has_unmet_required: bool = False
+    has_extraction_failure: bool = False
+    has_error: bool = False
+
+    @property
+    def requires_plain_copy(self) -> bool:
+        """Return whether any plan condition requires the plain register."""
+
+        return any(
+            (
+                self.has_shortfall,
+                self.has_unmet_required,
+                self.has_extraction_failure,
+                self.has_error,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class CopySet:
+    """All state-sensitive chrome copy, selected in one place."""
+
+    register: str
+    tagline: str
+    summary_heading: str
+    headline_heading: str
+    complete_status: str
+    attention_clear: str
+
+
+WARM_COPY = CopySet(
+    register="warm",
+    tagline=APP_TAGLINE,
+    summary_heading="Your school plan is ready",
+    headline_heading="The plan at a glance",
+    complete_status="Complete",
+    attention_clear="Nothing needs your attention.",
+)
+PLAIN_COPY = CopySet(
+    register="plain",
+    tagline="Review the shopping plan and any unresolved items.",
+    summary_heading="Shopping plan",
+    headline_heading="Plan status",
+    complete_status="Complete",
+    attention_clear="Nothing needs your attention.",
+)
+
+
+def select_copy_set(state: ToneState) -> CopySet:
+    """Select the warm or plain register with one state check."""
+
+    return PLAIN_COPY if state.requires_plain_copy else WARM_COPY
+
+
+def screen_phase_label(screen: str, substep: str | None = None) -> str:
+    """Return one of the three visible Ready / Set / School phase labels."""
+
+    phase, default_substep = SCREEN_PHASES[screen]
+    return f"{phase} · {substep or default_substep}"
+
+
+def progress_narration(
+    stage: str,
+    completed: int,
+    total: int,
+) -> str:
+    """Translate pipeline progress into warm, concrete parent-facing copy."""
+
+    if stage == "extraction":
+        noun = "list" if total == 1 else "lists"
+        return f"Reading {completed} of {total} {noun}"
+    if stage == "normalization":
+        return "Combining shared items across the lists"
+    if stage == "matching":
+        if completed:
+            return f"Comparing stores for {completed} of {total} item types"
+        return f"Comparing stores for {total} item types"
+    if stage == "optimization":
+        if completed:
+            return "Checking package sizes, store fees, and the budget"
+        return "Comparing package sizes and complete store plans"
+    if stage == "approval":
+        return "Looking for anything that needs your decision"
+    return "Building the shopping plan"
 
 
 def money_to_cents(value: str) -> int:
@@ -1834,6 +1934,52 @@ def _decision_log(
     return result.decisions + tuple(parent_decisions)
 
 
+def _has_parent_selected_unmet_item(
+    state: Mapping[str, Any],
+    result: PipelineResult | None,
+) -> bool:
+    """Return whether a recorded parent choice leaves a required item unmet."""
+
+    if result is not None and result.budget_analysis is not None:
+        for action_id in state.get("budget_action_ids", ()):
+            action = result.budget_analysis.actions_by_id.get(action_id)
+            if action is not None and action.kind == "omit":
+                return True
+    outcomes = state.get("approval_outcomes", {})
+    presentations = state.get("approval_presentations_cache") or ()
+    for presentation in presentations:
+        selected_id = outcomes.get(presentation.interrupt.interrupt_id)
+        if any(
+            option.alternative_id == selected_id
+            and option.leaves_required_unmet
+            for option in presentation.options
+        ):
+            return True
+    return False
+
+
+def tone_state_from_session(
+    state: Mapping[str, Any],
+) -> ToneState:
+    """Build the single application-wide tone state without recalculating."""
+
+    result = state.get("result")
+    if not isinstance(result, PipelineResult):
+        return ToneState(has_error=bool(state.get("ui_error_active", False)))
+    optimization = (
+        state.get("approved_optimization") or result.proposed_cart
+    )
+    return ToneState(
+        has_shortfall=optimization.shortfall_cents > 0,
+        has_unmet_required=(
+            not optimization.is_complete
+            or _has_parent_selected_unmet_item(state, result)
+        ),
+        has_extraction_failure=bool(result.extraction_failures),
+        has_error=bool(state.get("ui_error_active", False)),
+    )
+
+
 def build_text_summary(
     result: PipelineResult,
     optimization: OptimizationResult,
@@ -1850,7 +1996,7 @@ def build_text_summary(
     catalog_offers = tuple(load_catalog())
     item_subtotal, tax, fees = _combined_costs(optimization)
     lines = [
-        "SCHOOL SUPPLY CART",
+        "READY, SET, SCHOOL",
     ]
     if result.session.budget_total is not None:
         variance = result.session.budget_total - optimization.landed_cost
@@ -1873,25 +2019,46 @@ def build_text_summary(
         f"LANDED COST: {format_money(optimization.landed_cost)}",
         "",
     ])
-    if self_sourced_decisions:
+    export_is_complete = (
+        optimization.is_complete
+        and not self_sourced_decisions
+        and not result.extraction_failures
+    )
+    if not export_is_complete:
         lines.extend(
             [
                 (
-                    "STATUS: INCOMPLETE — one or more required items will be "
-                    "sourced separately by the parent."
+                    "STATUS: INCOMPLETE — one or more required items or lists "
+                    "are not represented in this cart."
                 ),
                 "",
-                "ITEMS YOU CHOSE TO SOURCE YOURSELF",
             ]
         )
-        lines.extend(
-            (
-                f"  {selection.item_name} | "
-                f"{_join_names(selection.affected_children)} | "
-                "UNFULFILLED BY PARENT CHOICE"
+        if self_sourced_decisions:
+            lines.append("ITEMS YOU CHOSE TO SOURCE YOURSELF")
+            lines.extend(
+                (
+                    f"  {selection.item_name} | "
+                    f"{_join_names(selection.affected_children)} | "
+                    "UNFULFILLED BY PARENT CHOICE"
+                )
+                for selection in self_sourced_decisions
             )
-            for selection in self_sourced_decisions
-        )
+        if not optimization.is_complete:
+            lines.append("REQUIRED ITEMS NOT IN THE CART")
+            lines.extend(
+                f"  {_item_display_name(item)} | UNAVAILABLE"
+                for item in optimization.gap_items
+            )
+        if result.extraction_failures:
+            lines.append("LISTS NOT INCLUDED")
+            lines.extend(
+                (
+                    f"  {_child_display_label(child_id, child_labels)} | "
+                    f"{reason}"
+                )
+                for child_id, reason in result.extraction_failures.items()
+            )
         lines.append("")
     else:
         lines.extend(["STATUS: COMPLETE", ""])
@@ -1970,6 +2137,8 @@ def _initialize_state(st: Any) -> None:
         "include_addons": False,
         "checkout_confirmation": None,
         "stockout_skus": frozenset(),
+        "ui_error_active": False,
+        "progress_substep": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -1984,7 +2153,7 @@ def clear_session_data(st: Any) -> None:
 
 def _persistent_notice(st: Any) -> None:
     st.info(
-        "This prototype uses a simulated catalog and fictional stores. "
+        "Ready, Set, School uses a simulated catalog and fictional stores. "
         "Store distances are simulated from a notional home location; no "
         "address is collected and no geocoding occurs. The radius applies to "
         "pickup trips only, never delivery. Checkout is simulated, and no "
@@ -1996,17 +2165,17 @@ def _persistent_notice(st: Any) -> None:
     )
 
 
-def _screen_progress(st: Any, screen: str) -> None:
-    labels = {
-        "intake": "1 · Setup",
-        "lists": "2 · Lists",
-        "working": "3 · Working",
-        "approval": "4 · Approval",
-        "summary": "5 · Summary",
-    }
-    current = SCREEN_ORDER.index(screen) + 1
-    st.progress(current / len(SCREEN_ORDER))
-    st.caption(labels[screen])
+def _screen_progress(
+    st: Any,
+    screen: str,
+    substep: str | None = None,
+) -> None:
+    """Show the three parent-facing phases with the current sub-step."""
+
+    phase, _ = SCREEN_PHASES[screen]
+    phase_number = {"Ready": 1, "Set": 2, "School": 3}[phase]
+    st.progress(phase_number / 3)
+    st.caption(screen_phase_label(screen, substep))
 
 
 def _render_development_diagnostic(st: Any) -> None:
@@ -2053,7 +2222,7 @@ def _render_development_diagnostic(st: Any) -> None:
 
 
 def _render_intake(st: Any) -> None:
-    st.header("Set up this shopping session")
+    st.header("Let’s get the plan ready")
     if development_diagnostics_enabled(st):
         _render_development_diagnostic(st)
     st.write(
@@ -2163,7 +2332,7 @@ def _render_intake(st: Any) -> None:
                 key=f"budget_{index}",
             )
 
-    st.subheader("Shopping preferences")
+    st.subheader("How you want to shop")
     mode_label = st.selectbox(
         "Shopping mode",
         tuple(SHOPPING_MODES),
@@ -2232,7 +2401,7 @@ def _render_intake(st: Any) -> None:
         value=f"{DEFAULT_TAX_BASIS_POINTS / BASIS_POINTS_PER_PERCENT:.1f}",
     )
 
-    if st.button("Continue to supply lists", type="primary"):
+    if st.button("Continue to the lists", type="primary"):
         errors: list[str] = []
         if any(not child["label"] for child in children):
             errors.append("Every entry needs a short label.")
@@ -2260,6 +2429,7 @@ def _render_intake(st: Any) -> None:
         if shopping_mode == "custom" and not allowed_stores:
             errors.append("Choose at least one store in custom mode.")
         if errors:
+            st.session_state["ui_error_active"] = True
             for error in errors:
                 st.error(escape_streamlit_dollars(error))
             return
@@ -2281,6 +2451,8 @@ def _render_intake(st: Any) -> None:
         st.session_state["approval_outcomes"] = {}
         st.session_state["parent_decisions"] = ()
         st.session_state["checkout_confirmation"] = None
+        st.session_state["ui_error_active"] = False
+        st.session_state["progress_substep"] = "adding the lists"
         st.session_state["screen"] = "lists"
         st.rerun()
 
@@ -2341,10 +2513,10 @@ def _render_lists(st: Any) -> None:
         st.session_state["screen"] = "intake"
         st.rerun()
     children = intake["children"]
-    st.header("Add one list for each entry")
+    st.header("Add the lists")
     st.write(
-        "Upload PDF, JPG, PNG, or TXT, or paste the list directly. "
-        "Each file is validated before processing."
+        "Paste one list for each entry, or upload a PDF, JPG, PNG, or TXT "
+        "file. Every file is checked before it is read."
     )
     saved_inputs = tuple(st.session_state["list_inputs"])
     expected_child_ids = tuple(
@@ -2359,6 +2531,7 @@ def _render_lists(st: Any) -> None:
         if st.button("Rebuild using the saved lists"):
             st.session_state["result"] = None
             st.session_state["list_identity_confirmed"] = False
+            st.session_state["progress_substep"] = "reading the lists"
             st.session_state["screen"] = "working"
             st.rerun()
     for index, child in enumerate(children):
@@ -2392,12 +2565,14 @@ def _render_lists(st: Any) -> None:
                 )
     left, right = st.columns([1, 2])
     if left.button("Back"):
+        st.session_state["progress_substep"] = "setup"
         st.session_state["screen"] = "intake"
         st.rerun()
-    if right.button("Build my cart", type="primary"):
+    if right.button("Build my plan", type="primary"):
         try:
             list_inputs = _build_list_inputs(st, children)
         except ValueError as error:
+            st.session_state["ui_error_active"] = True
             for message in str(error).splitlines():
                 st.error(escape_streamlit_dollars(message))
             return
@@ -2407,6 +2582,8 @@ def _render_lists(st: Any) -> None:
         st.session_state["extraction_cache_ready"] = False
         st.session_state["list_identity_confirmed"] = False
         st.session_state["result"] = None
+        st.session_state["ui_error_active"] = False
+        st.session_state["progress_substep"] = "reading the lists"
         st.session_state["screen"] = "working"
         st.rerun()
 
@@ -2559,8 +2736,10 @@ def _render_list_identity_warnings(
         )
     if continue_anyway:
         st.session_state["list_identity_confirmed"] = True
+        st.session_state["progress_substep"] = "building the cart"
         st.rerun()
     if return_to_lists:
+        st.session_state["progress_substep"] = "adding the lists"
         st.session_state["screen"] = "lists"
         st.rerun()
 
@@ -2581,6 +2760,7 @@ def _route_pipeline_result(
         st.session_state["budget_action_ids"] = ()
     st.session_state["result"] = result
     if not result.extractions:
+        st.session_state["ui_error_active"] = True
         st.error(
             "Every list failed extraction. Return to the lists screen and "
             "check the files or pasted text."
@@ -2613,6 +2793,12 @@ def _route_pipeline_result(
     st.session_state["screen"] = (
         "approval" if unresolved else "summary"
     )
+    st.session_state["progress_substep"] = (
+        "decisions to review" if unresolved else "your plan"
+    )
+    st.session_state["ui_error_active"] = bool(
+        result.extraction_failures
+    )
     st.rerun()
 
 
@@ -2620,6 +2806,7 @@ def _render_working(st: Any) -> None:
     intake = st.session_state["intake"]
     list_inputs = st.session_state["list_inputs"]
     if intake is None or not list_inputs:
+        st.session_state["ui_error_active"] = True
         st.error("Session setup or supply lists are missing.")
         if st.button("Return to lists"):
             st.session_state["screen"] = "lists"
@@ -2635,16 +2822,22 @@ def _render_working(st: Any) -> None:
         return
 
     if not st.session_state["extraction_cache_ready"]:
-        st.header("Reading the supply lists")
-        with st.status("Extracting list details…", expanded=True) as status:
+        st.header("Reading the lists")
+        with st.status("Reading the lists", expanded=True) as status:
+            status.write(
+                "Finding the items, quantities, and details on each list."
+            )
+
             def extraction_progress(
                 stage: str,
                 completed: int,
                 total: int,
                 detail: str,
             ) -> None:
-                del stage, completed, total
-                status.update(label=detail)
+                del detail
+                message = progress_narration(stage, completed, total)
+                status.update(label=message)
+                status.write(message)
 
             extractions, extraction_errors = _extract_list_inputs(
                 list_inputs,
@@ -2653,8 +2846,9 @@ def _render_working(st: Any) -> None:
             st.session_state["extracted_lists"] = extractions
             st.session_state["extraction_errors"] = extraction_errors
             st.session_state["extraction_cache_ready"] = True
+            st.session_state["ui_error_active"] = bool(extraction_errors)
             status.update(
-                label="List extraction complete",
+                label="The lists are ready",
                 state="complete",
             )
 
@@ -2671,8 +2865,12 @@ def _render_working(st: Any) -> None:
         _render_list_identity_warnings(st, identity_warnings)
         return
 
-    st.header("Building the cart")
-    with st.status("Planning the cart…", expanded=True) as status:
+    st.header("Building your plan")
+    with st.status(
+        "Combining the lists before shopping",
+        expanded=True,
+    ) as status:
+        status.write("Combining shared items across the lists.")
         last_detail = [""]
 
         def cart_progress(
@@ -2681,10 +2879,12 @@ def _render_working(st: Any) -> None:
             total: int,
             detail: str,
         ) -> None:
-            del stage, completed, total
-            if detail != last_detail[0]:
-                status.update(label=detail)
-                last_detail[0] = detail
+            del detail
+            message = progress_narration(stage, completed, total)
+            if message != last_detail[0]:
+                status.update(label=message)
+                status.write(message)
+                last_detail[0] = message
 
         offers = _active_catalog_offers(
             frozenset(st.session_state["stockout_skus"])
@@ -2699,6 +2899,7 @@ def _render_working(st: Any) -> None:
                 progress_callback=cart_progress,
             )
         except Exception as error:
+            st.session_state["ui_error_active"] = True
             status.update(label="Cart build stopped", state="error")
             st.error(
                 escape_streamlit_dollars(
@@ -2711,7 +2912,10 @@ def _render_working(st: Any) -> None:
                 st.session_state["screen"] = "lists"
                 st.rerun()
             return
-        status.update(label="Cart proposal ready", state="complete")
+        st.session_state["ui_error_active"] = bool(
+            result.extraction_failures
+        )
+        status.update(label="Your plan is ready", state="complete")
     _route_pipeline_result(st, result, child_labels)
 
 
@@ -2856,7 +3060,7 @@ def _budget_action_caption(action: BudgetAction) -> str:
 
 
 def _render_approval(st: Any) -> None:
-    """Render cached decisions with a live, delta-only budget builder."""
+    """Render cached decisions and the exact budget-plan builder."""
 
     result: PipelineResult | None = st.session_state["result"]
     intake = st.session_state["intake"]
@@ -2890,9 +3094,9 @@ def _render_approval(st: Any) -> None:
     generation = int(st.session_state["approval_generation"])
     offers_by_sku = {offer.sku: offer for offer in offers}
 
-    st.header("Review the decisions")
+    st.header("Decisions to review")
     st.write(
-        "Everything needing your input is collected here. "
+        "All required decisions are collected here. "
         "The recommended choice is selected by default."
     )
     selections: dict[str, ApprovalDisplayOption] = {}
@@ -3176,6 +3380,7 @@ def _render_approval(st: Any) -> None:
     st.session_state["parent_decisions"] = (
         tuple(st.session_state["parent_decisions"]) + response_log.entries
     )
+    st.session_state["progress_substep"] = "your plan"
     st.session_state["screen"] = "summary"
     st.rerun()
 
@@ -3272,22 +3477,21 @@ def _render_store_breakdown(
     child_labels: Mapping[str, str],
 ) -> None:
     stores_by_id = {store.store_id: store for store in stores}
-    st.subheader("Where to shop")
     for plan in _plans(optimization):
         for order in plan.store_orders:
             store = stores_by_id.get(order.store_id)
             store_name = store.name if store else "Unknown store"
-            with st.expander(
-                escape_streamlit_dollars(
-                    (
-                        f"{store_name} · "
-                        f"{order.fulfillment_method.title()} · "
-                        "Landed cost "
-                        f"{format_streamlit_money(order.landed_cost)}"
+            with st.container(border=True):
+                st.markdown(
+                    escape_streamlit_dollars(
+                        (
+                            f"#### {store_name} · "
+                            f"{order.fulfillment_method.title()} · "
+                            "Landed cost "
+                            f"{format_money(order.landed_cost)}"
+                        )
                     )
-                ),
-                expanded=True,
-            ):
+                )
                 rows = []
                 for line in order.lines:
                     allocations = ", ".join(
@@ -3329,7 +3533,6 @@ def _render_per_child(
     children: Sequence[Mapping[str, Any]],
     allocations: Mapping[str, int],
 ) -> None:
-    st.subheader("Per-child attribution")
     item_costs: dict[str, int] = {}
     landed_costs: dict[str, int] = {}
     for plan in _plans(optimization):
@@ -3363,13 +3566,12 @@ def _render_substitutions(
     matches: MatchResult,
     stores: Sequence[Store],
 ) -> None:
-    st.subheader("Substitutions and package choices")
     stores_by_id = {store.store_id: store for store in stores}
-    rows = []
+    decision_rows = []
+    package_rows = []
+    routine_equivalent_count = 0
     for plan in _plans(optimization):
         for line in plan.lines:
-            if line.substitution_type == SUBSTITUTION_NONE:
-                continue
             candidate = matches.candidate(
                 line.source_requirement_ids,
                 line.sku,
@@ -3379,30 +3581,65 @@ def _render_substitutions(
                 if candidate is not None
                 else ()
             )
+            if (
+                line.substitution_type != SUBSTITUTION_NONE
+                and frozenset(reasons) == {"different_unlocked_brand"}
+                and line.approval_status != "approved"
+            ):
+                routine_equivalent_count += 1
+                continue
             store = stores_by_id.get(line.store_id)
-            rows.append(
-                {
-                    "Product": _product_name(line, matches),
-                    "Store": (
-                        store.name if store is not None else "Unknown store"
-                    ),
-                    "Review": SUBSTITUTION_SEVERITY_LABELS.get(
-                        line.substitution_type,
-                        "Package choice",
-                    ),
-                    "Reason": (
-                        "; ".join(
-                            _substitution_reason(reason)
-                            for reason in reasons
-                        )
-                        or "Package-size overage"
-                    ),
-                }
+            if line.substitution_type != SUBSTITUTION_NONE:
+                decision_rows.append(
+                    {
+                        "Product": _product_name(line, matches),
+                        "Store": (
+                            store.name
+                            if store is not None
+                            else "Unknown store"
+                        ),
+                        "Status": SUBSTITUTION_SEVERITY_LABELS.get(
+                            line.substitution_type,
+                            "Package choice",
+                        ),
+                        "Reason": (
+                            "; ".join(
+                                _substitution_reason(reason)
+                                for reason in reasons
+                            )
+                            or "Package-size overage"
+                        ),
+                    }
+                )
+            if line.overage_units > 0:
+                package_rows.append(
+                    {
+                        "Product": _product_name(line, matches),
+                        "Packs": line.packs_purchased,
+                        "Needed": line.units_needed,
+                        "Bought": line.units_purchased,
+                        "Extra units": line.overage_units,
+                    }
+                )
+    if decision_rows:
+        st.warning(
+            "These products differ from the stated requirement or involved "
+            "a parent decision."
+        )
+        st.table(escape_streamlit_data(decision_rows))
+    if package_rows:
+        st.write("Package choices")
+        st.table(escape_streamlit_data(package_rows))
+    if routine_equivalent_count:
+        st.info(
+            (
+                f"{routine_equivalent_count} store-brand "
+                f"{'equivalent was' if routine_equivalent_count == 1 else 'equivalents were'} "
+                "chosen — no brand was specified."
             )
-    if rows:
-        st.table(escape_streamlit_data(rows))
-    else:
-        st.write("No substitutions were made.")
+        )
+    if not decision_rows and not package_rows and not routine_equivalent_count:
+        st.write("No substitutions or package overage were needed.")
 
 
 def _render_addons(
@@ -3414,7 +3651,6 @@ def _render_addons(
     if not proposal.eligible:
         st.session_state["include_addons"] = False
         return
-    st.subheader("Optional classroom add-ons")
     st.success(
         "The required-item cart is at or below 90% of the budget, so these "
         "wish-list items can be considered."
@@ -3473,7 +3709,6 @@ def _render_approvals_summary(
     st: Any,
     presentations: Sequence[ApprovalDisplayDecision],
 ) -> None:
-    st.subheader("Approval outcomes")
     outcomes = st.session_state["approval_outcomes"]
     if not presentations:
         st.write("No approvals were required.")
@@ -3515,7 +3750,6 @@ def _render_self_sourced_items(
 ) -> None:
     if not selections:
         return
-    st.subheader("Items you chose to source yourself")
     st.warning(
         "This shopping plan is incomplete. The required items below are not "
         "included in the store cart."
@@ -3532,6 +3766,166 @@ def _render_self_sourced_items(
             }
             for selection in selections
         ])
+    )
+
+
+def _assumption_text(flag: str) -> str | None:
+    """Turn a normalization assumption flag into plain display copy."""
+
+    if flag == "quantity_range_minimum_selected":
+        return "Used the minimum quantity from the range on the list."
+    if flag.startswith("standard_pack_count_assumed:"):
+        count = flag.rsplit(":", 1)[-1]
+        return f"Assumed a standard package contains {count} units."
+    if flag.startswith("ream_converted_to_sheets:"):
+        count = flag.rsplit(":", 1)[-1]
+        return f"Converted one ream to {count} sheets."
+    return None
+
+
+def _render_needs_attention(
+    st: Any,
+    result: PipelineResult,
+    optimization: OptimizationResult,
+    matches: MatchResult,
+    child_labels: Mapping[str, str],
+    self_sourced_decisions: Sequence[SelfSourcedSelection],
+    copy: CopySet,
+) -> None:
+    """Render unmet items, assumptions, and unresolved notes before details."""
+
+    has_attention = False
+    if result.extraction_failures:
+        has_attention = True
+        st.error(
+            "The plan uses only the lists that were read successfully. "
+            "The entries below were not included."
+        )
+        for child_id, reason in result.extraction_failures.items():
+            st.write(
+                escape_streamlit_dollars(
+                    f"{_child_display_label(child_id, child_labels)}: {reason}"
+                )
+            )
+
+    if self_sourced_decisions:
+        has_attention = True
+        _render_self_sourced_items(st, self_sourced_decisions)
+
+    if not optimization.is_complete:
+        has_attention = True
+        st.error(
+            "Required items unavailable from the selected store scope"
+        )
+        for item in optimization.gap_items:
+            st.write(f"• {_item_display_name(item)}")
+
+    assumptions: list[dict[str, str]] = []
+    for requirement in result.normalization.requirements:
+        for flag in requirement.assumption_flags:
+            message = _assumption_text(flag)
+            if message is None:
+                continue
+            assumptions.append(
+                {
+                    "Item": _item_display_name(
+                        requirement.canonical_item
+                    ),
+                    "For": _child_display_label(
+                        requirement.source.child_id,
+                        child_labels,
+                    ),
+                    "Assumption": message,
+                }
+            )
+    if assumptions:
+        has_attention = True
+        st.warning("Assumptions used to build the plan")
+        st.table(escape_streamlit_data(assumptions))
+
+    unresolved_notes: list[dict[str, str]] = []
+    seen_notes: set[tuple[str, str]] = set()
+    for plan in _plans(optimization):
+        for line in plan.lines:
+            for note in line.notes:
+                if not note.startswith("catalog_attribute_unknown:"):
+                    continue
+                attribute = note.rsplit(":", 1)[-1].replace("_", " ")
+                key = (line.sku, attribute)
+                if key in seen_notes:
+                    continue
+                seen_notes.add(key)
+                unresolved_notes.append(
+                    {
+                        "Product": _product_name(line, matches),
+                        "Unresolved detail": (
+                            f"The catalog does not record {attribute}."
+                        ),
+                    }
+                )
+    if unresolved_notes:
+        has_attention = True
+        st.warning("Details the catalog could not resolve")
+        st.table(escape_streamlit_data(unresolved_notes))
+
+    display_only = result.normalization.display_only_requirements
+    if display_only:
+        has_attention = True
+        st.info("List notes kept outside the shopping cart")
+        for requirement in display_only:
+            st.write(
+                escape_streamlit_dollars(
+                    f"• {_child_display_label(requirement.source.child_id, child_labels)}: "
+                    f"{requirement.source.raw_text}"
+                )
+            )
+
+    if not has_attention:
+        st.success(copy.attention_clear)
+
+
+def _render_summary_headline(
+    st: Any,
+    optimization: OptimizationResult,
+    budget_cents: int,
+    is_complete: bool,
+    copy: CopySet,
+) -> None:
+    """Lead with cost, budget status, and plan completeness."""
+
+    variance = budget_cents - optimization.landed_cost
+    if variance < 0:
+        st.error(
+            "Budget shortfall: "
+            f"{format_streamlit_money(abs(variance))}. "
+            "The current plan is over the entered budget."
+        )
+    if not is_complete:
+        st.error(
+            "This plan is incomplete because one or more required items are "
+            "not in the cart."
+        )
+
+    st.header(copy.summary_heading)
+    st.caption(copy.headline_heading)
+    columns = st.columns(3)
+    columns[0].metric(
+        "Landed cost",
+        format_streamlit_money(optimization.landed_cost),
+    )
+    if variance >= 0:
+        columns[1].metric(
+            "Budget remaining",
+            format_streamlit_money(variance),
+        )
+    else:
+        columns[1].metric(
+            "Budget shortfall",
+            format_streamlit_money(abs(variance)),
+        )
+    columns[2].metric(
+        "Plan status",
+        copy.complete_status if is_complete else "Incomplete",
     )
 
 
@@ -3599,50 +3993,82 @@ def _render_summary(st: Any) -> None:
         offers,
         stores,
     )
-    st.header("Your proposed shopping plan")
-    _render_budget_status(
+    is_complete = (
+        optimization.is_complete
+        and not self_sourced_decisions
+        and not result.extraction_failures
+    )
+    tone_state = ToneState(
+        has_shortfall=(
+            optimization.landed_cost > int(intake["budget_total"])
+        ),
+        has_unmet_required=not is_complete,
+        has_extraction_failure=bool(result.extraction_failures),
+        has_error=bool(st.session_state.get("ui_error_active", False)),
+    )
+    copy = select_copy_set(tone_state)
+
+    # 1. The plan's condition comes before every detail when it needs attention.
+    _render_summary_headline(
         st,
         optimization,
         int(intake["budget_total"]),
+        is_complete,
+        copy,
     )
-    if result.extraction_failures:
-        st.warning(
-            "The cart was built from the lists that succeeded. "
-            "These entries could not be extracted:"
-        )
-        for child_id, reason in result.extraction_failures.items():
-            st.write(
-                escape_streamlit_dollars(
-                    f"- {_child_display_label(child_id, child_labels)}: "
-                    f"{reason}"
-                )
-            )
 
-    _render_self_sourced_items(st, self_sourced_decisions)
-    _render_cost_summary(st, optimization)
-    _render_addons(st, result, child_labels)
-    _render_store_breakdown(
+    # 2. Unmet items, assumptions, and unresolved notes remain visible.
+    st.subheader("Needs your attention")
+    _render_needs_attention(
         st,
+        result,
         optimization,
         matches,
-        stores,
         child_labels,
+        self_sourced_decisions,
+        copy,
     )
-    _render_per_child(
-        st,
-        optimization,
-        children,
-        intake["budget_allocations"],
-    )
-    _render_substitutions(st, optimization, matches, stores)
-    _render_approvals_summary(st, approval_presentations)
 
-    st.subheader("Demonstrate live re-planning")
+    # 3. Parent outcomes are summarized; detailed reasoning stays collapsed.
+    parent_decisions = tuple(st.session_state["parent_decisions"])
+    with st.expander("Decisions made and their outcomes"):
+        _render_approvals_summary(st, approval_presentations)
+        st.caption("How the plan was built")
+        st.table(
+            escape_streamlit_data([
+                {
+                    "Time": decision.timestamp.isoformat(
+                        timespec="seconds"
+                    ),
+                    "Actor": decision.actor.title(),
+                    "Decision": decision.type.replace("_", " ").title(),
+                    "Reason": _humanize_internal_text(
+                        decision.rationale,
+                        offers,
+                        stores,
+                    ),
+                }
+                for decision in _decision_log(result, parent_decisions)
+            ])
+        )
+
+    # 4. Shopping details are available without competing with the headline.
+    with st.expander("Where to shop"):
+        _render_cost_summary(st, optimization)
+        _render_store_breakdown(
+            st,
+            optimization,
+            matches,
+            stores,
+            child_labels,
+        )
+
+    st.subheader("Try a live stock change")
     with st.container(border=True):
         st.write(
-            "Choose a product from this cart and mark it out of stock. The "
-            "agent will rebuild the plan from the cached lists using the "
-            "remaining catalog inventory."
+            "Mark one selected product out of stock. Ready, Set, School will "
+            "rebuild the plan from the saved list results and the remaining "
+            "simulated inventory."
         )
         selected_skus = tuple(
             dict.fromkeys(
@@ -3669,42 +4095,31 @@ def _render_summary(st: Any) -> None:
                 )
                 st.session_state["checkout_confirmation"] = None
                 st.session_state["result"] = None
+                st.session_state["progress_substep"] = (
+                    "re-planning after a stock change"
+                )
                 st.session_state["screen"] = "working"
                 st.rerun()
         else:
             st.info("There are no selected cart products to mark out of stock.")
 
-    display_only = result.normalization.display_only_requirements
-    if display_only:
-        with st.expander("List notes that are not shopping items"):
-            for requirement in display_only:
-                st.write(
-                    escape_streamlit_dollars(
-                        "- "
-                        f"{_child_display_label(requirement.source.child_id, child_labels)}: "
-                        f"{requirement.source.raw_text}"
-                    )
-                )
-
-    parent_decisions = tuple(st.session_state["parent_decisions"])
-    with st.expander("Full decision log"):
-        st.table(
-            escape_streamlit_data([
-                {
-                    "Time": decision.timestamp.isoformat(
-                        timespec="seconds"
-                    ),
-                    "Actor": decision.actor.title(),
-                    "Type": decision.type.replace("_", " ").title(),
-                    "Rationale": _humanize_internal_text(
-                        decision.rationale,
-                        offers,
-                        stores,
-                    ),
-                }
-                for decision in _decision_log(result, parent_decisions)
-            ])
+    # 5. Attribution is useful detail, but not part of the quick read.
+    with st.expander("Cost by child or classroom"):
+        _render_per_child(
+            st,
+            optimization,
+            children,
+            intake["budget_allocations"],
         )
+
+    # 6. Routine equivalents collapse to one line; consequential choices remain.
+    with st.expander("Substitutions and package choices"):
+        _render_substitutions(st, optimization, matches, stores)
+
+    # 7. BR-05 add-ons appear last among plan details and disappear when ineligible.
+    if result.addon_proposal.eligible:
+        with st.expander("Optional classroom donations"):
+            _render_addons(st, result, child_labels)
 
     summary_text = build_text_summary(
         result,
@@ -3719,20 +4134,14 @@ def _render_summary(st: Any) -> None:
         self_sourced_decisions,
         parent_decisions,
     )
-    st.download_button(
-        "Download text shopping list",
-        data=summary_text,
-        file_name="school-supply-cart.txt",
-        mime="text/plain",
-    )
 
+    # 8. Checkout stays visible for the parent who needs only the quick read.
     st.subheader("Simulated checkout")
     checkout_label = "Place simulated order"
-    if self_sourced_decisions:
+    if not is_complete:
         st.warning(
             "This checkout covers only the store-supplied items. Your overall "
-            "school-supply plan remains incomplete until you source the listed "
-            "required items yourself."
+            "plan remains incomplete until every required item is obtained."
         )
         checkout_label = "Place partial simulated order"
     else:
@@ -3740,6 +4149,12 @@ def _render_summary(st: Any) -> None:
             "This creates an order confirmation only. No retailer account or "
             "payment information is used."
         )
+    st.download_button(
+        "Download text shopping plan",
+        data=summary_text,
+        file_name="ready-set-school-plan.txt",
+        mime="text/plain",
+    )
     if st.button(checkout_label, type="primary"):
         confirmation = {
             "confirmation_id": (
@@ -3747,7 +4162,7 @@ def _render_summary(st: Any) -> None:
             ),
             "created_at": datetime.now(timezone.utc),
             "landed_cost": optimization.landed_cost,
-            "is_partial": bool(self_sourced_decisions),
+            "is_partial": not is_complete,
         }
         st.session_state["checkout_confirmation"] = confirmation
     confirmation = st.session_state["checkout_confirmation"]
@@ -3768,11 +4183,101 @@ def _render_summary(st: Any) -> None:
     if left.button("Change shopping settings"):
         st.session_state["result"] = None
         st.session_state["checkout_confirmation"] = None
+        st.session_state["ui_error_active"] = False
+        st.session_state["progress_substep"] = "setup"
         st.session_state["screen"] = "intake"
         st.rerun()
     if right.button("Start a new session"):
         clear_session_data(st)
         st.rerun()
+
+
+def _apply_custom_css(st: Any) -> None:
+    """Apply a restrained, warm back-to-school visual system."""
+
+    st.markdown(
+        """
+        <style>
+        :root {
+            --rss-ink: #263238;
+            --rss-muted: #66706b;
+            --rss-paper: #fffaf1;
+            --rss-card: #fffdf8;
+            --rss-line: #ded1bd;
+            --rss-pencil: #d7653f;
+            --rss-notebook: #2f6f70;
+        }
+        .stApp {
+            color: var(--rss-ink);
+            background:
+                linear-gradient(180deg, #fff7e9 0, #fffaf3 11rem, #fffdf9 28rem);
+        }
+        .block-container {
+            max-width: 1080px;
+            padding-top: 2rem;
+            padding-bottom: 4rem;
+        }
+        h1, h2, h3 {
+            color: var(--rss-ink);
+            font-family: Georgia, "Times New Roman", serif;
+            letter-spacing: -0.025em;
+            line-height: 1.15;
+        }
+        h1 {font-size: clamp(2.25rem, 5vw, 3.45rem) !important;}
+        h2 {margin-top: 1.7rem !important;}
+        p, label, [data-testid="stCaptionContainer"] {
+            line-height: 1.55;
+        }
+        [data-testid="stCaptionContainer"] {
+            color: var(--rss-muted);
+        }
+        [data-testid="stMetric"] {
+            border: 1px solid var(--rss-line);
+            border-radius: 0.85rem;
+            padding: 0.95rem 1rem;
+            background: var(--rss-card);
+            box-shadow: 0 5px 20px rgba(75, 58, 38, 0.05);
+        }
+        [data-testid="stExpander"],
+        [data-testid="stForm"],
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            border-color: var(--rss-line) !important;
+            border-radius: 0.85rem !important;
+            background: rgba(255, 253, 248, 0.82);
+        }
+        [data-testid="stNotification"] {
+            border-radius: 0.75rem;
+        }
+        .stButton > button,
+        .stDownloadButton > button,
+        [data-testid="stFormSubmitButton"] > button {
+            border-radius: 0.7rem;
+            min-height: 2.7rem;
+            font-weight: 650;
+        }
+        .stButton > button[kind="primary"],
+        [data-testid="stFormSubmitButton"] > button[kind="primary"] {
+            background: var(--rss-notebook);
+            border-color: var(--rss-notebook);
+        }
+        [data-testid="stProgress"] > div > div > div > div {
+            background-color: var(--rss-pencil);
+        }
+        [data-testid="stDataFrame"],
+        [data-testid="stTable"] {
+            border-radius: 0.7rem;
+            overflow: hidden;
+        }
+        hr {display: none !important;}
+        [data-testid="stForm"] [role="radiogroup"] > label {
+            align-items: flex-start;
+            margin-bottom: 0.8rem;
+            padding: 0.65rem 0;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def main() -> None:
@@ -3781,38 +4286,21 @@ def main() -> None:
     import streamlit as st
 
     st.set_page_config(
-        page_title="School Supply Cart",
-        page_icon="🛒",
+        page_title=APP_NAME,
         layout="wide",
     )
-    st.markdown(
-        """
-        <style>
-        .block-container {max-width: 1120px; padding-top: 1.5rem;}
-        h1, h2, h3 {letter-spacing: -0.02em;}
-        [data-testid="stMetric"] {
-            border: 1px solid #e5e7eb;
-            border-radius: 0.75rem;
-            padding: 0.8rem;
-            background: #ffffff;
-        }
-        [data-testid="stForm"] [role="radiogroup"] > label {
-            align-items: flex-start;
-            margin-bottom: 0.7rem;
-            padding: 0.55rem 0;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
     _initialize_state(st)
-    st.title("School Supply Cart")
-    st.caption(
-        "Turn one or more school lists into one clear, budget-aware plan."
-    )
+    _apply_custom_css(st)
+    copy = select_copy_set(tone_state_from_session(st.session_state))
+    st.title(APP_NAME)
+    st.caption(copy.tagline)
     _persistent_notice(st)
     screen = st.session_state["screen"]
-    _screen_progress(st, screen)
+    _screen_progress(
+        st,
+        screen,
+        st.session_state.get("progress_substep"),
+    )
     {
         "intake": _render_intake,
         "lists": _render_lists,
