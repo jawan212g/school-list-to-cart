@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    AuthenticationError,
+    BadRequestError,
+    OpenAI,
+    RateLimitError,
+)
 from pydantic import ValidationError
 from pypdf import PdfReader
 
@@ -21,6 +29,7 @@ from agent.rules import (
 from agent.schema import ExtractionEnvelope
 
 
+LOGGER = logging.getLogger(__name__)
 MODEL_NAME = "gpt-5.6-sol"
 
 DATA_BLOCK_START = "<school_supply_document untrusted_data=\"true\">"
@@ -84,7 +93,20 @@ class ExtractionValidationError(ValueError):
     """Raised when the model response has no parsed structured payload."""
 
 
-def _get_api_key() -> str:
+class ExtractionServiceError(RuntimeError):
+    """Raised with an actionable message when the OpenAI request fails."""
+
+
+@dataclass(frozen=True)
+class APIKeyDiagnostic:
+    """Safe credential metadata for the development-only intake diagnostic."""
+
+    found: bool
+    source: str | None
+    masked_key: str | None
+
+
+def _resolve_api_key() -> tuple[str, str]:
     try:
         import streamlit as st
     except ModuleNotFoundError:
@@ -96,13 +118,41 @@ def _get_api_key() -> str:
             secret_key = None
 
     if secret_key:
-        return str(secret_key)
+        return str(secret_key), "st.secrets"
 
     environment_key = os.getenv("OPENAI_API_KEY")
     if environment_key:
-        return environment_key
+        return environment_key, "environment"
     raise ExtractionConfigurationError(
         "OPENAI_API_KEY is missing from Streamlit secrets and the environment"
+    )
+
+
+def _get_api_key() -> str:
+    return _resolve_api_key()[0]
+
+
+def _mask_api_key(api_key: str) -> str:
+    if len(api_key) <= 12:
+        return "<configured; too short to preview safely>"
+    return f"{api_key[:8]}...{api_key[-4:]}"
+
+
+def get_api_key_diagnostic() -> APIKeyDiagnostic:
+    """Return source and a safe partial key without exposing the secret."""
+
+    try:
+        api_key, source = _resolve_api_key()
+    except ExtractionConfigurationError:
+        return APIKeyDiagnostic(
+            found=False,
+            source=None,
+            masked_key=None,
+        )
+    return APIKeyDiagnostic(
+        found=True,
+        source=source,
+        masked_key=_mask_api_key(api_key),
     )
 
 
@@ -235,6 +285,54 @@ def _call_model(
     return ExtractionEnvelope.model_validate(parsed)
 
 
+def _call_model_with_service_errors(
+    client: OpenAI,
+    content: list[dict[str, Any]],
+    retry: bool,
+) -> ExtractionEnvelope:
+    try:
+        return _call_model(client, content, retry)
+    except AuthenticationError as error:
+        LOGGER.exception(
+            "OpenAI extraction authentication failure: %r",
+            error,
+        )
+        raise ExtractionServiceError(
+            "OpenAI authentication failed. Verify OPENAI_API_KEY in "
+            "Streamlit Cloud App settings > Secrets, save the setting, and "
+            "restart the app."
+        ) from error
+    except RateLimitError as error:
+        LOGGER.exception(
+            "OpenAI extraction rate-limit failure: %r",
+            error,
+        )
+        raise ExtractionServiceError(
+            "OpenAI rate limit or quota was reached. Check the API project's "
+            "usage, billing, and rate limits, then retry."
+        ) from error
+    except APIConnectionError as error:
+        LOGGER.exception(
+            "OpenAI extraction connection failure: %r",
+            error,
+        )
+        raise ExtractionServiceError(
+            "Streamlit Cloud could not connect to OpenAI. Retry once, then "
+            "check OpenAI service status and the Streamlit logs for the "
+            "underlying network error."
+        ) from error
+    except BadRequestError as error:
+        LOGGER.exception(
+            "OpenAI extraction bad-request failure: %r",
+            error,
+        )
+        raise ExtractionServiceError(
+            "OpenAI rejected the extraction request. Verify that the "
+            "configured model is available to this API project, then inspect "
+            "the Streamlit logs for the request details."
+        ) from error
+
+
 def _apply_security_filters(
     envelope: ExtractionEnvelope,
     child_id: str,
@@ -289,10 +387,18 @@ def extract_document(
     active_client = client or create_model_client()
 
     try:
-        envelope = _call_model(active_client, content, retry=False)
+        envelope = _call_model_with_service_errors(
+            active_client,
+            content,
+            retry=False,
+        )
     except (ExtractionValidationError, ValidationError):
         try:
-            envelope = _call_model(active_client, content, retry=True)
+            envelope = _call_model_with_service_errors(
+                active_client,
+                content,
+                retry=True,
+            )
         except (ExtractionValidationError, ValidationError):
             return ExtractionEnvelope(
                 requirements=(),

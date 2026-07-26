@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -11,6 +12,11 @@ from typing import Any
 from uuid import uuid4
 
 from agent.decisions import Decision, DecisionLog
+from agent.extract import (
+    MODEL_NAME,
+    create_model_client,
+    get_api_key_diagnostic,
+)
 from agent.gate import ApprovalBatch, ApprovalInterrupt
 from agent.match import MatchResult
 from agent.optimize import CartPlan, OptimizationResult
@@ -35,6 +41,7 @@ from agent.store_scope import (
 from data.loader import Store, load_catalog, load_stores
 
 
+LOGGER = logging.getLogger(__name__)
 CENTS_PER_DOLLAR = 100
 BASIS_POINTS_PER_PERCENT = 100
 MAX_TAX_PERCENT = Decimal("25")
@@ -167,6 +174,35 @@ def store_radius_rows(
             }
         )
     return tuple(rows)
+
+
+def _exact_exception_message(error: BaseException) -> str:
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return " | caused by ".join(parts)
+
+
+def probe_openai_connection(client: Any | None = None) -> tuple[bool, str]:
+    """Make one minimal model-availability call for deployment diagnostics."""
+
+    try:
+        active_client = client or create_model_client()
+        active_client.models.retrieve(MODEL_NAME)
+    except Exception as error:
+        LOGGER.exception(
+            "OpenAI development diagnostic failed: %r",
+            error,
+        )
+        return False, _exact_exception_message(error)
+    return (
+        True,
+        f"OpenAI connection succeeded and {MODEL_NAME} is available.",
+    )
 
 
 def validate_uploaded_document(
@@ -358,8 +394,40 @@ def _screen_progress(st: Any, screen: str) -> None:
     st.caption(labels[screen])
 
 
+def _render_development_diagnostic(st: Any) -> None:
+    with st.expander("Development use: OpenAI connection diagnostic"):
+        diagnostic = get_api_key_diagnostic()
+        st.write(
+            f"API key found: {'Yes' if diagnostic.found else 'No'}"
+        )
+        st.write(f"Credential source: {diagnostic.source or 'None'}")
+        st.write(
+            "Key preview: "
+            f"{diagnostic.masked_key or 'Not available'}"
+        )
+        st.write(f"Configured model: {MODEL_NAME}")
+        st.caption(
+            "The preview contains only the first 8 and last 4 characters. "
+            "The full key is never displayed."
+        )
+        if st.button(
+            "Test OpenAI connection",
+            key="development_openai_connection_test",
+        ):
+            success, message = probe_openai_connection()
+            if success:
+                st.success(message)
+            else:
+                st.error(message)
+                st.caption(
+                    "The complete exception and traceback were written to "
+                    "the Streamlit application logs."
+                )
+
+
 def _render_intake(st: Any) -> None:
     st.header("Set up this shopping session")
+    _render_development_diagnostic(st)
     st.write(
         "Use labels such as “Grade 2” instead of full child names. "
         "Nothing is saved after this session."

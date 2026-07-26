@@ -1,5 +1,7 @@
 """Import-safe structural checks for the Streamlit application."""
 
+from types import SimpleNamespace
+
 import pytest
 
 import app
@@ -96,3 +98,49 @@ def test_radius_table_explains_pickup_scope_and_delivery_exception() -> None:
     assert delivery_rows[1]["Current scope"] == (
         "Included for delivery; radius does not apply"
     )
+
+
+def test_openai_probe_makes_one_minimal_model_lookup() -> None:
+    """Development diagnostic checks the configured model exactly once."""
+
+    calls: list[str] = []
+
+    class Models:
+        def retrieve(self, model_name: str) -> object:
+            calls.append(model_name)
+            return object()
+
+    success, message = app.probe_openai_connection(
+        SimpleNamespace(models=Models())
+    )
+
+    assert success is True
+    assert calls == [app.MODEL_NAME]
+    assert app.MODEL_NAME in message
+
+
+def test_openai_probe_reports_the_exact_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Development diagnostic preserves the exception type and message."""
+
+    class Models:
+        def retrieve(self, model_name: str) -> object:
+            try:
+                raise OSError("DNS lookup failed")
+            except OSError as cause:
+                raise RuntimeError(
+                    f"network blocked for {model_name}"
+                ) from cause
+
+    success, message = app.probe_openai_connection(
+        SimpleNamespace(models=Models())
+    )
+
+    assert success is False
+    assert message == (
+        f"RuntimeError: network blocked for {app.MODEL_NAME} | "
+        "caused by OSError: DNS lookup failed"
+    )
+    assert "network blocked" in caplog.text
+    assert "DNS lookup failed" in caplog.text
