@@ -49,6 +49,12 @@ SHARED_COST_ALLOCATION_METHOD = "proportional_by_units"  # BR-09.
 INTERRUPT_TARGET_COUNT = 3  # BR-10: target approval-interrupt maximum.
 INTERRUPT_DESIGN_FAILURE_COUNT = 6  # BR-10: more than six is a failure.
 
+MODEL_CALL_TIMEOUT_SECONDS = 30.0  # Operational ceiling for one model request.
+MODEL_CALL_MAX_RETRIES = 1  # One transient-service retry per model request.
+MODEL_MAX_CONCURRENCY = 4  # Bound parallel model requests in one session.
+BUDGET_ALTERNATIVE_PLAN_COUNT = 2  # At most two whole-plan alternatives.
+BUDGET_PLAN_CANDIDATE_LIMIT = 50  # Bound deterministic bundle validation work.
+
 CONFIDENCE_FLOOR = Decimal("0.7")  # BR-11: extraction/match review threshold.
 MAXIMUM_MATCH_CONFIDENCE = Decimal("1.0")  # FR-18: exact structured match.
 MINIMUM_MATCH_CONFIDENCE = Decimal("0.0")  # FR-18: missing judgment is blocked.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from openai import OpenAI
 
 from agent.addons import AddOnProposal, propose_addons
 from agent.aggregate import UnitNeed, aggregate_requirements
+from agent.budget_plans import BudgetAnalysis, build_budget_analysis
 from agent.consolidate import consolidate_selected_skus
 from agent.decisions import Decision, DecisionLog
 from agent.extract import (
@@ -43,6 +45,7 @@ from agent.optimize import (
 )
 from agent.rules import (
     DEFAULT_TAX_BASIS_POINTS,
+    MODEL_MAX_CONCURRENCY,
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
     SUBSTITUTION_NONE,
@@ -116,9 +119,11 @@ class PipelineResult:
     decisions: tuple[Decision, ...]
     extraction_failures: Mapping[str, str]
     addon_proposal: AddOnProposal
+    budget_analysis: BudgetAnalysis | None = None
 
 
 Extractor = Callable[..., ExtractionEnvelope]
+ProgressCallback = Callable[[str, int, int, str], None]
 
 
 def _stronger_substitution(
@@ -323,40 +328,66 @@ def run_pipeline(
     model_client: OpenAI | None = None,
     suitability_judge: SuitabilityJudge | None = None,
     extractor: Extractor = extract_document,
+    progress_callback: ProgressCallback | None = None,
 ) -> PipelineResult:
     """Build a proposed cart, approval batch, and log (FR-06–FR-30)."""
 
     active_stores = tuple(stores) if stores is not None else tuple(load_stores())
     active_offers = tuple(offers) if offers is not None else tuple(load_catalog())
 
+    child_ids = tuple(list_input.child_id for list_input in lists)
+    for child_id in child_ids:
+        if child_id not in session.children:
+            raise ValueError(f"List child_id is not in the session: {child_id}")
+    if len(set(child_ids)) != len(child_ids):
+        raise ValueError("Only one list per child_id is supported")
+
     extractions: dict[str, ExtractionEnvelope] = {}
     extraction_failures: dict[str, str] = {}
     extracted_requirements = []
+    completed_envelopes: dict[str, ExtractionEnvelope] = {}
+
+    def extract_one(list_input: ListInput) -> ExtractionEnvelope:
+        return extractor(
+            list_input.source,
+            child_id=list_input.child_id,
+            mime_type=list_input.mime_type,
+            client=model_client,
+        )
+
+    futures = {}
+    with ThreadPoolExecutor(
+        max_workers=min(max(len(lists), 1), MODEL_MAX_CONCURRENCY)
+    ) as executor:
+        futures = {
+            executor.submit(extract_one, list_input): list_input
+            for list_input in lists
+        }
+        completed_extractions = 0
+        for future in as_completed(futures):
+            list_input = futures[future]
+            completed_extractions += 1
+            if progress_callback is not None:
+                progress_callback(
+                    "extraction",
+                    completed_extractions,
+                    len(lists),
+                    f"Read {completed_extractions} of {len(lists)} lists",
+                )
+            try:
+                completed_envelopes[list_input.child_id] = future.result()
+            except Exception as error:
+                extraction_failures[list_input.child_id] = (
+                    f"{type(error).__name__}: {error}"
+                )
     for list_input in lists:
-        if list_input.child_id not in session.children:
-            raise ValueError(
-                f"List child_id is not in the session: {list_input.child_id}"
-            )
-        if list_input.child_id in extractions:
-            raise ValueError(
-                f"Only one list per child_id is supported: {list_input.child_id}"
-            )
-        try:
-            extraction = extractor(
-                list_input.source,
-                child_id=list_input.child_id,
-                mime_type=list_input.mime_type,
-                client=model_client,
-            )
-        except Exception as error:
-            extraction_failures[list_input.child_id] = (
-                f"{type(error).__name__}: {error}"
-            )
+        extraction = completed_envelopes.get(list_input.child_id)
+        if extraction is None:
             continue
         extraction = apply_extraction_security_filters(
-            extraction,
-            list_input.child_id,
-        )
+                extraction,
+                list_input.child_id,
+            )
         extraction = extraction.model_copy(
             update={
                 "requirements": tuple(
@@ -374,11 +405,26 @@ def run_pipeline(
         extractions[list_input.child_id] = extraction
         extracted_requirements.extend(extraction.requirements)
 
+    if progress_callback is not None:
+        progress_callback(
+            "normalization",
+            0,
+            len(extracted_requirements),
+            "Normalizing quantities and combining shared needs",
+        )
+
     normalization = normalize_requirements(extracted_requirements)
     unit_needs = aggregate_requirements(
         normalization.budget_requirements,
         student_counts_by_child=session.student_counts,
     )
+    if progress_callback is not None:
+        progress_callback(
+            "matching",
+            0,
+            len(unit_needs),
+            f"Matching 0 of {len(unit_needs)} item types",
+        )
     matches = match_offers(
         unit_needs,
         active_offers,
@@ -388,9 +434,19 @@ def run_pipeline(
         fulfillment_preference=session.fulfillment_pref,
         judge=(
             suitability_judge
-            or OpenAISuitabilityJudge(model_client)
+            or OpenAISuitabilityJudge(
+                model_client,
+                progress_callback=progress_callback,
+            )
         ),
     )
+    if progress_callback is not None:
+        progress_callback(
+            "optimization",
+            0,
+            len(unit_needs),
+            "Optimizing packages, stores, tax, and fulfillment",
+        )
     optimization_config = OptimizationConfig(
         shopping_mode=session.shopping_mode,
         budget_cents=session.budget_total,
@@ -426,6 +482,13 @@ def run_pipeline(
     else:
         optimization = preliminary_optimization
     proposed_cart = _decorate_optimization(optimization, final_matches)
+    if progress_callback is not None:
+        progress_callback(
+            "optimization",
+            len(consolidation.unit_needs),
+            len(consolidation.unit_needs),
+            "Package and store optimization complete",
+        )
 
     decision_log = DecisionLog(session.session_id)
     _record_cart_decisions(
@@ -457,6 +520,21 @@ def run_pipeline(
         optimization_config,
         student_counts_by_child=session.student_counts,
     )
+    budget_analysis = build_budget_analysis(
+        proposed_cart,
+        final_matches,
+        consolidation.unit_needs,
+        active_offers,
+        active_stores,
+        optimization_config,
+    )
+    if progress_callback is not None:
+        progress_callback(
+            "approval",
+            len(approval_batch.interrupts),
+            len(approval_batch.interrupts),
+            "Approval choices and optional add-ons are ready",
+        )
     approval_flags = _approval_flags(approval_batch)
     return PipelineResult(
         session=session,
@@ -471,4 +549,5 @@ def run_pipeline(
         decisions=decision_log.entries,
         extraction_failures=extraction_failures,
         addon_proposal=addon_proposal,
+        budget_analysis=budget_analysis,
     )

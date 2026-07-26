@@ -25,6 +25,8 @@ from agent.rules import (
     ALLOWED_CATEGORIES,
     CONFIDENCE_FLOOR,
     MAX_UPLOAD_BYTES,
+    MODEL_CALL_MAX_RETRIES,
+    MODEL_CALL_TIMEOUT_SECONDS,
     NON_PURCHASABLE_CATEGORY,
 )
 from agent.schema import (
@@ -204,7 +206,23 @@ def get_api_key_diagnostic() -> APIKeyDiagnostic:
 def create_model_client() -> OpenAI:
     """Create the shared model client without exposing its API key."""
 
-    return OpenAI(api_key=_get_api_key())
+    return OpenAI(
+        api_key=_get_api_key(),
+        timeout=MODEL_CALL_TIMEOUT_SECONDS,
+        max_retries=MODEL_CALL_MAX_RETRIES,
+    )
+
+
+def _configured_model_client(client: OpenAI) -> OpenAI:
+    """Apply the same timeout and retry policy to caller-supplied clients."""
+
+    with_options = getattr(client, "with_options", None)
+    if not callable(with_options):
+        return client
+    return with_options(
+        timeout=MODEL_CALL_TIMEOUT_SECONDS,
+        max_retries=MODEL_CALL_MAX_RETRIES,
+    )
 
 
 def _validate_file(path: Path) -> None:
@@ -359,7 +377,7 @@ def _call_model(
             "The prior response failed schema validation. Return only a complete "
             "response matching every schema field and constraint."
         )
-    response = client.responses.parse(
+    response = _configured_model_client(client).responses.parse(
         model=MODEL_NAME,
         instructions=instructions,
         input=[{"role": "user", "content": content}],

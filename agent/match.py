@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Callable, Literal, Protocol
 
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +24,9 @@ from agent.rules import (
     CONFIDENCE_FLOOR,
     MAXIMUM_MATCH_CONFIDENCE,
     MINIMUM_MATCH_CONFIDENCE,
+    MODEL_CALL_MAX_RETRIES,
+    MODEL_CALL_TIMEOUT_SECONDS,
+    MODEL_MAX_CONCURRENCY,
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
     SUBSTITUTION_NONE,
@@ -177,17 +181,19 @@ class StructuredSuitabilityJudge:
 class OpenAISuitabilityJudge:
     """Use the model only for semantic product suitability and confidence."""
 
-    def __init__(self, client: OpenAI | None = None) -> None:
+    def __init__(
+        self,
+        client: OpenAI | None = None,
+        *,
+        progress_callback: Callable[[str, int, int, str], None] | None = None,
+    ) -> None:
         self._client = client or create_model_client()
+        self._progress_callback = progress_callback
 
-    def judge(
+    def _call_batch(
         self,
         cases: Sequence[SuitabilityCase],
     ) -> tuple[SuitabilityDecision, ...]:
-        """Judge candidate suitability with structured output (FR-17, FR-18)."""
-
-        if not cases:
-            return ()
         payload = [
             {
                 "need_key": case.need_key,
@@ -212,22 +218,80 @@ class OpenAISuitabilityJudge:
             payload,
             ensure_ascii=False,
         ).replace("<", "\\u003c").replace(">", "\\u003e")
-        response = self._client.responses.parse(
-            model=MODEL_NAME,
-            instructions=MATCH_SYSTEM_INSTRUCTION,
-            input=(
-                f"{MATCH_DATA_START}\n"
-                f"{serialized_payload}\n"
-                f"{MATCH_DATA_END}"
-            ),
-            text_format=SuitabilityEnvelope,
-            reasoning={"effort": "low"},
-            store=False,
+        with_options = getattr(self._client, "with_options", None)
+        client = (
+            with_options(
+                timeout=MODEL_CALL_TIMEOUT_SECONDS,
+                max_retries=MODEL_CALL_MAX_RETRIES,
+            )
+            if callable(with_options)
+            else self._client
         )
-        parsed = response.output_parsed
-        if parsed is None:
+        for validation_attempt in range(MODEL_CALL_MAX_RETRIES + 1):
+            response = client.responses.parse(
+                model=MODEL_NAME,
+                instructions=MATCH_SYSTEM_INSTRUCTION,
+                input=(
+                    f"{MATCH_DATA_START}\n"
+                    f"{serialized_payload}\n"
+                    f"{MATCH_DATA_END}"
+                ),
+                text_format=SuitabilityEnvelope,
+                reasoning={"effort": "low"},
+                store=False,
+            )
+            parsed = response.output_parsed
+            if parsed is not None:
+                return SuitabilityEnvelope.model_validate(parsed).decisions
+            if validation_attempt == MODEL_CALL_MAX_RETRIES:
+                return ()
+        return ()
+
+    def judge(
+        self,
+        cases: Sequence[SuitabilityCase],
+    ) -> tuple[SuitabilityDecision, ...]:
+        """Judge candidate suitability with structured output (FR-17, FR-18)."""
+
+        if not cases:
             return ()
-        return SuitabilityEnvelope.model_validate(parsed).decisions
+        cases_by_need: dict[str, list[SuitabilityCase]] = {}
+        for case in cases:
+            cases_by_need.setdefault(case.need_key, []).append(case)
+        need_groups = tuple(cases_by_need.values())
+        batch_count = min(len(need_groups), MODEL_MAX_CONCURRENCY)
+        batches: list[list[SuitabilityCase]] = [
+            [] for _ in range(batch_count)
+        ]
+        batch_need_counts = [0] * batch_count
+        for index, need_cases in enumerate(need_groups):
+            batch_index = index % batch_count
+            batches[batch_index].extend(need_cases)
+            batch_need_counts[batch_index] += 1
+
+        decisions: list[SuitabilityDecision] = []
+        completed_needs = 0
+        with ThreadPoolExecutor(max_workers=batch_count) as executor:
+            futures = {
+                executor.submit(self._call_batch, batch): index
+                for index, batch in enumerate(batches)
+                if batch
+            }
+            for future in as_completed(futures):
+                batch_index = futures[future]
+                decisions.extend(future.result())
+                completed_needs += batch_need_counts[batch_index]
+                if self._progress_callback is not None:
+                    self._progress_callback(
+                        "matching",
+                        completed_needs,
+                        len(need_groups),
+                        (
+                            f"Matched {completed_needs} of "
+                            f"{len(need_groups)} item types"
+                        ),
+                    )
+        return tuple(decisions)
 
 
 @dataclass(frozen=True)

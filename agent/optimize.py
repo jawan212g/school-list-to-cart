@@ -687,17 +687,57 @@ def _best_multi_store_plan(
 
     best_plan: CartPlan | None = None
 
+    def unavoidable_tax(
+        item_subtotals_by_store: Mapping[str, int],
+    ) -> int:
+        return sum(
+            calculate_tax(subtotal, config.tax_basis_points)
+            for store_id, subtotal in item_subtotals_by_store.items()
+            if stores_by_id[store_id].tax_applies
+        )
+
+    def final_comparison_cost(
+        item_subtotals_by_store: Mapping[str, int],
+    ) -> int:
+        landed_cost = 0
+        for store_id, subtotal in item_subtotals_by_store.items():
+            store = stores_by_id[store_id]
+            fulfillment = _choose_fulfillment(
+                store,
+                subtotal,
+                config.fulfillment_preference,
+                config.store_radius_miles,
+            )
+            if fulfillment is None:
+                raise ValueError(
+                    f"Store {store_id} cannot satisfy the fulfillment preference"
+                )
+            _, fulfillment_fee = fulfillment
+            tax = (
+                calculate_tax(subtotal, config.tax_basis_points)
+                if store.tax_applies
+                else 0
+            )
+            landed_cost += subtotal + tax + fulfillment_fee
+        return (
+            landed_cost
+            + max(len(item_subtotals_by_store) - 1, 0)
+            * ADDITIONAL_STORE_PENALTY_CENTS
+        )
+
     def search(
         index: int,
         chosen: list[tuple[UnitNeed, PackageSelection]],
         used_stores: frozenset[str],
         current_item_cost: int,
+        item_subtotals_by_store: dict[str, int],
     ) -> None:
         nonlocal best_plan
 
         lower_bound = (
             current_item_cost
             + minimum_remaining_cost[index]
+            + unavoidable_tax(item_subtotals_by_store)
             + max(len(used_stores) - 1, 0)
             * ADDITIONAL_STORE_PENALTY_CENTS
         )
@@ -705,6 +745,14 @@ def _best_multi_store_plan(
             return
 
         if index == len(ordered):
+            comparison_cost = final_comparison_cost(
+                item_subtotals_by_store
+            )
+            if (
+                best_plan is not None
+                and comparison_cost > best_plan.comparison_cost
+            ):
+                return
             plan = _build_plan(chosen, stores_by_id, config)
             if best_plan is None or _plan_sort_key(plan) < _plan_sort_key(best_plan):
                 best_plan = plan
@@ -722,15 +770,28 @@ def _best_multi_store_plan(
             if store_limit is not None and len(next_stores) > store_limit:
                 continue
             chosen.append((unit_need, selection))
+            item_subtotals_by_store[store_id] = (
+                item_subtotals_by_store.get(store_id, 0)
+                + selection.item_subtotal
+            )
             search(
                 index + 1,
                 chosen,
                 next_stores,
                 current_item_cost + selection.item_subtotal,
+                item_subtotals_by_store,
             )
+            remaining_subtotal = (
+                item_subtotals_by_store[store_id]
+                - selection.item_subtotal
+            )
+            if remaining_subtotal:
+                item_subtotals_by_store[store_id] = remaining_subtotal
+            else:
+                del item_subtotals_by_store[store_id]
             chosen.pop()
 
-    search(0, [], frozenset(), 0)
+    search(0, [], frozenset(), 0, {})
     if best_plan is None:
         raise ValueError("No cart satisfies the active store constraints")
     return best_plan

@@ -708,6 +708,7 @@ def evaluate_gate(
         sorted(
             raw,
             key=lambda interrupt: (
+                interrupt.kind != "budget_exceeded",
                 -interrupt.cost_impact_cents,
                 interrupt.kind,
                 interrupt.interrupt_id,
