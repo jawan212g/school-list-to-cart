@@ -16,6 +16,9 @@ MAJOR_SUBSTITUTION_TYPES = frozenset(
     }
 )  # BR-01: substitutions that require approval.
 MAJOR_PACK_DIFFERENCE_PERCENT = 20  # BR-01: pack-count approval threshold.
+SUBSTITUTION_NONE = "none"  # BR-01: no substitution occurred.
+SUBSTITUTION_MINOR = "minor"  # BR-01: substitution may proceed automatically.
+SUBSTITUTION_MAJOR = "major"  # BR-01: substitution requires approval.
 
 DEFAULT_TAX_BASIS_POINTS = 700  # BR-02: default tax rate is 7.0%.
 BASIS_POINTS_DENOMINATOR = 10_000  # BR-02: integer tax-rate scale.
@@ -44,6 +47,8 @@ INTERRUPT_TARGET_COUNT = 3  # BR-10: target approval-interrupt maximum.
 INTERRUPT_DESIGN_FAILURE_COUNT = 6  # BR-10: more than six is a failure.
 
 CONFIDENCE_FLOOR = Decimal("0.7")  # BR-11: extraction/match review threshold.
+MAXIMUM_MATCH_CONFIDENCE = Decimal("1.0")  # FR-18: exact structured match.
+MINIMUM_MATCH_CONFIDENCE = Decimal("0.0")  # FR-18: missing judgment is blocked.
 
 CART_REVALIDATION_REQUIRED = True  # BR-12: revalidate before checkout.
 
@@ -137,3 +142,53 @@ STANDARD_CONTAINER_CONTENT_COUNTS = {
 COUNT_BASED_CATEGORIES = frozenset(STANDARD_PACK_COUNTS)
 PAPER_CATEGORIES = frozenset({"notebook_paper", "cardstock"})
 REAM_SHEET_COUNT = 500  # E-17: one ream contains 500 sheets.
+
+ATTRIBUTE_SENSITIVE_FIELDS = frozenset(
+    {
+        "acceptable_colors",
+        "size",
+        "ruling",
+        "tab_count",
+        "tip_style",
+        "material",
+        "style",
+        "connector",
+        "sharpened",
+    }
+)  # FR-19: changes to specified preference-sensitive attributes need approval.
+
+CATEGORY_IMPLIED_EXCLUSION_TERMS = {
+    "composition_notebooks": frozenset({"spiral"}),
+}  # BR-13: category identity already excludes these alternatives.
+
+CATEGORY_IMPLIED_ATTRIBUTE_TERMS = {
+    "composition_notebooks": frozenset({"spiral"}),
+}  # BR-13: redundant free-text attributes must not split identical needs.
+
+
+def pack_count_difference_is_major(
+    offered_count: int,
+    requested_count: int,
+) -> bool:
+    """Return whether a pack-count difference exceeds BR-01's threshold."""
+
+    if offered_count <= 0 or requested_count <= 0:
+        raise ValueError("Pack counts must be positive")
+    difference = abs(offered_count - requested_count)
+    return (
+        difference * PERCENT_DENOMINATOR
+        > requested_count * MAJOR_PACK_DIFFERENCE_PERCENT
+    )
+
+
+def non_returnable_offer_requires_approval(
+    is_returnable: bool,
+    pack_price_cents: int,
+) -> bool:
+    """Apply BR-08 to a single offered package without cart arithmetic."""
+
+    return (
+        not is_returnable
+        and pack_price_cents
+        > NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS
+    )

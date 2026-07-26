@@ -10,6 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 UnitType = Literal["each", "pack", "box", "ream"]
 RequirementType = Literal["required", "optional", "donation"]
 AttributeValue = str | int | float | bool | tuple[str, ...] | None
+UNRESTRICTED_COLOR_VALUES = frozenset(
+    {"any", "any color", "any colors", "assorted", "no preference"}
+)
 
 
 class RequirementAttributes(BaseModel):
@@ -40,7 +43,11 @@ class RequirementAttributes(BaseModel):
         normalized: list[str] = []
         for color in colors:
             value = color.strip().casefold()
-            if value and value not in normalized:
+            if (
+                value
+                and value not in UNRESTRICTED_COLOR_VALUES
+                and value not in normalized
+            ):
                 normalized.append(value)
         return tuple(normalized)
 

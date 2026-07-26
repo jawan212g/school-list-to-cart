@@ -61,7 +61,11 @@ Extraction rules:
   or tip style in attributes.
 - Store every acceptable color as a separate value in acceptable_colors. For
   example, "black or blue" becomes ["black", "blue"]. These are equally valid
-  alternatives, not a preferred color and a substitution.
+  alternatives, not a preferred color and a substitution. "Any color" means no
+  color restriction, so leave acceptable_colors empty.
+- Use style only for an explicitly requested product style. Do not put unit words
+  such as "pair", category names, #2 lead grade, or excluded styles in style.
+  Excluded styles belong only in exclusions.
 - Assign a confidence from 0 through 1 to every line. Do not guess when uncertain.
 - Always leave manual_review_required false and both review-reason collections
   empty. Deterministic code applies the confidence gate after validation.
@@ -100,6 +104,12 @@ def _get_api_key() -> str:
     raise ExtractionConfigurationError(
         "OPENAI_API_KEY is missing from Streamlit secrets and the environment"
     )
+
+
+def create_model_client() -> OpenAI:
+    """Create the shared model client without exposing its API key."""
+
+    return OpenAI(api_key=_get_api_key())
 
 
 def _validate_file(path: Path) -> None:
@@ -276,7 +286,7 @@ def extract_document(
     """Extract and validate text, PDF, JPG, or PNG input (FR-06–FR-13)."""
 
     content = _document_content(source, mime_type)
-    active_client = client or OpenAI(api_key=_get_api_key())
+    active_client = client or create_model_client()
 
     try:
         envelope = _call_model(active_client, content, retry=False)

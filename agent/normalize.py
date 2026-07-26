@@ -145,14 +145,26 @@ def normalize_requirement(requirement: Requirement) -> NormalizedRequirement:
 
     flags: list[str] = []
     attributes = requirement.attributes.model_dump(exclude_none=True)
-    canonical_item = canonicalize_item_name(requirement.canonical_item)
+    canonical_item = (
+        NON_PURCHASABLE_CATEGORY
+        if not requirement.is_purchasable
+        else canonicalize_item_name(requirement.canonical_item)
+    )
     low_confidence = (
         Decimal(str(requirement.extraction_confidence)) < CONFIDENCE_FLOOR
     )
-    manual_review_required = low_confidence and requirement.is_required
-    review_deferred = low_confidence and not requirement.is_required
+    manual_review_required = (
+        low_confidence
+        and requirement.is_purchasable
+        and requirement.is_required
+    )
+    review_deferred = (
+        low_confidence
+        and requirement.is_purchasable
+        and not requirement.is_required
+    )
 
-    if canonical_item is None:
+    if requirement.is_purchasable and canonical_item is None:
         canonical_item = requirement.canonical_item
         flags.append("category_not_allowed")
         if requirement.is_required:
@@ -225,7 +237,6 @@ def normalize_requirement(requirement: Requirement) -> NormalizedRequirement:
     is_display_only = not is_cart_eligible
 
     if not requirement.is_purchasable:
-        canonical_item = NON_PURCHASABLE_CATEGORY
         flags.append("non_purchasable_display_only")
     if manual_review_required:
         flags.append("manual_review_required")

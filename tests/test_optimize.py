@@ -148,6 +148,39 @@ def test_aggregation_rolls_up_children_but_separates_brand_locks() -> None:
     assert locked.allocated_to == {"child-b": 4}
 
 
+def test_br13_redundant_spiral_exclusion_does_not_split_composition_need() -> None:
+    """FR-14/BR-13: composition notebooks aggregate to one six-unit need."""
+
+    requirements = [
+        Requirement(
+            req_id="grade2",
+            child_id="grade2",
+            raw_text="2 composition notebooks, not spiral bound",
+            canonical_item="composition_notebooks",
+            quantity=2,
+            exclusions=("not spiral bound",),
+            attributes={"ruling": "wide"},
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="grade5",
+            child_id="grade5",
+            raw_text="4 composition notebooks",
+            canonical_item="composition_notebooks",
+            quantity=4,
+            attributes={"ruling": "wide"},
+            extraction_confidence=1.0,
+        ),
+    ]
+
+    needs = aggregate_requirements(requirements)
+
+    assert len(needs) == 1
+    assert needs[0].quantity == 6
+    assert needs[0].allocated_to == {"grade2": 2, "grade5": 4}
+    assert needs[0].exclusions == ()
+
+
 def test_e13_forty_eight_pack_is_blocked_by_overage_ceiling() -> None:
     """E-13: 5 units cost $5.00; the cheaper $4.80 48-pack is invalid."""
 

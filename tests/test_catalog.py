@@ -90,6 +90,27 @@ def test_catalog_contains_required_pack_and_brand_choices() -> None:
     assert {"Value Basics", "Crayola"} <= brands_by_category["colored_pencils"]
 
 
+def test_catalog_attribute_evidence_and_known_size_gaps() -> None:
+    """Matching data records checkable evidence without inventing exact sizes."""
+
+    offers = load_catalog()
+    by_sku = {offer.sku: offer for offer in offers}
+
+    assert by_sku["VD-PEN-TIC-024"].attributes["pre_sharpened"] is True
+    assert by_sku["VD-PBX-VB-001"].attributes["length_inches"] == 8
+    assert by_sku["VD-GLU-VB-006"].attributes["size_label"] == "large"
+    assert not any(
+        offer.category == "binders"
+        and offer.attributes.get("capacity_inches") == 1.5
+        for offer in offers
+    )
+    assert not any(
+        offer.category == "dividers"
+        and offer.attributes.get("tabs_per_set") == 5
+        for offer in offers
+    )
+
+
 def test_catalog_includes_stockouts_and_high_value_nonreturnable_item() -> None:
     """The approval and availability paths have seeded data to exercise."""
 

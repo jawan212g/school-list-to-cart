@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent.normalize import NormalizedRequirement
+from agent.rules import (
+    CATEGORY_IMPLIED_ATTRIBUTE_TERMS,
+    CATEGORY_IMPLIED_EXCLUSION_TERMS,
+)
 from agent.schema import Requirement
 
 
@@ -64,32 +70,91 @@ def _normalized_brand(brand_lock: str | None) -> str | None:
     return normalized.casefold() if normalized else None
 
 
+def _normalized_text(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value).casefold()).strip()
+
+
+def _effective_exclusions(
+    canonical_item: str,
+    exclusions: Iterable[str],
+) -> tuple[str, ...]:
+    implied_terms = CATEGORY_IMPLIED_EXCLUSION_TERMS.get(
+        canonical_item,
+        frozenset(),
+    )
+    normalized = []
+    for exclusion in exclusions:
+        text = _normalized_text(exclusion)
+        if any(term in text for term in implied_terms):
+            continue
+        normalized.append(text)
+    return tuple(sorted(normalized))
+
+
+def _effective_attributes(
+    canonical_item: str,
+    attributes: Mapping[str, Any],
+) -> dict[str, Any]:
+    effective = dict(attributes)
+    implied_terms = CATEGORY_IMPLIED_ATTRIBUTE_TERMS.get(
+        canonical_item,
+        frozenset(),
+    )
+    for field_name in ("style", "other_details"):
+        value = effective.get(field_name)
+        if value is None:
+            continue
+        text = _normalized_text(value)
+        if any(term in text for term in implied_terms):
+            effective.pop(field_name)
+    return effective
+
+
 def aggregate_requirements(
-    requirements: Iterable[Requirement],
+    requirements: Iterable[Requirement | NormalizedRequirement],
 ) -> tuple[UnitNeed, ...]:
     """Roll up needs and retain child attribution (FR-14, FR-15, FR-16)."""
 
     grouped: dict[tuple[Any, ...], _NeedAccumulator] = {}
 
-    for requirement in requirements:
-        if not requirement.is_purchasable:
+    for item in requirements:
+        if isinstance(item, NormalizedRequirement):
+            requirement = item.source
+            is_purchasable = item.is_cart_eligible
+            canonical_item = item.canonical_item
+            quantity = item.quantity
+            unit_type = item.unit_type
+            requirement_attributes = _effective_attributes(
+                canonical_item,
+                item.attributes,
+            )
+        else:
+            requirement = item
+            is_purchasable = requirement.is_purchasable
+            canonical_item = requirement.canonical_item
+            quantity = requirement.quantity
+            unit_type = requirement.unit_type
+            requirement_attributes = _effective_attributes(
+                canonical_item,
+                requirement.attributes.model_dump(exclude_none=True),
+            )
+
+        if not is_purchasable:
             continue
-        if requirement.quantity <= 0:
+        if quantity <= 0:
             raise ValueError(
                 f"Requirement {requirement.req_id} must have positive quantity"
             )
 
         normalized_brand = _normalized_brand(requirement.brand_lock)
-        requirement_attributes = requirement.attributes.model_dump(
-            exclude_none=True
-        )
-        normalized_exclusions = tuple(
-            sorted(exclusion.strip().casefold() for exclusion in requirement.exclusions)
+        normalized_exclusions = _effective_exclusions(
+            canonical_item,
+            requirement.exclusions,
         )
         key = (
-            requirement.canonical_item,
+            canonical_item,
             normalized_brand,
-            requirement.unit_type,
+            unit_type,
             normalized_exclusions,
             requirement.is_required,
             _freeze(requirement_attributes),
@@ -102,19 +167,19 @@ def aggregate_requirements(
                 else None
             )
             accumulator = _NeedAccumulator(
-                canonical_item=requirement.canonical_item,
+                canonical_item=canonical_item,
                 brand_lock=preserved_brand,
-                unit_type=requirement.unit_type,
-                exclusions=tuple(requirement.exclusions),
+                unit_type=unit_type,
+                exclusions=normalized_exclusions,
                 is_required=requirement.is_required,
                 attributes=requirement_attributes,
             )
             grouped[key] = accumulator
 
-        accumulator.quantity += requirement.quantity
+        accumulator.quantity += quantity
         accumulator.allocated_to[requirement.child_id] = (
             accumulator.allocated_to.get(requirement.child_id, 0)
-            + requirement.quantity
+            + quantity
         )
         accumulator.source_requirement_ids.append(requirement.req_id)
 

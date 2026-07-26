@@ -266,6 +266,37 @@ def test_low_confidence_required_item_still_requires_immediate_review() -> None:
     assert result.deferred_review_requirements == ()
 
 
+def test_low_confidence_display_only_line_never_interrupts_cart() -> None:
+    """FR-10: uncertain non-purchasable text remains display-only."""
+
+    instruction = _requirement(
+        "Label everything",
+        "non_purchasable",
+        0,
+        is_purchasable=False,
+        extraction_confidence=0.0,
+    )
+    normalized = normalize_requirement(instruction)
+
+    assert normalized.is_display_only is True
+    assert normalized.manual_review_required is False
+    assert normalized.review_deferred is False
+    assert "category_not_allowed" not in normalized.assumption_flags
+
+
+def test_any_color_creates_no_attribute_restriction() -> None:
+    """FR-19: 'any color' cannot become a preference-dependent choice."""
+
+    requirement = _requirement(
+        "2 highlighters, any color",
+        "highlighters",
+        2,
+        attributes={"acceptable_colors": ["any color"]},
+    )
+
+    assert requirement.attributes.acceptable_colors == ()
+
+
 def test_disallowed_category_is_flagged_and_excluded_from_cart() -> None:
     """Defense 3: a laptop cannot enter cart scope through normalization."""
 

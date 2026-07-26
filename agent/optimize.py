@@ -91,6 +91,9 @@ class CartLine:
     line_cost: int
     substitution_type: str
     approval_status: str
+    source_requirement_ids: tuple[str, ...] = ()
+    match_confidence: float = 1.0
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -487,6 +490,7 @@ def _build_plan(
                 line_cost=selected_pack.line_cost,
                 substitution_type=substitution_type,
                 approval_status=approval_status,
+                source_requirement_ids=unit_need.source_requirement_ids,
             )
             cart_lines.append(line)
             lines_by_store[line.store_id].append(line)
@@ -598,6 +602,9 @@ def _candidate_selections(
     unit_needs: Sequence[UnitNeed],
     offers: Sequence[Offer],
     eligible_stores: Sequence[Store],
+    candidate_skus_by_need: (
+        Mapping[tuple[str, ...], frozenset[str]] | None
+    ) = None,
 ) -> tuple[Mapping[str, PackageSelection], ...]:
     offers_by_store: dict[str, list[Offer]] = defaultdict(list)
     eligible_ids = {store.store_id for store in eligible_stores}
@@ -608,10 +615,25 @@ def _candidate_selections(
     candidates: list[Mapping[str, PackageSelection]] = []
     for unit_need in unit_needs:
         need_candidates: dict[str, PackageSelection] = {}
+        allowed_skus = (
+            None
+            if candidate_skus_by_need is None
+            else candidate_skus_by_need.get(
+                unit_need.source_requirement_ids,
+                frozenset(),
+            )
+        )
         for store in eligible_stores:
+            store_offers = offers_by_store.get(store.store_id, ())
+            if allowed_skus is not None:
+                store_offers = tuple(
+                    offer
+                    for offer in store_offers
+                    if offer.sku in allowed_skus
+                )
             selection = select_packages(
                 unit_need,
-                offers_by_store.get(store.store_id, ()),
+                store_offers,
             )
             if selection is not None:
                 need_candidates[store.store_id] = selection
@@ -730,6 +752,9 @@ def _fulfillment_tradeoffs(
     offers: Sequence[Offer],
     stores: Sequence[Store],
     config: OptimizationConfig,
+    candidate_skus_by_need: (
+        Mapping[tuple[str, ...], frozenset[str]] | None
+    ) = None,
 ) -> tuple[FulfillmentTradeoff, ...]:
     if config.fulfillment_preference != "pickup":
         return ()
@@ -743,6 +768,7 @@ def _fulfillment_tradeoffs(
             unit_needs,
             offers,
             (store,),
+            candidate_skus_by_need,
         )
         affected_items = tuple(
             unit_need.label
@@ -924,6 +950,9 @@ def optimize_cart(
     offers: Sequence[Offer],
     stores: Sequence[Store],
     config: OptimizationConfig | None = None,
+    candidate_skus_by_need: (
+        Mapping[tuple[str, ...], frozenset[str]] | None
+    ) = None,
 ) -> OptimizationResult:
     """Optimize all shopping modes and landed costs (FR-04, FR-21–FR-25)."""
 
@@ -941,6 +970,7 @@ def optimize_cart(
         offers,
         stores_in_scope,
         active_config,
+        candidate_skus_by_need,
     )
     eligible_stores = _eligible_stores(stores_in_scope, active_config)
     stores_by_id = {store.store_id: store for store in eligible_stores}
@@ -951,6 +981,7 @@ def optimize_cart(
         unit_needs,
         offers,
         eligible_stores,
+        candidate_skus_by_need,
     )
     if active_config.shopping_mode == "single_stop":
         plan, gap_items, second_trip = _best_single_stop_result(
