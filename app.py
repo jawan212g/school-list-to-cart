@@ -28,6 +28,7 @@ from agent.budget_plans import (
     BudgetAnalysis,
     BudgetPlan,
     BudgetSelectionEvaluation,
+    apply_authorized_budget,
     evaluate_budget_actions,
 )
 from agent.decisions import Decision, DecisionLog
@@ -50,6 +51,9 @@ from agent.pipeline import (
     ListInput,
     PipelineResult,
     PipelineSession,
+    ReplanTransition,
+    detect_cart_staleness,
+    replan_after_catalog_change,
     run_pipeline,
 )
 from agent.rules import (
@@ -725,13 +729,24 @@ def _all_interrupts(batch: ApprovalBatch) -> tuple[ApprovalInterrupt, ...]:
 
 def _active_catalog_offers(
     stockout_skus: frozenset[str],
+    price_overrides: Mapping[str, int] | None = None,
 ) -> tuple[Offer, ...]:
-    return tuple(
-        replace(offer, stock_qty=0)
-        if offer.sku in stockout_skus
-        else offer
-        for offer in load_catalog()
-    )
+    overrides = price_overrides or {}
+    active = []
+    for offer in load_catalog():
+        updated = offer
+        if offer.sku in overrides:
+            pack_price = overrides[offer.sku]
+            if pack_price <= 0:
+                raise ValueError("Catalog price overrides must be positive")
+            updated = replace(
+                updated,
+                pack_price=pack_price,
+            )
+        if offer.sku in stockout_skus:
+            updated = replace(updated, stock_qty=0)
+        active.append(updated)
+    return tuple(active)
 
 
 def _optimization_config(result: PipelineResult) -> OptimizationConfig:
@@ -744,6 +759,63 @@ def _optimization_config(result: PipelineResult) -> OptimizationConfig:
         store_radius_miles=session.store_radius_miles,
         fulfillment_preference=session.fulfillment_pref,
         tax_basis_points=session.tax_basis_points,
+    )
+
+
+def authorize_budget_increase(
+    result: PipelineResult,
+    optimization: OptimizationResult,
+    decision_log: DecisionLog,
+) -> tuple[PipelineResult, OptimizationResult]:
+    """Apply a parent-authorized BR-04 increase to the selected landed cost."""
+
+    previous_budget = result.session.budget_total
+    if previous_budget is None:
+        raise ValueError("A budget increase requires an existing budget")
+    new_budget = optimization.landed_cost
+    if new_budget < previous_budget:
+        raise ValueError("A budget increase cannot lower the session budget")
+    updated_optimization = apply_authorized_budget(
+        optimization,
+        new_budget,
+    )
+    updated_result = replace(
+        result,
+        session=replace(result.session, budget_total=new_budget),
+        proposed_cart=apply_authorized_budget(
+            result.proposed_cart,
+            new_budget,
+        ),
+    )
+    decision_log.record(
+        "budget_action",
+        (
+            "Parent authorized a budget increase from "
+            f"{previous_budget} cents to {new_budget} cents so the selected "
+            "required-item plan is fully funded."
+        ),
+        actor="parent",
+        affected_lines=tuple(
+            line.line_id
+            for plan in _plans(updated_optimization)
+            for line in plan.lines
+        ),
+    )
+    return updated_result, updated_optimization
+
+
+def budget_increase_was_selected(
+    presentations: Sequence[ApprovalDisplayDecision],
+    selections: Mapping[str, ApprovalDisplayOption],
+) -> bool:
+    """Return whether the parent selected BR-04's budget increase action."""
+
+    return any(
+        presentation.interrupt.kind == "budget_exceeded"
+        and selections[presentation.interrupt.interrupt_id]
+        .alternative_id.endswith("-raise")
+        for presentation in presentations
+        if presentation.interrupt.interrupt_id in selections
     )
 
 
@@ -2483,6 +2555,10 @@ def _initialize_state(st: Any) -> None:
         "addon_evaluation": None,
         "checkout_confirmation": None,
         "stockout_skus": frozenset(),
+        "price_overrides": {},
+        "replan_preserved_approval_ids": frozenset(),
+        "replan_preserved_budget_action_ids": frozenset(),
+        "catalog_change_notice": None,
         "ui_error_active": False,
         "progress_substep": None,
     }
@@ -3066,6 +3142,107 @@ def _run_pipeline_from_cached_extractions(
     )
 
 
+def _store_replan_transition(
+    st: Any,
+    transition: ReplanTransition,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    child_labels: Mapping[str, str],
+    notice: str,
+) -> None:
+    """Store one FR-32 transition while retaining only valid parent choices."""
+
+    result = transition.result
+    presentations = build_approval_presentations(
+        result,
+        offers,
+        stores,
+        child_labels,
+    )
+    options_by_interrupt = {
+        presentation.interrupt.interrupt_id: {
+            option.alternative_id
+            for option in _all_presentation_options(presentation)
+        }
+        for presentation in presentations
+    }
+    preserved_outcomes = {
+        interrupt_id: outcome
+        for interrupt_id, outcome in (
+            transition.preserved_approval_outcomes.items()
+        )
+        if outcome in options_by_interrupt.get(interrupt_id, set())
+    }
+    st.session_state["result"] = result
+    st.session_state["approval_generation"] = (
+        int(st.session_state["approval_generation"]) + 1
+    )
+    st.session_state["approval_presentations_cache"] = presentations
+    st.session_state["approval_outcomes"] = preserved_outcomes
+    st.session_state["replan_preserved_approval_ids"] = frozenset(
+        preserved_outcomes
+    )
+    st.session_state["budget_action_ids"] = (
+        transition.preserved_budget_action_ids
+    )
+    st.session_state["replan_preserved_budget_action_ids"] = frozenset(
+        transition.preserved_budget_action_ids
+    )
+    st.session_state["approved_optimization"] = None
+    st.session_state["resolved_interrupts"] = {}
+    st.session_state["addon_selection_token"] = None
+    st.session_state["addon_evaluation"] = None
+    st.session_state["checkout_confirmation"] = None
+    st.session_state["catalog_change_notice"] = notice
+    st.session_state["progress_substep"] = (
+        "re-planning after a catalog change"
+    )
+    st.session_state["screen"] = "working"
+
+
+def _apply_stockout_replan(
+    st: Any,
+    result: PipelineResult,
+    stockout_sku: str,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    child_labels: Mapping[str, str],
+) -> None:
+    """Apply the FR-33 stockout overlay and store its FR-32 transition."""
+
+    new_stockouts = (
+        frozenset(st.session_state["stockout_skus"])
+        | {stockout_sku}
+    )
+    st.session_state["stockout_skus"] = new_stockouts
+    changed_offers = _active_catalog_offers(
+        new_stockouts,
+        st.session_state["price_overrides"],
+    )
+    transition = replan_after_catalog_change(
+        result,
+        changed_offers,
+        stores,
+        change_kind="stockout",
+        changed_sku=stockout_sku,
+        approval_outcomes=st.session_state["approval_outcomes"],
+        budget_action_ids=st.session_state["budget_action_ids"],
+    )
+    _store_replan_transition(
+        st,
+        transition,
+        changed_offers,
+        stores,
+        child_labels,
+        (
+            f"{_catalog_product_label(stockout_sku, offers, stores)} "
+            "was marked out of stock. The cart was rebuilt and "
+            f"{len(transition.preserved_approval_outcomes)} prior "
+            "decision(s) remained valid."
+        ),
+    )
+
+
 def _render_list_identity_warnings(
     st: Any,
     warnings: Sequence[ListIdentityWarning],
@@ -3127,6 +3304,8 @@ def _route_pipeline_result(
         st.session_state["approved_optimization"] = None
         st.session_state["budget_action_ids"] = ()
         st.session_state["resolved_interrupts"] = {}
+        st.session_state["replan_preserved_approval_ids"] = frozenset()
+        st.session_state["replan_preserved_budget_action_ids"] = frozenset()
         st.session_state["addon_selection_token"] = None
         st.session_state["addon_evaluation"] = None
     st.session_state["result"] = result
@@ -3258,7 +3437,8 @@ def _render_working(st: Any) -> None:
                 last_detail[0] = message
 
         offers = _active_catalog_offers(
-            frozenset(st.session_state["stockout_skus"])
+            frozenset(st.session_state["stockout_skus"]),
+            st.session_state["price_overrides"],
         )
         try:
             result = _run_pipeline_from_cached_extractions(
@@ -3305,7 +3485,8 @@ def _legacy_render_approval(st: Any) -> None:
     }
     stores = tuple(load_stores())
     offers = _active_catalog_offers(
-        frozenset(st.session_state["stockout_skus"])
+        frozenset(st.session_state["stockout_skus"]),
+        st.session_state["price_overrides"],
     )
     presentations = build_approval_presentations(
         result,
@@ -3723,7 +3904,8 @@ def _render_approval(st: Any) -> None:
     }
     stores = tuple(load_stores())
     offers = _active_catalog_offers(
-        frozenset(st.session_state["stockout_skus"])
+        frozenset(st.session_state["stockout_skus"]),
+        st.session_state["price_overrides"],
     )
     cache = st.session_state.get("approval_presentations_cache")
     if cache is None:
@@ -3742,6 +3924,12 @@ def _render_approval(st: Any) -> None:
                 presentation.interrupt.interrupt_id,
             ),
         )
+    )
+    preserved_replan_ids = frozenset(
+        st.session_state["replan_preserved_approval_ids"]
+    )
+    preserved_replan_budget_ids = frozenset(
+        st.session_state["replan_preserved_budget_action_ids"]
     )
     generation = int(st.session_state["approval_generation"])
     offers_by_sku = {offer.sku: offer for offer in offers}
@@ -3882,6 +4070,46 @@ def _render_approval(st: Any) -> None:
     )
 
     st.header("Decisions to review")
+    if st.session_state.get("catalog_change_notice"):
+        st.info(
+            escape_streamlit_dollars(
+                str(st.session_state["catalog_change_notice"])
+            )
+        )
+    approval_cart_skus = tuple(
+        dict.fromkeys(
+            line.sku
+            for plan in _plans(result.proposed_cart)
+            for line in plan.lines
+        )
+    )
+    if approval_cart_skus:
+        with st.expander("Test a stock change before deciding"):
+            st.write(
+                "Mark a selected product out of stock. The list reading is "
+                "kept, the cart is rebuilt, and these decisions are refreshed."
+            )
+            approval_stockout_sku = st.selectbox(
+                "Product to mark out of stock",
+                approval_cart_skus,
+                format_func=lambda sku: escape_streamlit_dollars(
+                    _catalog_product_label(sku, offers, stores)
+                ),
+                key="approval_catalog_stockout_sku",
+            )
+            if st.button(
+                "Mark out of stock and re-plan",
+                key="approval_apply_catalog_stockout",
+            ):
+                _apply_stockout_replan(
+                    st,
+                    result,
+                    approval_stockout_sku,
+                    offers,
+                    stores,
+                    child_labels,
+                )
+                st.rerun()
     st.write(
         "All required decisions are collected here. "
         "The recommended choice is selected by default."
@@ -3902,6 +4130,37 @@ def _render_approval(st: Any) -> None:
                     f"{_join_names(presentation.affected_children)}"
                 )
             )
+            if interrupt.interrupt_id in preserved_replan_ids:
+                preserved_option_id = selection_state.active_outcomes.get(
+                    interrupt.interrupt_id
+                )
+                preserved_option = next(
+                    (
+                        option
+                        for option in _all_presentation_options(presentation)
+                        if option.alternative_id == preserved_option_id
+                    ),
+                    None,
+                )
+                if preserved_option is not None:
+                    selections[interrupt.interrupt_id] = preserved_option
+                    st.info(
+                        "Your earlier decision still applies after the "
+                        "catalog change. No new response is needed."
+                    )
+                    st.radio(
+                        "Preserved decision",
+                        (approval_option_label(preserved_option),),
+                        captions=(
+                            approval_option_caption(preserved_option),
+                        ),
+                        disabled=True,
+                        key=(
+                            f"preserved_{generation}_"
+                            f"{interrupt.interrupt_id}"
+                        ),
+                    )
+                    continue
             if (
                 interrupt.kind == "budget_exceeded"
                 and result.budget_analysis is not None
@@ -4147,11 +4406,18 @@ def _render_approval(st: Any) -> None:
     if not submitted:
         return
 
-    outcomes: dict[str, str] = {}
+    outcomes: dict[str, str] = {
+        interrupt_id: outcome
+        for interrupt_id, outcome in selection_state.active_outcomes.items()
+        if interrupt_id in preserved_replan_ids
+    }
     response_log = DecisionLog(f"{result.session.session_id}-parent")
     for presentation in presentations:
         interrupt = presentation.interrupt
-        if interrupt.interrupt_id in selection_state.resolutions:
+        if (
+            interrupt.interrupt_id in selection_state.resolutions
+            or interrupt.interrupt_id in preserved_replan_ids
+        ):
             continue
         alternative = selections[interrupt.interrupt_id]
         outcomes[interrupt.interrupt_id] = alternative.alternative_id
@@ -4165,6 +4431,8 @@ def _render_approval(st: Any) -> None:
             ),
         )
     for action_id in budget_selected_ids:
+        if action_id in preserved_replan_budget_ids:
+            continue
         action = (
             result.budget_analysis.actions_by_id[action_id]
             if result.budget_analysis is not None
@@ -4227,6 +4495,21 @@ def _render_approval(st: Any) -> None:
         )
         return
 
+    budget_increase_selected = budget_increase_was_selected(
+        presentations,
+        selections,
+    )
+    if budget_increase_selected:
+        result, approved_optimization = authorize_budget_increase(
+            result,
+            approved_optimization,
+            response_log,
+        )
+        updated_intake = dict(intake)
+        updated_intake["budget_total"] = result.session.budget_total
+        st.session_state["intake"] = updated_intake
+        st.session_state["result"] = result
+
     st.session_state["approval_outcomes"] = outcomes
     st.session_state["resolved_interrupts"] = {
         interrupt_id: resolution.message
@@ -4236,6 +4519,8 @@ def _render_approval(st: Any) -> None:
     }
     st.session_state["budget_action_ids"] = budget_selected_ids
     st.session_state["approved_optimization"] = approved_optimization
+    st.session_state["replan_preserved_approval_ids"] = frozenset()
+    st.session_state["replan_preserved_budget_action_ids"] = frozenset()
     st.session_state["parent_decisions"] = (
         tuple(st.session_state["parent_decisions"]) + response_log.entries
     )
@@ -5032,7 +5317,8 @@ def _render_summary(st: Any) -> None:
     }
     stores = tuple(load_stores())
     offers = _active_catalog_offers(
-        frozenset(st.session_state["stockout_skus"])
+        frozenset(st.session_state["stockout_skus"]),
+        st.session_state["price_overrides"],
     )
     cached_presentations = st.session_state.get(
         "approval_presentations_cache"
@@ -5108,6 +5394,12 @@ def _render_summary(st: Any) -> None:
         is_complete,
         copy,
     )
+    if st.session_state.get("catalog_change_notice"):
+        st.info(
+            escape_streamlit_dollars(
+                str(st.session_state["catalog_change_notice"])
+            )
+        )
 
     # 2. Only genuinely unresolved conditions receive prominent attention.
     if _has_genuine_attention(
@@ -5188,12 +5480,12 @@ def _render_summary(st: Any) -> None:
     with st.expander("Substitutions and package choices"):
         _render_substitutions(st, optimization, matches, stores)
 
-    st.subheader("Try a live stock change")
+    st.subheader("Try a live catalog change")
     with st.container(border=True):
         st.write(
-            "Mark one selected product out of stock. Ready, Set, School will "
-            "rebuild the plan from the saved list results and the remaining "
-            "simulated inventory."
+            "Change simulated stock or price. Ready, Set, School will reuse "
+            "the saved list reading and product judgments, rebuild the cart, "
+            "and ask only for decisions the change invalidates."
         )
         selected_skus = tuple(
             dict.fromkeys(
@@ -5203,30 +5495,104 @@ def _render_summary(st: Any) -> None:
             )
         )
         if selected_skus:
-            stockout_sku = st.selectbox(
-                "Product to mark out of stock",
-                selected_skus,
-                format_func=lambda sku: escape_streamlit_dollars(
-                    _catalog_product_label(sku, offers, stores)
-                ),
-            )
-            if st.button(
-                "Mark out of stock and re-plan",
-                type="primary",
-            ):
-                st.session_state["stockout_skus"] = (
-                    frozenset(st.session_state["stockout_skus"])
-                    | {stockout_sku}
+            offers_by_sku = {offer.sku: offer for offer in offers}
+            stock_column, price_column = st.columns(2)
+            with stock_column:
+                st.write("Stockout")
+                stockout_sku = st.selectbox(
+                    "Product to mark out of stock",
+                    selected_skus,
+                    format_func=lambda sku: escape_streamlit_dollars(
+                        _catalog_product_label(sku, offers, stores)
+                    ),
+                    key="catalog_stockout_sku",
                 )
-                st.session_state["checkout_confirmation"] = None
-                st.session_state["result"] = None
-                st.session_state["progress_substep"] = (
-                    "re-planning after a stock change"
+                if st.button(
+                    "Mark out of stock and re-plan",
+                    type="primary",
+                    key="apply_catalog_stockout",
+                ):
+                    _apply_stockout_replan(
+                        st,
+                        result,
+                        stockout_sku,
+                        offers,
+                        stores,
+                        child_labels,
+                    )
+                    st.rerun()
+            with price_column:
+                st.write("Price change")
+                price_sku = st.selectbox(
+                    "Product whose price changed",
+                    selected_skus,
+                    format_func=lambda sku: escape_streamlit_dollars(
+                        _catalog_product_label(sku, offers, stores)
+                    ),
+                    key="catalog_price_sku",
                 )
-                st.session_state["screen"] = "working"
-                st.rerun()
+                current_price = offers_by_sku[price_sku].pack_price
+                price_text = st.text_input(
+                    r"New pack price (\$)",
+                    value=(
+                        f"{current_price // CENTS_PER_DOLLAR}."
+                        f"{current_price % CENTS_PER_DOLLAR:02d}"
+                    ),
+                    key=f"catalog_price_value_{price_sku}",
+                )
+                if st.button(
+                    "Apply price and re-plan",
+                    key="apply_catalog_price",
+                ):
+                    try:
+                        new_price = money_to_cents(price_text)
+                        if new_price == current_price:
+                            raise ValueError(
+                                "Enter a price different from the current "
+                                "pack price."
+                            )
+                    except ValueError as error:
+                        st.error(escape_streamlit_dollars(str(error)))
+                    else:
+                        price_overrides = dict(
+                            st.session_state["price_overrides"]
+                        )
+                        price_overrides[price_sku] = new_price
+                        st.session_state["price_overrides"] = price_overrides
+                        changed_offers = _active_catalog_offers(
+                            frozenset(st.session_state["stockout_skus"]),
+                            price_overrides,
+                        )
+                        transition = replan_after_catalog_change(
+                            result,
+                            changed_offers,
+                            stores,
+                            change_kind="price_change",
+                            changed_sku=price_sku,
+                            approval_outcomes=st.session_state[
+                                "approval_outcomes"
+                            ],
+                            budget_action_ids=st.session_state[
+                                "budget_action_ids"
+                            ],
+                        )
+                        _store_replan_transition(
+                            st,
+                            transition,
+                            changed_offers,
+                            stores,
+                            child_labels,
+                            (
+                                f"{_catalog_product_label(price_sku, offers, stores)} "
+                                f"changed from {format_money(current_price)} "
+                                f"to {format_money(new_price)}. The cart was "
+                                "rebuilt and any new budget decision was "
+                                "added to the approval screen."
+                            ),
+                        )
+                        st.rerun()
         else:
-            st.info("There are no selected cart products to mark out of stock.")
+            st.info("There are no selected cart products to change.")
 
     # 7. BR-05 donations are last, collapsed, exact, and individually selectable.
     if addon_evaluation is not None:
@@ -5260,6 +5626,23 @@ def _render_summary(st: Any) -> None:
 
     # 8. Checkout stays visible for the parent who needs only the quick read.
     st.subheader("Simulated checkout")
+    checkout_staleness = detect_cart_staleness(optimization, offers)
+    if checkout_staleness:
+        st.error(
+            "A simulated catalog change was detected after this cart was "
+            "built. Re-plan before checkout."
+        )
+        for stale in checkout_staleness:
+            product = _catalog_product_label(stale.sku, offers, stores)
+            if stale.kind == "stock":
+                detail = f"{product} no longer has enough stock."
+            else:
+                detail = (
+                    f"{product} changed from "
+                    f"{format_money(stale.prior_line_cost_cents)} to "
+                    f"{format_money(stale.active_line_cost_cents or 0)}."
+                )
+            st.warning(escape_streamlit_dollars(detail))
     checkout_label = "Place simulated order"
     if not is_complete:
         st.warning(
@@ -5278,7 +5661,11 @@ def _render_summary(st: Any) -> None:
         file_name="ready-set-school-plan.txt",
         mime="text/plain",
     )
-    if st.button(checkout_label, type="primary"):
+    if st.button(
+        checkout_label,
+        type="primary",
+        disabled=bool(checkout_staleness),
+    ):
         confirmation = {
             "confirmation_id": (
                 "SIM-" + result.session.session_id.split("-")[0].upper()

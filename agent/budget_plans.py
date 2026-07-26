@@ -107,6 +107,27 @@ class BudgetAnalysis:
         return {action.action_id: action for action in self.actions}
 
 
+def apply_authorized_budget(
+    optimization: OptimizationResult,
+    authorized_budget_cents: int | None = None,
+) -> OptimizationResult:
+    """Apply a parent-authorized BR-04 ceiling and recompute budget status."""
+
+    budget_cents = (
+        optimization.landed_cost
+        if authorized_budget_cents is None
+        else authorized_budget_cents
+    )
+    if budget_cents < optimization.landed_cost:
+        raise ValueError("Authorized budget cannot remain below landed cost")
+    return replace(
+        optimization,
+        budget_cents=budget_cents,
+        within_budget=True,
+        shortfall_cents=0,
+    )
+
+
 def _selected_lines(
     optimization: OptimizationResult,
 ) -> tuple[CartLine, ...]:

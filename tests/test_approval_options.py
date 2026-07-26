@@ -732,6 +732,101 @@ def test_budget_interrupt_has_ranked_item_choices_and_applies_selection() -> Non
     assert "LANDED COST: $5.00" in summary
 
 
+def test_raise_budget_choice_funds_cart_and_clears_shortfall() -> None:
+    """BR-04: parent authorization changes the budget, not only the outcome."""
+
+    stores = (_store("VALUE", "Value Depot"),)
+    need = _need(
+        "headphones",
+        1,
+        {"grade2": 1},
+        {},
+        "grade2:headphones",
+    )
+    offers = (
+        _offer(
+            "HEADPHONES",
+            "VALUE",
+            "Classroom Headphones",
+            "headphones",
+            1,
+            1_000,
+        ),
+    )
+    config = OptimizationConfig(
+        shopping_mode="budget",
+        budget_cents=850,
+        fulfillment_preference="pickup",
+        tax_basis_points=0,
+    )
+    matches, optimization, batch = _approval_fixture(
+        (need,),
+        offers,
+        stores,
+        config,
+    )
+    result = _pipeline_result(
+        session=PipelineSession(
+            session_id="raise-budget",
+            children=("grade2",),
+            budget_total=850,
+            fulfillment_pref="pickup",
+            tax_basis_points=0,
+        ),
+        needs=(need,),
+        matches=matches,
+        optimization=optimization,
+        batch=batch,
+    )
+    presentation = app.build_approval_presentations(
+        result,
+        offers,
+        stores,
+        {"grade2": "Grade 2"},
+    )[0]
+    raise_option = next(
+        option
+        for option in presentation.options
+        if option.alternative_id.endswith("-raise")
+    )
+    assert raise_option.label == "Raise the budget by $1.50"
+    assert app.budget_increase_was_selected(
+        (presentation,),
+        {presentation.interrupt.interrupt_id: raise_option},
+    )
+
+    decision_log = DecisionLog("raise-budget-parent")
+    funded_result, funded_cart = app.authorize_budget_increase(
+        result,
+        optimization,
+        decision_log,
+    )
+
+    assert funded_result.session.budget_total == 1_000
+    assert funded_result.proposed_cart.budget_cents == 1_000
+    assert funded_result.proposed_cart.within_budget is True
+    assert funded_result.proposed_cart.shortfall_cents == 0
+    assert funded_cart.budget_cents == 1_000
+    assert funded_cart.within_budget is True
+    assert funded_cart.shortfall_cents == 0
+    assert len(decision_log.entries) == 1
+    assert decision_log.entries[0].type == "budget_action"
+    assert decision_log.entries[0].actor == "parent"
+    assert "850 cents to 1000 cents" in decision_log.entries[0].rationale
+    summary = app.build_text_summary(
+        funded_result,
+        funded_cart,
+        matches,
+        stores,
+        {"grade2": "Grade 2"},
+        {presentation.heading: raise_option.label},
+        (),
+        decision_log.entries,
+    )
+    assert summary.splitlines()[1] == "BUDGET REMAINING: $0.00"
+    assert "BUDGET SHORTFALL" not in summary
+
+
 @pytest.mark.parametrize(
     "kind",
     (

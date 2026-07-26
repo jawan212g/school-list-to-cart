@@ -49,6 +49,7 @@ from agent.rules import (
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
     SUBSTITUTION_NONE,
+    non_returnable_offer_requires_approval,
 )
 from agent.schema import ExtractionEnvelope
 from data.loader import Offer, Store, load_catalog, load_stores
@@ -120,6 +121,34 @@ class PipelineResult:
     extraction_failures: Mapping[str, str]
     addon_proposal: AddOnProposal
     budget_analysis: BudgetAnalysis | None = None
+    source_matches: MatchResult | None = None
+
+
+CatalogChangeKind = Literal["stockout", "price_change"]
+CatalogStalenessKind = Literal["stock", "price"]
+
+
+@dataclass(frozen=True)
+class ReplanTransition:
+    """One FR-32 catalog-change transition and its approval effects."""
+
+    result: PipelineResult
+    preserved_approval_outcomes: Mapping[str, str]
+    preserved_budget_action_ids: tuple[str, ...]
+    invalidated_approval_ids: tuple[str, ...]
+    new_interrupt_ids: tuple[str, ...]
+    change_kind: CatalogChangeKind
+    changed_sku: str
+
+
+@dataclass(frozen=True)
+class CatalogStaleness:
+    """One BR-12 difference between a built cart and active catalog."""
+
+    kind: CatalogStalenessKind
+    sku: str
+    prior_line_cost_cents: int
+    active_line_cost_cents: int | None
 
 
 Extractor = Callable[..., ExtractionEnvelope]
@@ -550,4 +579,284 @@ def run_pipeline(
         extraction_failures=extraction_failures,
         addon_proposal=addon_proposal,
         budget_analysis=budget_analysis,
+        source_matches=matches,
     )
+
+
+def _refresh_candidate(
+    candidate: CandidateMatch,
+    active_offer: Offer,
+) -> CandidateMatch:
+    """Refresh price and stock without repeating model suitability judgment."""
+
+    non_returnable_approval = non_returnable_offer_requires_approval(
+        active_offer.is_returnable,
+        active_offer.pack_price,
+    )
+    approval_reasons = tuple(
+        reason
+        for reason in candidate.approval_reasons
+        if reason != "non_returnable_threshold"
+    ) + (
+        ("non_returnable_threshold",)
+        if non_returnable_approval
+        else ()
+    )
+    return replace(
+        candidate,
+        offer=active_offer,
+        approval_reasons=approval_reasons,
+        requires_approval=(
+            candidate.substitution_type == SUBSTITUTION_MAJOR
+            or non_returnable_approval
+        ),
+    )
+
+
+def _refresh_matches_for_catalog(
+    matches: MatchResult,
+    offers: Sequence[Offer],
+) -> MatchResult:
+    """Apply current catalog price and stock to already-judged candidates."""
+
+    offers_by_sku = {offer.sku: offer for offer in offers}
+
+    def active_candidates(
+        candidates: Sequence[CandidateMatch],
+    ) -> tuple[CandidateMatch, ...]:
+        refreshed = []
+        for candidate in candidates:
+            active_offer = offers_by_sku.get(candidate.offer.sku)
+            if active_offer is None or active_offer.stock_qty <= 0:
+                continue
+            refreshed.append(_refresh_candidate(candidate, active_offer))
+        return tuple(refreshed)
+
+    return MatchResult(
+        needs=tuple(
+            replace(
+                need_matches,
+                candidates=active_candidates(need_matches.candidates),
+                review_blocked_candidates=active_candidates(
+                    need_matches.review_blocked_candidates
+                ),
+            )
+            for need_matches in matches.needs
+        )
+    )
+
+
+def _ungrouped_interrupt_ids(batch: ApprovalBatch) -> tuple[str, ...]:
+    """Return stable condition IDs even when BR-10 groups their display."""
+
+    return tuple(
+        child.interrupt_id
+        for interrupt in batch.interrupts
+        for child in (
+            interrupt.grouped_interrupts
+            if interrupt.grouped_interrupts
+            else (interrupt,)
+        )
+    )
+
+
+def replan_after_catalog_change(
+    prior: PipelineResult,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    *,
+    change_kind: CatalogChangeKind,
+    changed_sku: str,
+    approval_outcomes: Mapping[str, str] | None = None,
+    budget_action_ids: Sequence[str] = (),
+) -> ReplanTransition:
+    """Replan from cached matches after an FR-32 stock or price change."""
+
+    active_offers = tuple(offers)
+    active_stores = tuple(stores)
+    active_by_sku = {offer.sku: offer for offer in active_offers}
+    if changed_sku not in active_by_sku:
+        raise ValueError(f"Changed SKU is not in the catalog: {changed_sku}")
+    if change_kind == "stockout":
+        if active_by_sku[changed_sku].stock_qty > 0:
+            raise ValueError("A stockout change must set stock_qty to zero")
+    elif change_kind != "price_change":
+        raise ValueError(f"Unsupported catalog change: {change_kind}")
+
+    source_matches = prior.source_matches or prior.matches
+    refreshed_source_matches = _refresh_matches_for_catalog(
+        source_matches,
+        active_offers,
+    )
+    config = OptimizationConfig(
+        shopping_mode=prior.session.shopping_mode,
+        budget_cents=prior.session.budget_total,
+        allowed_store_ids=prior.session.allowed_stores,
+        max_stores=prior.session.max_stores,
+        store_radius_miles=prior.session.store_radius_miles,
+        fulfillment_preference=prior.session.fulfillment_pref,
+        tax_basis_points=prior.session.tax_basis_points,
+    )
+    preliminary = optimize_cart(
+        prior.unit_needs,
+        active_offers,
+        active_stores,
+        config,
+        candidate_skus_by_need=(
+            refreshed_source_matches.candidate_skus_by_need
+        ),
+    )
+    consolidation = consolidate_selected_skus(
+        prior.unit_needs,
+        refreshed_source_matches,
+        preliminary,
+    )
+    final_matches = consolidation.matches
+    if consolidation.changed:
+        optimization = optimize_cart(
+            consolidation.unit_needs,
+            active_offers,
+            active_stores,
+            config,
+            candidate_skus_by_need=final_matches.candidate_skus_by_need,
+        )
+    else:
+        optimization = preliminary
+    proposed_cart = _decorate_optimization(optimization, final_matches)
+
+    decision_log = DecisionLog(
+        f"{prior.session.session_id}-replan-{len(prior.decisions) + 1}"
+    )
+    affected_lines = tuple(
+        line.line_id
+        for line in _selected_lines(prior.proposed_cart)
+        if line.sku == changed_sku
+    )
+    decision_log.record(
+        "match",
+        (
+            f"Replanned after a {change_kind.replace('_', ' ')} for "
+            f"{changed_sku}; cached extraction and suitability judgments "
+            "were retained."
+        ),
+        actor="agent",
+        affected_lines=affected_lines,
+    )
+    _record_cart_decisions(
+        decision_log,
+        final_matches,
+        proposed_cart,
+    )
+    approval_batch = evaluate_gate(
+        GateContext(
+            optimization=proposed_cart,
+            matches=final_matches,
+            normalization=prior.normalization,
+            extractions=prior.extractions,
+            offers=active_offers,
+            stores=active_stores,
+            tax_basis_points=prior.session.tax_basis_points,
+            unit_needs=consolidation.unit_needs,
+            optimization_config=config,
+        ),
+        decision_log=decision_log,
+    )
+    addon_proposal = propose_addons(
+        prior.normalization,
+        proposed_cart,
+        consolidation.unit_needs,
+        final_matches,
+        active_offers,
+        active_stores,
+        config,
+        student_counts_by_child=prior.session.student_counts,
+    )
+    budget_analysis = build_budget_analysis(
+        proposed_cart,
+        final_matches,
+        consolidation.unit_needs,
+        active_offers,
+        active_stores,
+        config,
+    )
+    result = PipelineResult(
+        session=prior.session,
+        extractions=prior.extractions,
+        normalization=prior.normalization,
+        unit_needs=prior.unit_needs,
+        purchase_needs=consolidation.unit_needs,
+        matches=final_matches,
+        proposed_cart=proposed_cart,
+        approval_batch=approval_batch,
+        approval_flags=_approval_flags(approval_batch),
+        decisions=prior.decisions + decision_log.entries,
+        extraction_failures=prior.extraction_failures,
+        addon_proposal=addon_proposal,
+        budget_analysis=budget_analysis,
+        source_matches=refreshed_source_matches,
+    )
+
+    previous_ids = frozenset(
+        _ungrouped_interrupt_ids(prior.approval_batch)
+    )
+    current_ids = frozenset(_ungrouped_interrupt_ids(approval_batch))
+    previous_outcomes = approval_outcomes or {}
+    preserved_outcomes = {
+        interrupt_id: outcome
+        for interrupt_id, outcome in previous_outcomes.items()
+        if interrupt_id in current_ids
+    }
+    actions_by_id = (
+        {}
+        if budget_analysis is None
+        else budget_analysis.actions_by_id
+    )
+    preserved_budget_actions = tuple(
+        action_id
+        for action_id in dict.fromkeys(budget_action_ids)
+        if action_id in actions_by_id
+    )
+    return ReplanTransition(
+        result=result,
+        preserved_approval_outcomes=preserved_outcomes,
+        preserved_budget_action_ids=preserved_budget_actions,
+        invalidated_approval_ids=tuple(
+            sorted(set(previous_outcomes).difference(preserved_outcomes))
+        ),
+        new_interrupt_ids=tuple(sorted(current_ids.difference(previous_ids))),
+        change_kind=change_kind,
+        changed_sku=changed_sku,
+    )
+
+
+def detect_cart_staleness(
+    optimization: OptimizationResult,
+    offers: Sequence[Offer],
+) -> tuple[CatalogStaleness, ...]:
+    """Revalidate selected price and stock before simulated checkout (BR-12)."""
+
+    offers_by_sku = {offer.sku: offer for offer in offers}
+    stale: list[CatalogStaleness] = []
+    for line in _selected_lines(optimization):
+        offer = offers_by_sku.get(line.sku)
+        if offer is None or offer.stock_qty < line.packs_purchased:
+            stale.append(
+                CatalogStaleness(
+                    kind="stock",
+                    sku=line.sku,
+                    prior_line_cost_cents=line.line_cost,
+                    active_line_cost_cents=None,
+                )
+            )
+            continue
+        active_line_cost = offer.pack_price * line.packs_purchased
+        if active_line_cost != line.line_cost:
+            stale.append(
+                CatalogStaleness(
+                    kind="price",
+                    sku=line.sku,
+                    prior_line_cost_cents=line.line_cost,
+                    active_line_cost_cents=active_line_cost,
+                )
+            )
+    return tuple(stale)
