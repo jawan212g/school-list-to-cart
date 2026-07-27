@@ -18,6 +18,7 @@ from openai import (
     OpenAI,
     RateLimitError,
 )
+from docx import Document
 from pydantic import ValidationError
 from pypdf import PdfReader
 
@@ -41,7 +42,9 @@ MODEL_NAME = "gpt-5.6-sol"
 
 DATA_BLOCK_START = "<school_supply_document untrusted_data=\"true\">"
 DATA_BLOCK_END = "</school_supply_document>"
-SUPPORTED_FILE_SUFFIXES = frozenset({".txt", ".pdf", ".jpg", ".jpeg", ".png"})
+SUPPORTED_FILE_SUFFIXES = frozenset(
+    {".txt", ".docx", ".pdf", ".jpg", ".jpeg", ".png"}
+)
 IMAGE_MIME_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -258,6 +261,37 @@ def _pdf_text(data: bytes) -> str:
     return text
 
 
+def _docx_text(data: bytes) -> str:
+    """Extract paragraphs and table cells from a DOCX file (FR-06)."""
+
+    try:
+        document = Document(BytesIO(data))
+    except Exception as error:
+        raise ExtractionInputError(
+            "The uploaded content is not a readable DOCX file"
+        ) from error
+    blocks = [
+        paragraph.text.strip()
+        for paragraph in document.paragraphs
+        if paragraph.text.strip()
+    ]
+    for table in document.tables:
+        for row in table.rows:
+            cells = [
+                cell.text.strip()
+                for cell in row.cells
+                if cell.text.strip()
+            ]
+            if cells:
+                blocks.append(" | ".join(cells))
+    text = "\n".join(blocks).strip()
+    if not text:
+        raise ExtractionInputError(
+            "The DOCX contains no readable paragraphs or table content"
+        )
+    return text
+
+
 def _text_content(text: str) -> list[dict[str, Any]]:
     safe_text = _escape_data_block_markers(text)
     return [
@@ -290,13 +324,14 @@ def _image_content(data: bytes, mime_type: str) -> list[dict[str, Any]]:
 
 def _bytes_content(data: bytes, mime_type: str) -> list[dict[str, Any]]:
     if mime_type not in {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/pdf",
         "image/jpeg",
         "image/png",
         "text/plain",
     }:
         raise ExtractionInputError(
-            "Supported content types are text/plain, application/pdf, "
+            "Supported content types are text/plain, DOCX, application/pdf, "
             "image/jpeg, and image/png"
         )
     if len(data) > MAX_UPLOAD_BYTES:
@@ -307,6 +342,15 @@ def _bytes_content(data: bytes, mime_type: str) -> list[dict[str, Any]]:
         if not data.startswith(b"%PDF-"):
             raise ExtractionInputError("The uploaded content is not a valid PDF")
         return _text_content(_pdf_text(data))
+    if mime_type == (
+        "application/vnd.openxmlformats-officedocument."
+        "wordprocessingml.document"
+    ):
+        if not data.startswith(b"PK"):
+            raise ExtractionInputError(
+                "The uploaded content is not a valid DOCX file"
+            )
+        return _text_content(_docx_text(data))
     if mime_type == "image/jpeg":
         if not data.startswith(b"\xff\xd8\xff"):
             raise ExtractionInputError("The uploaded content is not a valid JPG")
@@ -360,6 +404,12 @@ def _document_content(
     suffix = path.suffix.casefold()
     if suffix == ".pdf":
         return _bytes_content(data, "application/pdf")
+    if suffix == ".docx":
+        return _bytes_content(
+            data,
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document",
+        )
     if suffix in IMAGE_MIME_TYPES:
         return _bytes_content(data, IMAGE_MIME_TYPES[suffix])
     return _bytes_content(data, "text/plain")

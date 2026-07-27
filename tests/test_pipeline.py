@@ -1,7 +1,12 @@
 """Model-free end-to-end tests for proposal pipeline composition."""
 
 from agent.match import StructuredSuitabilityJudge
-from agent.pipeline import ListInput, PipelineSession, run_pipeline
+from agent.pipeline import (
+    ListInput,
+    PipelineSession,
+    run_pipeline,
+    run_pipeline_from_confirmed_extractions,
+)
 from agent.schema import ExtractionEnvelope, Requirement
 from data.loader import Offer, Store
 
@@ -98,6 +103,66 @@ def test_pipeline_wires_two_lists_through_one_optimized_cart() -> None:
         "budget_action",
     ]
     assert all(decision.actor == "agent" for decision in result.decisions)
+
+
+def test_confirmed_extraction_boundary_builds_without_reextracting() -> None:
+    """FR-12: only the reviewed envelope enters plan generation."""
+
+    store = Store(
+        store_id="S",
+        name="Store",
+        distance_miles=1.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=0,
+        delivery_minimum=0,
+        tax_applies=False,
+    )
+    offer = Offer(
+        sku="PENCILS-2",
+        store_id="S",
+        brand="Generic",
+        title="Two pencils",
+        category="pencils",
+        pack_size=2,
+        unit_price=50,
+        pack_price=100,
+        stock_qty=1,
+        is_returnable=True,
+        attributes={},
+    )
+    session = PipelineSession(
+        session_id="confirmed",
+        children=("child-a",),
+        budget_total=500,
+        fulfillment_pref="pickup",
+        tax_basis_points=0,
+    )
+    reviewed = {
+        "child-a": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="confirmed-pencil",
+                    child_id="child-a",
+                    raw_text="2 pencils",
+                    canonical_item="pencils",
+                    quantity=2,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+    }
+
+    result = run_pipeline_from_confirmed_extractions(
+        session,
+        reviewed,
+        stores=[store],
+        offers=[offer],
+        suitability_judge=StructuredSuitabilityJudge(),
+    )
+
+    assert result.unit_needs[0].quantity == 2
+    assert result.proposed_cart.plan.lines[0].sku == "PENCILS-2"
 
 
 def test_pipeline_reports_required_item_with_no_equivalent() -> None:

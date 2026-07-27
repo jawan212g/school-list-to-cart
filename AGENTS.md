@@ -71,3 +71,70 @@ These are graded and must be present in the code, not just in the write-up:
   say so rather than adding it.
 - Prefer clear code over clever code. Four of the five people who will read this are
   not engineers.
+
+## Project Memory and Documentation
+
+Before beginning a meaningful task:
+
+1. Read `BRD.md` as the detailed product and technical specification.
+2. Read `PROJECT.md` for the project purpose, audience, deliverables, constraints, and success criteria.
+3. Read the most recent entries in `JOURNAL.md` to understand prior work and decisions.
+4. Inspect existing files before creating, replacing, moving, or deleting anything.
+5. Create a short plan before making substantial changes.
+
+If `PROJECT.md` or `JOURNAL.md` does not exist, do not invent project information. Create the file only when explicitly requested.
+
+### Document Roles
+
+- `AGENTS.md` contains permanent instructions for how the agent should work.
+- `BRD.md` contains the detailed business and technical requirements.
+- `PROJECT.md` contains the high-level project brief and current scope.
+- `JOURNAL.md` contains the dated history of work, decisions, problems, and next steps.
+- `.agents/skills/` contains reusable project skills.
+
+If instructions conflict, use this priority:
+
+1. Explicit user approval
+2. `BRD.md`
+3. `PROJECT.md`
+4. `AGENTS.md`
+5. `JOURNAL.md`
+
+Do not silently resolve major conflicts. Explain the conflict and ask for direction.
+
+## Workspace Rules
+
+- Keep all project files inside the current repository.
+- Do not create another parent project folder.
+- Use relative file paths whenever possible.
+- Do not overwrite original reference files without approval.
+- Do not expose API keys, passwords, tokens, proprietary information, or sensitive data.
+- Clearly label mock, synthetic, estimated, or incomplete information.
+- Do not claim that a feature works unless it has been tested or verified.
+
+## Journal Requirements
+
+After completing meaningful work, append a dated entry to `JOURNAL.md` containing:
+
+- Objective
+- Work completed
+- Decisions made
+- Problems or limitations
+- Files created or changed
+- Testing performed
+- Remaining work
+- Recommended next step
+
+Do not remove or rewrite previous journal entries unless explicitly instructed.
+
+## Definition of Done
+
+A meaningful task is complete only when:
+
+- The requested work has been completed.
+- Files are saved in the correct location.
+- The result has been tested or reviewed.
+- Assumptions and limitations are documented.
+- Relevant documentation has been updated.
+- `JOURNAL.md` has been updated.
+- The final response identifies the files changed and the next recommended step.

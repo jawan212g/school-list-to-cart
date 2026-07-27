@@ -1,0 +1,4 @@
+interface:
+  display_name: "Capstone Project Workflow"
+  short_description: "Build and verify the school list-to-cart capstone"
+  default_prompt: "Use $capstone-project-workflow to review the current project status and recommend the next verified step."

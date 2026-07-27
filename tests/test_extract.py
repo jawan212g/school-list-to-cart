@@ -205,3 +205,62 @@ def test_api_key_diagnostic_reports_environment_fallback(
     assert diagnostic.source == "environment"
     assert diagnostic.masked_key == "env-key-...last"
     assert environment_key not in diagnostic.masked_key
+
+
+def test_txt_input_extracts_readable_content_without_mutation() -> None:
+    """FR-06: UTF-8 TXT content reaches the delimited model input."""
+
+    content = extraction._document_content(
+        b"2 boxes of tissues\n12 pencils",
+        "text/plain",
+    )
+
+    assert len(content) == 1
+    assert "2 boxes of tissues\n12 pencils" in content[0]["text"]
+
+
+def test_docx_input_extracts_paragraphs_bullets_and_tables(
+    docx_list_bytes: bytes,
+) -> None:
+    """FR-06: readable DOCX blocks become delimited extraction text."""
+
+    content = extraction._document_content(
+        docx_list_bytes,
+        (
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
+        ),
+    )
+    text = content[0]["text"]
+
+    assert "2 boxes of tissues" in text
+    assert "12 pencils" in text
+    assert "Item | 4 glue sticks" in text
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "mime_type", "expected_prefix"),
+    [
+        ("png_list_bytes", "image/png", "data:image/png;base64,"),
+        ("jpeg_list_bytes", "image/jpeg", "data:image/jpeg;base64,"),
+    ],
+)
+def test_repeatable_image_fixtures_build_multimodal_content(
+    request: pytest.FixtureRequest,
+    fixture_name: str,
+    mime_type: str,
+    expected_prefix: str,
+) -> None:
+    """FR-06: stable image fixtures reach the image-capable model path."""
+
+    content = extraction._document_content(
+        request.getfixturevalue(fixture_name),
+        mime_type,
+    )
+
+    assert [block["type"] for block in content] == [
+        "input_text",
+        "input_image",
+        "input_text",
+    ]
+    assert content[1]["image_url"].startswith(expected_prefix)

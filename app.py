@@ -32,6 +32,7 @@ from agent.budget_plans import (
     evaluate_budget_actions,
 )
 from agent.decisions import Decision, DecisionLog
+from agent.demo import DEMO_LIST_TEXT, extract_demo_document
 from agent.extract import (
     MODEL_NAME,
     create_model_client,
@@ -39,7 +40,12 @@ from agent.extract import (
     get_api_key_diagnostic,
 )
 from agent.gate import ApprovalBatch, ApprovalInterrupt
-from agent.match import ATTRIBUTE_OFFER_KEYS, MatchResult
+from agent.match import (
+    ATTRIBUTE_OFFER_KEYS,
+    MatchResult,
+    StructuredSuitabilityJudge,
+    SuitabilityJudge,
+)
 from agent.optimize import (
     CartLine,
     CartPlan,
@@ -54,9 +60,15 @@ from agent.pipeline import (
     ReplanTransition,
     detect_cart_staleness,
     replan_after_catalog_change,
-    run_pipeline,
+    run_pipeline_from_confirmed_extractions,
+)
+from agent.review import (
+    organize_extractions,
+    reviewed_envelopes,
+    unresolved_required_items,
 )
 from agent.rules import (
+    ALLOWED_CATEGORIES,
     DEFAULT_TAX_BASIS_POINTS,
     MAX_CHILDREN_PER_SESSION,
     MAX_UPLOAD_BYTES,
@@ -67,6 +79,7 @@ from agent.rules import (
 )
 from agent.schema import (
     ExtractionEnvelope,
+    SupplyItemReview,
     validate_extraction_envelope,
 )
 from agent.store_scope import (
@@ -90,19 +103,31 @@ DEFAULT_RADIUS_MILES = 10.0
 DEVELOPMENT_DEBUG_ENV = "SCHOOL_CART_DEBUG"
 DEBUG_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 SUPPORTED_UPLOADS: Mapping[str, str] = {
+    ".docx": (
+        "application/vnd.openxmlformats-officedocument."
+        "wordprocessingml.document"
+    ),
     ".pdf": "application/pdf",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".txt": "text/plain",
 }
-SCREEN_ORDER = ("intake", "lists", "working", "approval", "summary")
+SCREEN_ORDER = (
+    "intake",
+    "lists",
+    "working",
+    "review",
+    "approval",
+    "summary",
+)
 SCREEN_PHASES: Mapping[str, tuple[str, str]] = {
-    "intake": ("Ready", "setup"),
-    "lists": ("Set", "adding the lists"),
-    "working": ("Set", "building the cart"),
-    "approval": ("School", "decisions to review"),
-    "summary": ("School", "your plan"),
+    "intake": ("1", "Upload and organize my list"),
+    "lists": ("1", "Upload and organize my list"),
+    "working": ("3", "Build my shopping plan"),
+    "review": ("2", "Review extracted items"),
+    "approval": ("4", "Approve final plan"),
+    "summary": ("4", "Approve final plan"),
 }
 SHOPPING_MODES: Mapping[str, str] = {
     "Lowest landed cost": "budget",
@@ -316,10 +341,10 @@ def select_copy_set(state: ToneState) -> CopySet:
 
 
 def screen_phase_label(screen: str, substep: str | None = None) -> str:
-    """Return one of the three visible Ready / Set / School phase labels."""
+    """Return one of the four required workflow stage labels."""
 
-    phase, default_substep = SCREEN_PHASES[screen]
-    return f"{phase} · {substep or default_substep}"
+    stage, default_substep = SCREEN_PHASES[screen]
+    return f"Stage {stage} of 4 · {substep or default_substep}"
 
 
 def progress_narration(
@@ -687,7 +712,7 @@ def validate_uploaded_document(
     suffix = Path(filename).suffix.casefold()
     mime_type = SUPPORTED_UPLOADS.get(suffix)
     if mime_type is None:
-        raise ValueError("Use a PDF, JPG, PNG, or TXT file.")
+        raise ValueError("Use a DOCX, PDF, JPG, JPEG, PNG, or TXT file.")
     if len(data) > MAX_UPLOAD_BYTES:
         maximum_mb = MAX_UPLOAD_BYTES // 1_000_000
         raise ValueError(f"File exceeds the {maximum_mb} MB size limit.")
@@ -695,6 +720,8 @@ def validate_uploaded_document(
         raise ValueError("The uploaded file is empty.")
     if suffix == ".pdf" and not data.startswith(b"%PDF-"):
         raise ValueError("This file is not a valid PDF.")
+    if suffix == ".docx" and not data.startswith(b"PK"):
+        raise ValueError("This file is not a valid DOCX.")
     if suffix in {".jpg", ".jpeg"} and not data.startswith(b"\xff\xd8\xff"):
         raise ValueError("This file is not a valid JPG image.")
     if suffix == ".png" and not data.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -2535,12 +2562,16 @@ def build_text_summary(
 def _initialize_state(st: Any) -> None:
     defaults: Mapping[str, Any] = {
         "screen": "intake",
+        "demo_mode": False,
         "child_count": 1,
         "intake": None,
         "list_inputs": (),
         "extracted_lists": {},
         "extraction_errors": {},
         "extraction_cache_ready": False,
+        "review_items": (),
+        "organized_list_confirmed": False,
+        "allow_unresolved_items": False,
         "list_identity_confirmed": False,
         "result": None,
         "approval_outcomes": {},
@@ -2592,12 +2623,11 @@ def _screen_progress(
     screen: str,
     substep: str | None = None,
 ) -> None:
-    """Show the three parent-facing phases with the current sub-step."""
+    """Show the four required parent-facing workflow stages."""
 
-    phase, _ = SCREEN_PHASES[screen]
-    phase_number = {"Ready": 1, "Set": 2, "School": 3}[phase]
-    st.progress(phase_number / 3)
-    st.caption(screen_phase_label(screen, substep))
+    phase, label = SCREEN_PHASES[screen]
+    st.progress(int(phase) / 4)
+    st.caption(f"Stage {phase} of 4 · {substep or label}")
 
 
 def _render_development_diagnostic(st: Any) -> None:
@@ -2647,6 +2677,15 @@ def _render_intake(st: Any) -> None:
     st.header("Let’s get the plan ready")
     if development_diagnostics_enabled(st):
         _render_development_diagnostic(st)
+    demo_mode = st.checkbox(
+        "Use stable offline demo mode",
+        value=bool(st.session_state["demo_mode"]),
+        help=(
+            "Uses deterministic sample extraction and the seeded fictional "
+            "catalog. No OpenAI or retailer service is required."
+        ),
+    )
+    st.session_state["demo_mode"] = demo_mode
     st.write(
         "Use labels such as “Grade 2” instead of full child names. "
         "Nothing is saved after this session."
@@ -2888,6 +2927,7 @@ def _render_intake(st: Any) -> None:
             "max_stores": max_stores,
             "fulfillment_pref": fulfillment_preference,
             "tax_basis_points": tax_basis_points,
+            "demo_mode": demo_mode,
         }
         st.session_state["result"] = None
         st.session_state["list_identity_confirmed"] = False
@@ -2959,7 +2999,7 @@ def _render_lists(st: Any) -> None:
     children = intake["children"]
     st.header("Add the lists")
     st.write(
-        "Paste one list for each entry, or upload a PDF, JPG, PNG, or TXT "
+        "Paste one list for each entry, or upload a DOCX, PDF, JPG, PNG, or TXT "
         "file. Every file is checked before it is read."
     )
     saved_inputs = tuple(st.session_state["list_inputs"])
@@ -2975,6 +3015,8 @@ def _render_lists(st: Any) -> None:
         if st.button("Rebuild using the saved lists"):
             st.session_state["result"] = None
             st.session_state["list_identity_confirmed"] = False
+            st.session_state["review_items"] = ()
+            st.session_state["organized_list_confirmed"] = False
             st.session_state["progress_substep"] = "reading the lists"
             st.session_state["screen"] = "working"
             st.rerun()
@@ -2994,7 +3036,7 @@ def _render_lists(st: Any) -> None:
             if st.session_state[f"list_mode_{index}"] == "Upload a file":
                 st.file_uploader(
                     "Supply list",
-                    type=("pdf", "jpg", "jpeg", "png", "txt"),
+                    type=("docx", "pdf", "jpg", "jpeg", "png", "txt"),
                     key=f"list_upload_{index}",
                 )
                 st.caption(
@@ -3003,6 +3045,11 @@ def _render_lists(st: Any) -> None:
             else:
                 st.text_area(
                     "Paste the complete list",
+                    value=(
+                        DEMO_LIST_TEXT
+                        if bool(intake.get("demo_mode"))
+                        else ""
+                    ),
                     height=220,
                     key=f"list_paste_{index}",
                     placeholder="Paste required items and optional sections…",
@@ -3012,7 +3059,7 @@ def _render_lists(st: Any) -> None:
         st.session_state["progress_substep"] = "setup"
         st.session_state["screen"] = "intake"
         st.rerun()
-    if right.button("Build my plan", type="primary"):
+    if right.button("Organize my list", type="primary"):
         try:
             list_inputs = _build_list_inputs(st, children)
         except ValueError as error:
@@ -3024,6 +3071,9 @@ def _render_lists(st: Any) -> None:
         st.session_state["extracted_lists"] = {}
         st.session_state["extraction_errors"] = {}
         st.session_state["extraction_cache_ready"] = False
+        st.session_state["review_items"] = ()
+        st.session_state["organized_list_confirmed"] = False
+        st.session_state["allow_unresolved_items"] = False
         st.session_state["list_identity_confirmed"] = False
         st.session_state["result"] = None
         st.session_state["ui_error_active"] = False
@@ -3057,6 +3107,8 @@ def _pipeline_session(intake: Mapping[str, Any]) -> PipelineSession:
 
 def _extract_list_inputs(
     list_inputs: Sequence[ListInput],
+    *,
+    extractor: Callable[..., ExtractionEnvelope] = extract_document,
     progress_callback: (
         Callable[[str, int, int, str], None] | None
     ) = None,
@@ -3072,7 +3124,7 @@ def _extract_list_inputs(
 
     def extract_one(list_input: ListInput) -> ExtractionEnvelope:
         return validate_extraction_envelope(
-            extract_document(
+            extractor(
                 list_input.source,
                 child_id=list_input.child_id,
                 mime_type=list_input.mime_type,
@@ -3114,30 +3166,20 @@ def _run_pipeline_from_cached_extractions(
     extractions: Mapping[str, ExtractionEnvelope],
     extraction_errors: Mapping[str, Exception],
     offers: Sequence[Offer],
+    suitability_judge: SuitabilityJudge | None = None,
     progress_callback: (
         Callable[[str, int, int, str], None] | None
     ) = None,
 ) -> PipelineResult:
     """Run later pipeline stages without making a second extraction call."""
 
-    def cached_extractor(
-        source: str | Path | bytes,
-        *,
-        child_id: str,
-        mime_type: str | None,
-        client: object | None,
-    ) -> ExtractionEnvelope:
-        del source, mime_type, client
-        error = extraction_errors.get(child_id)
-        if error is not None:
-            raise error
-        return extractions[child_id]
-
-    return run_pipeline(
+    del list_inputs
+    return run_pipeline_from_confirmed_extractions(
         session,
-        list_inputs,
+        extractions,
+        extraction_errors=extraction_errors,
         offers=offers,
-        extractor=cached_extractor,
+        suitability_judge=suitability_judge,
         progress_callback=progress_callback,
     )
 
@@ -3289,6 +3331,271 @@ def _render_list_identity_warnings(
         st.rerun()
 
 
+def _review_editor_rows(
+    items: Sequence[SupplyItemReview],
+    child_labels: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """Convert review models to editable, parent-facing table rows."""
+
+    return [
+        {
+            "review_id": item.review_id,
+            "req_id": item.req_id,
+            "child_id": item.child_id,
+            "For": child_labels.get(item.child_id, item.child_id),
+            "Item": item.item_name,
+            "Quantity": item.required_quantity,
+            "Unit": item.unit,
+            "Package size": item.package_size,
+            "Brand": item.brand or "",
+            "Exact brand": item.brand_required,
+            "Size": item.size or "",
+            "Color": ", ".join(item.color),
+            "Required details": (
+                item.required_attributes.get("other_details") or ""
+            ),
+            "Optional": item.optional,
+            "Already owned": item.already_owned,
+            "Allow equivalents": item.allow_equivalents,
+            "Notes": item.notes or "",
+            "Source text": item.source_text,
+            "Confidence": round(item.confidence, 2),
+            "Needs attention": ", ".join(item.issue_codes),
+            "Confirmed": item.review_status == "confirmed",
+            "Delete": item.review_status == "deleted",
+        }
+        for item in items
+    ]
+
+
+def _editor_records(value: Any) -> list[Mapping[str, Any]]:
+    """Return records from Streamlit's list or DataFrame editor result."""
+
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return list(to_dict("records"))
+    return list(value)
+
+
+def _review_items_from_editor(
+    value: Any,
+    prior_items: Sequence[SupplyItemReview],
+    children: Sequence[Mapping[str, Any]],
+) -> tuple[SupplyItemReview, ...]:
+    """Validate editable rows and preserve stable source evidence."""
+
+    prior_by_id = {item.review_id: item for item in prior_items}
+    child_ids_by_label = {
+        str(child["label"]): str(child["child_id"])
+        for child in children
+    }
+    default_child_id = str(children[0]["child_id"])
+    parsed: list[SupplyItemReview] = []
+    for index, record in enumerate(_editor_records(value)):
+        item_name = str(record.get("Item") or "").strip()
+        if not item_name:
+            continue
+        review_id = str(record.get("review_id") or "").strip()
+        prior = prior_by_id.get(review_id)
+        child_id = child_ids_by_label.get(
+            str(record.get("For") or ""),
+            str(record.get("child_id") or "").strip() or default_child_id,
+        )
+        if not review_id:
+            review_id = f"manual:{child_id}:{index + 1}"
+        raw_quantity = record.get("Quantity")
+        quantity = (
+            None
+            if raw_quantity in {None, ""}
+            else int(raw_quantity)
+        )
+        raw_package_size = record.get("Package size")
+        package_size = (
+            None
+            if raw_package_size in {None, ""}
+            else int(raw_package_size)
+        )
+        colors = tuple(
+            color.strip()
+            for color in str(record.get("Color") or "").split(",")
+            if color.strip()
+        )
+        details = str(record.get("Required details") or "").strip()
+        issue_codes = (
+            prior.issue_codes
+            if prior is not None
+            else (("missing_quantity",) if quantity is None else ())
+        )
+        parsed.append(
+            SupplyItemReview(
+                review_id=review_id,
+                req_id=(
+                    prior.req_id
+                    if prior is not None
+                    else f"manual-{index + 1}"
+                ),
+                child_id=child_id,
+                item_name=item_name,
+                required_quantity=quantity,
+                unit=str(record.get("Unit") or "each"),  # type: ignore[arg-type]
+                package_size=package_size,
+                brand=str(record.get("Brand") or "").strip() or None,
+                brand_required=bool(record.get("Exact brand")),
+                size=str(record.get("Size") or "").strip() or None,
+                color=colors,
+                material=(prior.material if prior is not None else None),
+                required_attributes=(
+                    {"other_details": details} if details else {}
+                ),
+                optional=bool(record.get("Optional")),
+                notes=str(record.get("Notes") or "").strip() or None,
+                source_text=(
+                    prior.source_text
+                    if prior is not None
+                    else f"Added by user: {item_name}"
+                ),
+                confidence=(
+                    prior.confidence if prior is not None else 1.0
+                ),
+                review_status=(
+                    "deleted"
+                    if bool(record.get("Delete"))
+                    else (
+                        "confirmed"
+                        if bool(record.get("Confirmed"))
+                        else "pending"
+                    )
+                ),
+                already_owned=bool(record.get("Already owned")),
+                allow_equivalents=bool(record.get("Allow equivalents")),
+                issue_codes=issue_codes,
+            )
+        )
+    return tuple(parsed)
+
+
+def _render_review(st: Any) -> None:
+    """Render the mandatory editable extraction review stage (FR-12)."""
+
+    intake = st.session_state["intake"]
+    extractions = st.session_state["extracted_lists"]
+    if intake is None or not extractions:
+        st.session_state["screen"] = "lists"
+        st.rerun()
+    children = intake["children"]
+    child_labels = {
+        str(child["child_id"]): str(child["label"])
+        for child in children
+    }
+    items = tuple(st.session_state["review_items"])
+    st.header("Review extracted items")
+    st.write(
+        "Check every item before shopping. Edit values, add missing rows, "
+        "mark items already owned, or remove incorrect rows."
+    )
+    if st.session_state["extraction_errors"]:
+        for child_id, error in st.session_state["extraction_errors"].items():
+            st.warning(
+                escape_streamlit_dollars(
+                    f"{child_labels.get(child_id, child_id)}: {error}"
+                )
+            )
+    attention_count = sum(bool(item.issue_codes) for item in items)
+    if attention_count:
+        st.warning(
+            f"{attention_count} item(s) contain ambiguity or low-confidence "
+            "details. Review and explicitly confirm them."
+        )
+    editor_value = st.data_editor(
+        _review_editor_rows(items, child_labels),
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        disabled=(
+            "review_id",
+            "req_id",
+            "child_id",
+            "Source text",
+            "Confidence",
+            "Needs attention",
+        ),
+        column_config={
+            "For": st.column_config.SelectboxColumn(
+                "For",
+                options=tuple(child_labels.values()),
+                required=True,
+            ),
+            "Item": st.column_config.SelectboxColumn(
+                "Item",
+                options=tuple(sorted(ALLOWED_CATEGORIES)),
+                required=True,
+            ),
+            "Quantity": st.column_config.NumberColumn(
+                "Quantity",
+                min_value=1,
+                step=1,
+            ),
+            "Unit": st.column_config.SelectboxColumn(
+                "Unit",
+                options=("each", "pack", "box", "ream"),
+                required=True,
+            ),
+            "Confidence": st.column_config.NumberColumn(
+                "Confidence",
+                format="%.2f",
+            ),
+        },
+        key="organized_list_editor",
+    )
+    allow_unresolved = st.checkbox(
+        "Proceed with unresolved required items after my explicit approval",
+        value=bool(st.session_state["allow_unresolved_items"]),
+        help=(
+            "Use only when you have reviewed the flagged rows and accept the "
+            "remaining uncertainty."
+        ),
+    )
+    left, right = st.columns([1, 2])
+    if left.button("Back to lists"):
+        st.session_state["screen"] = "lists"
+        st.rerun()
+    if right.button(
+        "Confirm list and build my plan",
+        type="primary",
+        use_container_width=True,
+    ):
+        try:
+            reviewed = _review_items_from_editor(
+                editor_value,
+                items,
+                children,
+            )
+            unresolved = unresolved_required_items(reviewed)
+            if unresolved and not allow_unresolved:
+                names = ", ".join(item.item_name for item in unresolved)
+                raise ValueError(
+                    "Confirm every required item and provide its quantity "
+                    f"before continuing. Unresolved: {names}"
+                )
+            confirmed = reviewed_envelopes(
+                dict(extractions),
+                reviewed,
+                allow_unresolved=allow_unresolved,
+            )
+        except (TypeError, ValueError) as error:
+            st.session_state["ui_error_active"] = True
+            st.error(escape_streamlit_dollars(str(error)))
+            return
+        st.session_state["review_items"] = reviewed
+        st.session_state["extracted_lists"] = confirmed
+        st.session_state["organized_list_confirmed"] = True
+        st.session_state["allow_unresolved_items"] = allow_unresolved
+        st.session_state["result"] = None
+        st.session_state["progress_substep"] = "Build my shopping plan"
+        st.session_state["screen"] = "working"
+        st.rerun()
+
+
 def _route_pipeline_result(
     st: Any,
     result: PipelineResult,
@@ -3391,6 +3698,11 @@ def _render_working(st: Any) -> None:
 
             extractions, extraction_errors = _extract_list_inputs(
                 list_inputs,
+                extractor=(
+                    extract_demo_document
+                    if bool(intake.get("demo_mode"))
+                    else extract_document
+                ),
                 progress_callback=extraction_progress,
             )
             st.session_state["extracted_lists"] = extractions
@@ -3413,6 +3725,33 @@ def _render_working(st: Any) -> None:
         and not st.session_state["list_identity_confirmed"]
     ):
         _render_list_identity_warnings(st, identity_warnings)
+        return
+
+    if not extractions:
+        st.session_state["ui_error_active"] = True
+        st.error(
+            "No readable list content was extracted. Return to the lists "
+            "screen and check the files or pasted text."
+        )
+        for child_id, error in extraction_errors.items():
+            st.warning(
+                escape_streamlit_dollars(
+                    f"{child_labels.get(child_id, child_id)}: {error}"
+                )
+            )
+        if st.button("Return to lists"):
+            st.session_state["screen"] = "lists"
+            st.rerun()
+        return
+
+    if not st.session_state["organized_list_confirmed"]:
+        if not st.session_state["review_items"]:
+            st.session_state["review_items"] = organize_extractions(
+                dict(extractions)
+            )
+        st.session_state["progress_substep"] = "Review extracted items"
+        st.session_state["screen"] = "review"
+        st.rerun()
         return
 
     st.header("Building your plan")
@@ -3447,6 +3786,11 @@ def _render_working(st: Any) -> None:
                 extractions,
                 extraction_errors,
                 offers=offers,
+                suitability_judge=(
+                    StructuredSuitabilityJudge()
+                    if bool(intake.get("demo_mode"))
+                    else None
+                ),
                 progress_callback=cart_progress,
             )
         except Exception as error:
@@ -5703,80 +6047,157 @@ def _render_summary(st: Any) -> None:
 
 
 def _apply_custom_css(st: Any) -> None:
-    """Apply a restrained, warm back-to-school visual system."""
+    """Apply a cheerful, accessible back-to-school visual system."""
 
     st.markdown(
         """
         <style>
         :root {
-            --rss-ink: #263238;
-            --rss-muted: #66706b;
-            --rss-paper: #fffaf1;
-            --rss-card: #fffdf8;
-            --rss-line: #ded1bd;
-            --rss-pencil: #d7653f;
-            --rss-notebook: #2f6f70;
+            --rss-ink: #24324a;
+            --rss-muted: #5f6b7a;
+            --rss-paper: #fffdf7;
+            --rss-card: #ffffff;
+            --rss-line: #b9d9ec;
+            --rss-pencil: #f05252;
+            --rss-notebook: #1479bd;
+            --rss-sunshine: #ffc928;
+            --rss-mint: #39bf91;
+            --rss-purple: #8464df;
+            --rss-sky: #ccefff;
+            --rss-coral: #ff8066;
+            --rss-pink: #ff9fc7;
         }
         .stApp {
             color: var(--rss-ink);
             background:
-                linear-gradient(180deg, #fff7e9 0, #fffaf3 11rem, #fffdf9 28rem);
+                radial-gradient(circle at 7% 12%, rgba(255, 201, 40, 0.32) 0 5rem, transparent 5.1rem),
+                radial-gradient(circle at 94% 18%, rgba(255, 159, 199, 0.25) 0 7rem, transparent 7.1rem),
+                radial-gradient(circle at 88% 88%, rgba(57, 191, 145, 0.22) 0 8rem, transparent 8.1rem),
+                linear-gradient(90deg, transparent 3.15rem, rgba(240, 82, 82, 0.22) 3.15rem, rgba(240, 82, 82, 0.22) 3.25rem, transparent 3.25rem),
+                repeating-linear-gradient(180deg, transparent 0, transparent 2.35rem, rgba(20, 121, 189, 0.09) 2.35rem, rgba(20, 121, 189, 0.09) 2.42rem),
+                linear-gradient(135deg, #fffaf0 0%, #edfaff 42%, #fff3f8 72%, #f0fff8 100%);
         }
         .block-container {
             max-width: 1080px;
-            padding-top: 2rem;
+            padding-top: 1.6rem;
             padding-bottom: 4rem;
         }
         h1, h2, h3 {
             color: var(--rss-ink);
-            font-family: Georgia, "Times New Roman", serif;
-            letter-spacing: -0.025em;
+            font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+            letter-spacing: -0.02em;
             line-height: 1.15;
         }
-        h1 {font-size: clamp(2.25rem, 5vw, 3.45rem) !important;}
-        h2 {margin-top: 1.7rem !important;}
+        h1 {
+            width: fit-content;
+            margin-bottom: 0.15rem !important;
+            font-size: clamp(2.35rem, 5vw, 3.65rem) !important;
+            font-weight: 850 !important;
+            background: linear-gradient(90deg, var(--rss-notebook), var(--rss-purple), var(--rss-pencil));
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            text-shadow: 0 3px 0 rgba(255, 211, 90, 0.22);
+        }
+        h1::after {
+            content: " ✏️";
+            -webkit-text-fill-color: initial;
+            font-size: 0.65em;
+        }
+        h2 {
+            margin-top: 1.7rem !important;
+            padding-left: 0.8rem;
+            border-left: 0.5rem solid var(--rss-sunshine);
+            background: linear-gradient(90deg, rgba(255, 201, 40, 0.18), transparent 72%);
+            border-radius: 0 0.8rem 0.8rem 0;
+            padding-block: 0.28rem;
+        }
+        h3 {
+            color: #315e88;
+        }
         p, label, [data-testid="stCaptionContainer"] {
             line-height: 1.55;
         }
         [data-testid="stCaptionContainer"] {
             color: var(--rss-muted);
+            font-weight: 500;
         }
         [data-testid="stMetric"] {
-            border: 1px solid var(--rss-line);
-            border-radius: 0.85rem;
-            padding: 0.95rem 1rem;
-            background: var(--rss-card);
-            box-shadow: 0 5px 20px rgba(75, 58, 38, 0.05);
+            border: 2px solid var(--rss-line);
+            border-radius: 1.15rem;
+            padding: 1rem 1.1rem;
+            background: linear-gradient(145deg, #ffffff, #f1fbff);
+            box-shadow: 0 7px 0 rgba(20, 121, 189, 0.13);
         }
         [data-testid="stExpander"],
         [data-testid="stForm"],
         [data-testid="stVerticalBlockBorderWrapper"] {
-            border-color: var(--rss-line) !important;
-            border-radius: 0.85rem !important;
-            background: rgba(255, 253, 248, 0.82);
+            border: 2px solid var(--rss-line) !important;
+            border-radius: 1.15rem !important;
+            background: linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(248, 244, 255, 0.94));
+            box-shadow: 0 7px 0 rgba(132, 100, 223, 0.12);
         }
         [data-testid="stNotification"] {
-            border-radius: 0.75rem;
+            border-radius: 1rem;
+            border-width: 2px;
+        }
+        [data-testid="stTextInput"] input,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stSelectbox"] > div > div {
+            border-radius: 0.8rem !important;
+            background-color: #f5fbff !important;
+            border-color: #9ecde8 !important;
+        }
+        [data-testid="stTextInput"] input:focus,
+        [data-testid="stNumberInput"] input:focus {
+            border-color: var(--rss-notebook) !important;
+            box-shadow: 0 0 0 0.2rem rgba(40, 120, 181, 0.13) !important;
         }
         .stButton > button,
         .stDownloadButton > button,
         [data-testid="stFormSubmitButton"] > button {
-            border-radius: 0.7rem;
-            min-height: 2.7rem;
-            font-weight: 650;
+            border: 2px solid var(--rss-notebook);
+            background: linear-gradient(135deg, #ffffff, var(--rss-sky));
+            color: var(--rss-ink);
+            border-radius: 999px;
+            min-height: 2.85rem;
+            padding-inline: 1.25rem;
+            font-weight: 750;
+            transition: transform 120ms ease, box-shadow 120ms ease;
+        }
+        .stButton > button:hover,
+        .stDownloadButton > button:hover,
+        [data-testid="stFormSubmitButton"] > button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 0 rgba(40, 120, 181, 0.18);
         }
         .stButton > button[kind="primary"],
         [data-testid="stFormSubmitButton"] > button[kind="primary"] {
-            background: var(--rss-notebook);
-            border-color: var(--rss-notebook);
+            background: linear-gradient(90deg, var(--rss-notebook), var(--rss-purple), var(--rss-pencil));
+            border-color: var(--rss-purple);
+            color: white;
+            box-shadow: 0 5px 0 rgba(132, 100, 223, 0.2);
         }
         [data-testid="stProgress"] > div > div > div > div {
-            background-color: var(--rss-pencil);
+            background: linear-gradient(90deg, var(--rss-mint), var(--rss-notebook), var(--rss-purple), var(--rss-pencil));
+            border-radius: 999px;
+        }
+        [data-testid="stProgress"] > div > div {
+            background-color: #e7eef5;
+            border-radius: 999px;
+            overflow: hidden;
         }
         [data-testid="stDataFrame"],
         [data-testid="stTable"] {
-            border-radius: 0.7rem;
+            border: 2px solid var(--rss-line);
+            border-radius: 1rem;
             overflow: hidden;
+        }
+        [role="radiogroup"] {
+            gap: 0.35rem;
+        }
+        [role="radiogroup"] label {
+            border-radius: 0.8rem;
         }
         hr {display: none !important;}
         [data-testid="stForm"] [role="radiogroup"] > label {
@@ -5784,7 +6205,82 @@ def _apply_custom_css(st: Any) -> None:
             margin-bottom: 0.8rem;
             padding: 0.65rem 0;
         }
+        .school-buddy {
+            position: fixed;
+            z-index: 0;
+            top: 36vh;
+            width: 6.4rem;
+            pointer-events: none;
+            user-select: none;
+            text-align: center;
+            filter: drop-shadow(0 7px 5px rgba(36, 50, 74, 0.16));
+        }
+        .school-buddy__kid {
+            display: block;
+            font-size: 3.5rem;
+            line-height: 1;
+            transform-origin: 50% 90%;
+            animation: rss-buddy-bounce 3.2s ease-in-out infinite;
+        }
+        .school-buddy__supply {
+            display: block;
+            margin-top: -0.25rem;
+            font-size: 2rem;
+            line-height: 1;
+            animation: rss-supply-wave 2.4s ease-in-out infinite;
+        }
+        .school-buddy--left {
+            left: 1rem;
+        }
+        .school-buddy--right {
+            right: 1rem;
+            top: 58vh;
+        }
+        .school-buddy--right .school-buddy__kid {
+            animation-delay: -1.4s;
+        }
+        .school-buddy--right .school-buddy__supply {
+            animation-delay: -0.9s;
+        }
+        @keyframes rss-buddy-bounce {
+            0%, 100% {transform: translateY(0) rotate(-2deg);}
+            45% {transform: translateY(-0.7rem) rotate(3deg);}
+            55% {transform: translateY(-0.7rem) rotate(1deg);}
+        }
+        @keyframes rss-supply-wave {
+            0%, 100% {transform: rotate(-7deg) scale(1);}
+            50% {transform: rotate(8deg) scale(1.08);}
+        }
+        @media (max-width: 1240px) {
+            .school-buddy {
+                display: none;
+            }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .school-buddy__kid,
+            .school-buddy__supply {
+                animation: none;
+            }
+        }
+        @media (max-width: 700px) {
+            .stApp {
+                background:
+                    repeating-linear-gradient(180deg, transparent 0, transparent 2.35rem, rgba(40, 120, 181, 0.06) 2.35rem, rgba(40, 120, 181, 0.06) 2.42rem),
+                    linear-gradient(135deg, #fffdf7 0%, #f7fcff 100%);
+            }
+            .block-container {
+                padding-top: 1rem;
+            }
+        }
         </style>
+        <div class="school-buddy school-buddy--left" aria-hidden="true">
+            <span class="school-buddy__kid">👧🏽</span>
+            <span class="school-buddy__supply">📚</span>
+        </div>
+        <div class="school-buddy school-buddy--right" aria-hidden="true">
+            <span class="school-buddy__kid">🧒🏻</span>
+            <span class="school-buddy__supply">🎒</span>
+        </div>
         """,
         unsafe_allow_html=True,
     )
@@ -5797,6 +6293,7 @@ def main() -> None:
 
     st.set_page_config(
         page_title=APP_NAME,
+        page_icon="🎒",
         layout="wide",
     )
     _initialize_state(st)
@@ -5806,15 +6303,22 @@ def main() -> None:
     st.caption(copy.tagline)
     _persistent_notice(st)
     screen = st.session_state["screen"]
+    progress_screen = (
+        "lists"
+        if screen == "working"
+        and not st.session_state["organized_list_confirmed"]
+        else screen
+    )
     _screen_progress(
         st,
-        screen,
+        progress_screen,
         st.session_state.get("progress_substep"),
     )
     {
         "intake": _render_intake,
         "lists": _render_lists,
         "working": _render_working,
+        "review": _render_review,
         "approval": _render_approval,
         "summary": _render_summary,
     }[screen](st)

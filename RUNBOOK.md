@@ -26,6 +26,19 @@ uploads a supply list. Those are two different bills. Go to
 platform.openai.com → Billing → add a payment method and around $10 of credit. That is
 far more than this project will use, and running out mid-demo is a bad way to find out.
 
+### Offline backup demonstration
+
+The application includes a stable offline demo mode for rehearsals and as a
+live-presentation fallback. Select **Use stable offline demo mode** on the first
+screen. The app preloads a representative text list, uses deterministic
+structured extraction, the seeded fictional catalog, and the structured
+suitability judge. It makes no OpenAI or retailer request.
+
+Offline demo mode supports pasted text, TXT, DOCX, PDF, and the bundled sample.
+Use normal mode for arbitrary JPG, JPEG, or PNG extraction because interpreting
+image content requires the image-capable model. Checkout remains simulated in
+both modes.
+
 Then go to platform.openai.com → API keys → Create new secret key. Copy it into a
 scratch file. You will paste it twice later and then never see it again.
 

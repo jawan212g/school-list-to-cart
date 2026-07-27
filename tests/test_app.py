@@ -177,19 +177,28 @@ def test_shortfall_state_renders_the_plain_summary_headings() -> None:
     )
 
 
-def test_visible_navigation_uses_three_ready_set_school_phases() -> None:
-    """The five screens map to the three visible branded phases."""
+def test_visible_navigation_uses_four_required_stages() -> None:
+    """Every internal screen maps to one of the four required stages."""
 
-    assert app.screen_phase_label("intake") == "Ready · setup"
-    assert app.screen_phase_label("lists") == "Set · adding the lists"
+    assert app.screen_phase_label("intake") == (
+        "Stage 1 of 4 · Upload and organize my list"
+    )
+    assert app.screen_phase_label("lists") == (
+        "Stage 1 of 4 · Upload and organize my list"
+    )
     assert (
         app.screen_phase_label("working", "reading the lists")
-        == "Set · reading the lists"
+        == "Stage 3 of 4 · reading the lists"
+    )
+    assert app.screen_phase_label("review") == (
+        "Stage 2 of 4 · Review extracted items"
     )
     assert app.screen_phase_label("approval") == (
-        "School · decisions to review"
+        "Stage 4 of 4 · Approve final plan"
     )
-    assert app.screen_phase_label("summary") == "School · your plan"
+    assert app.screen_phase_label("summary") == (
+        "Stage 4 of 4 · Approve final plan"
+    )
 
 
 def test_resolved_assumptions_do_not_create_a_needs_attention_heading() -> None:
@@ -302,7 +311,7 @@ def test_budget_entry_validation_reports_before_continue() -> None:
 
 
 def test_upload_validation_checks_type_size_and_file_signature() -> None:
-    """FR-06/E-35: only validated PDF, JPG, PNG, and TXT reach extraction."""
+    """FR-06/E-35: only validated supported files reach extraction."""
 
     assert (
         app.validate_uploaded_document("list.pdf", b"%PDF-1.7")
@@ -323,9 +332,13 @@ def test_upload_validation_checks_type_size_and_file_signature() -> None:
         app.validate_uploaded_document("list.txt", b"2 pencils")
         == "text/plain"
     )
+    assert app.validate_uploaded_document("list.docx", b"PK\x03\x04") == (
+        "application/vnd.openxmlformats-officedocument."
+        "wordprocessingml.document"
+    )
     with pytest.raises(ValueError, match="valid PDF"):
         app.validate_uploaded_document("malware.pdf", b"MZ executable")
-    with pytest.raises(ValueError, match="PDF, JPG, PNG, or TXT"):
+    with pytest.raises(ValueError, match="DOCX, PDF, JPG"):
         app.validate_uploaded_document("list.exe", b"MZ")
 
 

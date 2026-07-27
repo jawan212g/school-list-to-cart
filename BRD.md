@@ -45,7 +45,7 @@ The prototype is the input to these, not a substitute for them. Owners to be con
 
 - Session for multiple children or a classroom group, producing one combined cart with per-child attribution
 
-- Supply list intake by paste, and by PDF, image, or text upload
+- Supply list intake by paste, and by DOCX, PDF, image, or text upload
 
 - Model-based extraction into a validated schema, capturing quantities, brand locks, exclusions, and required versus optional status
 
@@ -141,15 +141,16 @@ Carried forward from the proposal and endorsed in the faculty feedback. It is al
 | **Stage**                  | **What happens**                                                                                                                                                                   |
 |----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **1. Intake**              | Parent selects children or a classroom group, enters a budget and allocation mode, and chooses a shopping mode, store radius, and fulfillment preference.                          |
-| **2. List acquisition**    | One list per child, uploaded as PDF, image, or text, or pasted directly.                                                                                                           |
+| **2. List acquisition**    | One list per child, uploaded as DOCX, PDF, image, or text, or pasted directly.                                                                                                     |
 | **3. Extraction**          | Model converts each list into structured requirements validated against a schema. Brand locks, exclusions, required versus optional status, and non-purchasable lines are flagged. |
 | **4. Normalization**       | Canonical item names, unit conversion, quantity ranges resolved, non-purchasable lines removed from cart scope but kept for display.                                               |
-| **5. Aggregation**         | Requirements roll up across children into unit needs. Brand-locked needs remain separate from generic needs.                                                                       |
-| **6. Matching**            | Model proposes candidate offers for each need; code filters by stock, radius, brand lock, and exclusions. Every match carries a confidence score.                                  |
-| **7. Optimization**        | Deterministic. Package-size selection, store assignment, landed cost, and trip penalty, against the objective set by the shopping mode.                                            |
-| **8. Approval gate**       | If any interrupt condition is met, the agent stops and presents all of them on a single batched screen. Otherwise it proceeds directly.                                            |
-| **9. Re-plan**             | Parent decisions are applied, the cart is re-optimized, and the gate is re-checked.                                                                                                |
-| **10. Simulated checkout** | Order summary with per-child attribution, per-store breakdown, landed cost, and the full decision log.                                                                             |
+| **5. Organized-list review** | Parent edits, adds, deletes, marks owned, resolves uncertainty, and confirms the structured items. No required item proceeds without confirmation.                                |
+| **6. Aggregation**         | Confirmed requirements roll up across children into unit needs. Brand-locked needs remain separate from generic needs.                                                             |
+| **7. Matching**            | Model proposes candidate offers for each need; code filters by stock, radius, brand lock, and exclusions. Every match carries a confidence score.                                  |
+| **8. Optimization**        | Deterministic. Package-size selection, store assignment, landed cost, and trip penalty, against the objective set by the shopping mode.                                            |
+| **9. Approval gate**       | If any interrupt condition is met, the agent stops and presents all of them on a single batched screen.                                                                            |
+| **10. Re-plan**            | Parent decisions are applied, the cart is re-optimized, and the gate is re-checked.                                                                                                |
+| **11. Simulated checkout** | Order summary with per-child attribution, per-store breakdown, landed cost, and the full decision log.                                                                             |
 
 ## 8. Data Model
 
@@ -185,7 +186,7 @@ Requirements are numbered FR-## and are individually testable. Business rules ca
 
 ### 9.2 List acquisition and extraction
 
-- **FR-06** Accept PDF, JPG, PNG, and plain text upload, plus direct paste. Reject other file types with a clear message.
+- **FR-06** Accept DOCX, PDF, JPG, JPEG, PNG, and plain text upload, plus direct paste. Extract DOCX paragraphs, bullets, and tables. Reject other file types with a clear message, and do not report success unless readable content was extracted.
 
 - **FR-07** Extract into the Requirement schema. Output must validate against the schema. A failed validation triggers one retry and then falls back to manual review rather than silently guessing.
 
@@ -197,7 +198,7 @@ Requirements are numbered FR-## and are individually testable. Business rules ca
 
 - **FR-11** Resolve quantity ranges. "Two to three boxes" resolves to the minimum by default; the maximum is used only if it improves package economics without breaching budget.
 
-- **FR-12** Surface low-confidence extractions for review rather than acting on them (BR-11).
+- **FR-12** Present every extraction in a mandatory editable organized-list review before matching or optimization. Allow the parent to edit, add, delete, mark owned, change optional or brand-equivalence status, and confirm items. Surface low-confidence or ambiguous extractions and prevent unresolved required items from proceeding unless the parent explicitly approves the remaining uncertainty (BR-11).
 
 - **FR-13** Extract exclusions and prohibitions. "No mechanical pencils" and "no rolling backpacks" are hard constraints on matching.
 
@@ -395,7 +396,7 @@ The agent ingests untrusted documents and takes action based on their contents. 
 
 ### 11.2 File handling
 
-Type allowlist limited to PDF, JPG, PNG, and text. Size cap enforced. No archive expansion, no execution, and uploads are never written to a served path.
+Type allowlist limited to DOCX, PDF, JPG, JPEG, PNG, and text. Size cap and file-signature checks are enforced. DOCX is opened only as a document package for text extraction; no embedded content is executed. Uploads are never written to a served path.
 
 ### 11.3 Data minimization
 

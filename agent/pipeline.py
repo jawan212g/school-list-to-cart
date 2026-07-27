@@ -583,6 +583,52 @@ def run_pipeline(
     )
 
 
+def run_pipeline_from_confirmed_extractions(
+    session: PipelineSession,
+    extractions: Mapping[str, ExtractionEnvelope],
+    *,
+    extraction_errors: Mapping[str, Exception] | None = None,
+    stores: Sequence[Store] | None = None,
+    offers: Sequence[Offer] | None = None,
+    suitability_judge: SuitabilityJudge | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> PipelineResult:
+    """Build a plan only from user-confirmed extraction envelopes (FR-12)."""
+
+    errors = extraction_errors or {}
+    lists = tuple(
+        ListInput(
+            child_id=child_id,
+            source="[user-confirmed organized list]",
+            mime_type="text/plain",
+        )
+        for child_id in session.children
+    )
+
+    def confirmed_extractor(
+        source: str | Path | bytes,
+        *,
+        child_id: str,
+        mime_type: str | None,
+        client: OpenAI | None,
+    ) -> ExtractionEnvelope:
+        del source, mime_type, client
+        error = errors.get(child_id)
+        if error is not None:
+            raise error
+        return extractions[child_id]
+
+    return run_pipeline(
+        session,
+        lists,
+        stores=stores,
+        offers=offers,
+        extractor=confirmed_extractor,
+        suitability_judge=suitability_judge,
+        progress_callback=progress_callback,
+    )
+
+
 def _refresh_candidate(
     candidate: CandidateMatch,
     active_offer: Offer,

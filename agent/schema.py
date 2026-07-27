@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 UnitType = Literal["each", "pack", "box", "ream"]
 RequirementType = Literal["required", "optional", "donation"]
+ReviewStatus = Literal["pending", "confirmed", "unresolved", "deleted"]
 AttributeValue = str | int | float | bool | tuple[str, ...] | None
 UNRESTRICTED_COLOR_VALUES = frozenset(
     {"any", "any color", "any colors", "assorted", "no preference"}
@@ -124,6 +125,46 @@ class ExtractionEnvelope(BaseModel):
             }:
                 normalized.append(cleaned)
         return tuple(normalized)
+
+
+class SupplyItemReview(BaseModel):
+    """Editable item between extraction and shopping-plan generation (FR-12)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    review_id: str = Field(min_length=1)
+    req_id: str = Field(min_length=1)
+    child_id: str = Field(min_length=1)
+    item_name: str = Field(min_length=1)
+    required_quantity: int | None = Field(default=None, ge=1)
+    unit: UnitType = "each"
+    package_size: int | None = Field(default=None, ge=1)
+    brand: str | None = None
+    brand_required: bool = False
+    size: str | None = None
+    color: tuple[str, ...] = ()
+    material: str | None = None
+    required_attributes: dict[str, AttributeValue] = Field(default_factory=dict)
+    optional: bool = False
+    notes: str | None = None
+    source_text: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    review_status: ReviewStatus = "pending"
+    already_owned: bool = False
+    allow_equivalents: bool = True
+    issue_codes: tuple[str, ...] = ()
+
+    @field_validator("color")
+    @classmethod
+    def normalize_review_colors(
+        cls,
+        colors: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Normalize user-editable colors without inventing preferences."""
+
+        return RequirementAttributes(
+            acceptable_colors=colors
+        ).acceptable_colors
 
 
 def validate_extraction_envelope(
