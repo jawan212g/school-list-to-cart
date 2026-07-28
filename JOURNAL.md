@@ -1337,3 +1337,140 @@ including the oversized Continue to shopping preferences button.
 
 Open the Budget and Shopping preferences screens in the deployed app and confirm the
 navigation row is balanced at both desktop and phone widths.
+
+## 2026-07-28 - Harden intake state and delivery-only preferences
+
+### Objective
+
+Clear all Student/Classroom values on a type switch, preserve values through every
+backward navigation path, simplify intake guidance, and make pickup radius respond
+clearly to delivery-only shopping.
+
+### Work completed
+
+- Gave Student and Classroom grade selectors separate widget identities while
+  retaining the existing canonical grade value used by the rest of the application.
+- Extended type-change cleanup to remove both grade widget values and their saved
+  navigation snapshots.
+- Added explicit intake-step and backward-screen navigation helpers that snapshot
+  the current form values immediately before navigation.
+- Applied the navigation helper across Students, Budget, Shopping preferences,
+  Lists, section selection, extracted-item review, working-screen recovery, and
+  Summary return paths.
+- Replaced the combined-budget helper with: "Enter the total you want to spend, for
+  example 75 or 85.50."
+- Simplified the remaining Budget and Shopping preferences captions and tooltips.
+- Kept pickup radius at a 10-mile initial default, disabled it for delivery-only
+  shopping, displayed "Not needed for delivery.", and restored 10 miles when pickup
+  or best-available fulfillment is selected again.
+- Extended tests for grade cleanup, the complete forward-and-back intake sequence,
+  the 10-mile default, delivery-only disabling, and reset behavior.
+
+### Decisions made
+
+- Used type-specific grade widget keys because clearing a shared Streamlit widget key
+  did not prevent the browser from restoring the previous selection.
+- Disabled the pickup radius without changing its stored value while delivery-only
+  is active; the value resets only when pickup becomes relevant again.
+- Made no changes to extraction, matching, optimization, calculations, or the
+  approval gate.
+
+### Problems or limitations
+
+- Streamlit is unavailable on this Windows ARM64 machine, so the disabled styling and
+  browser widget lifecycle were verified through state tests and source structure,
+  not a live local rendering.
+
+### Files created or changed
+
+- Updated `app.py`, `tests/test_app.py`, and `JOURNAL.md`.
+
+### Testing performed
+
+- Focused application suite: 53 passed.
+- Complete automated suite: 239 passed in 2.67 seconds.
+- Python compilation completed without errors.
+- Git whitespace validation completed without errors; only the repository's existing
+  LF-to-CRLF conversion warnings were reported.
+
+### Remaining work
+
+- Confirm in the deployed app that a Student/Classroom switch visibly blanks both
+  name and grade, and that delivery-only greys out the radius control.
+
+### Recommended next step
+
+Repeat the live forward-and-back intake sequence, then toggle Delivery only to Pickup
+only and confirm the radius returns to 10 miles.
+
+## 2026-07-28 - Add safe banner navigation and narrow edit cascades
+
+### Objective
+
+Turn both progress banners into navigation controls for completed work while
+preserving every entered value and clearing only downstream state made invalid by an
+actual edit.
+
+### Work completed
+
+- Replaced the static four-stage indicator with four equal banner buttons.
+- Made completed stages clickable, highlighted the current stage, and kept unreached
+  stages disabled with a distinct visual treatment.
+- Added the same completed/current/unavailable behavior to Students, Budget, and
+  Shopping preferences within intake.
+- Preserved the existing Back and Continue buttons without changing their wording or
+  behavior.
+- Added guarded stage-navigation helpers that snapshot widget values before every
+  jump and reject attempts to open an unreached stage.
+- Tracked the furthest valid stage and intake section, including reducing access when
+  an edit invalidates later work.
+- Scoped entry removal by child ID: the removed entry's allocation, list, document
+  structure, section choice, extraction state, and review rows are removed while
+  other entries remain untouched.
+- Preserved the combined budget when an entry is removed.
+- Cleared only the edited entry's document section choice when its grade changes;
+  uploaded list data and other entries' choices remain.
+- Cleared only the fields belonging to the budget mode being left.
+- Added plain, immediate notices for removed allocations, lists, section choices,
+  type-change details, and budget-mode fields.
+- Added visual styling for current, completed, and unavailable banner controls.
+
+### Decisions made
+
+- Treated "completed" as reached and still valid. A downstream stage becomes
+  unavailable when an upstream edit invalidates it, but its unaffected source data
+  remains in session state.
+- Used stable child IDs for every narrow cascade so one entry cannot clear another
+  entry's data.
+- Kept navigation and invalidation in `app.py`; no model, matching, gate, optimizer,
+  or money-calculation behavior changed.
+
+### Problems or limitations
+
+- Streamlit is unavailable on this Windows ARM64 machine, so clickable and disabled
+  banner behavior was exercised with Streamlit-shaped test doubles rather than a
+  live local browser.
+
+### Files created or changed
+
+- Updated `app.py`, `tests/test_app.py`, and `JOURNAL.md`.
+
+### Testing performed
+
+- Focused application suite: 57 passed.
+- Complete automated suite: 243 passed in 2.61 seconds.
+- Python compilation completed without errors.
+- Git whitespace validation completed without errors; only the repository's existing
+  LF-to-CRLF conversion warnings were reported.
+
+### Remaining work
+
+- Confirm in the deployed app that completed banner buttons are visually obvious,
+  unreached buttons look unavailable, and notices appear beside the edit that caused
+  each narrow cascade.
+
+### Recommended next step
+
+Run one deployed session through Summary, use the four-stage banner to jump to
+Students, then verify one-click return to each still-valid completed stage before
+testing a grade change and entry removal.

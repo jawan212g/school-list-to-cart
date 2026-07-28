@@ -147,6 +147,37 @@ def test_state_selection_prefills_general_rate_without_overwriting_override() ->
     assert app.state_tax_rate_percent("Oregon") == "0.0"
 
 
+def test_delivery_disables_pickup_radius_and_return_resets_ten_miles() -> None:
+    """FR-04: pickup distance is irrelevant for delivery-only shopping."""
+
+    initial_state = SimpleNamespace(session_state={})
+    app._initialize_state(initial_state)
+    assert initial_state.session_state["store_radius_miles"] == 10.0
+
+    state: dict[str, object] = {
+        "store_radius_miles": 4.5,
+    }
+
+    assert app.update_pickup_radius_for_fulfillment(
+        state,
+        "pickup",
+    ) is False
+    assert state["store_radius_miles"] == 4.5
+    assert app.update_pickup_radius_for_fulfillment(
+        state,
+        "delivery",
+    ) is True
+    assert state["store_radius_miles"] == 4.5
+    assert app.update_pickup_radius_for_fulfillment(
+        state,
+        "either",
+    ) is False
+    assert state["store_radius_miles"] == app.DEFAULT_RADIUS_MILES == 10.0
+    assert state[
+        app.NAVIGATION_STATE_PREFIX + "store_radius_miles"
+    ] == 10.0
+
+
 def test_student_and_classroom_fields_preserve_grade_context() -> None:
     """FR-01/FR-05: classrooms retain grade and quantity context."""
 
@@ -285,6 +316,8 @@ def test_switching_entry_type_clears_previous_fields(
         "student_name_0": "Jesse",
         "teacher_name_0": "Ms. Rivera",
         "child_grade_0": "Grade 3",
+        "student_grade_0": "Grade 3",
+        "classroom_grade_0": "Grade 3",
         "student_count_0": 20,
         "budget_0": "200.00",
         "list_mode_0": "Paste text",
@@ -292,6 +325,8 @@ def test_switching_entry_type_clears_previous_fields(
         "navigation_saved::student_name_0": "Jesse",
         "navigation_saved::teacher_name_0": "Ms. Rivera",
         "navigation_saved::child_grade_0": "Grade 3",
+        "navigation_saved::student_grade_0": "Grade 3",
+        "navigation_saved::classroom_grade_0": "Grade 3",
         "navigation_saved::budget_0": "200.00",
         "navigation_saved::list_paste_0": "2 pencils",
     }
@@ -307,6 +342,12 @@ def test_switching_entry_type_clears_previous_fields(
         "entity_type_0": new_type,
         "intake_previous_entity_type_0": new_type,
     }
+    assert "child_grade_0" not in state
+    assert "student_grade_0" not in state
+    assert "classroom_grade_0" not in state
+    assert "navigation_saved::child_grade_0" not in state
+    assert "navigation_saved::student_grade_0" not in state
+    assert "navigation_saved::classroom_grade_0" not in state
 
 
 def test_backward_intake_navigation_preserves_all_section_values() -> None:
@@ -320,59 +361,302 @@ def test_backward_intake_navigation_preserves_all_section_values() -> None:
         "child_label_0": "Jesse",
         "student_name_0": "Jesse",
         "child_grade_0": "Grade 5",
-        "budget_mode_label": "A budget for each student or classroom",
-        "budget_0": "85.00",
-        "shopping_preference_label": "Lowest landed cost",
-        "store_radius_miles": 7.5,
-        "fulfillment_label": "Pickup",
-        "sales_tax_state": "Indiana",
-        "tax_rate_text": "7.0",
-        "list_mode_0": "Paste text",
-        "list_paste_0": "24 pencils",
-        "clear:child-1:pencils:item": "pencils",
+        "student_grade_0": "Grade 5",
     }
-    widget_keys = (
+    student_keys = (
         "entity_type_0",
         "student_name_0",
         "child_grade_0",
-        "budget_mode_label",
-        "budget_0",
+        "student_grade_0",
+    )
+
+    app.navigate_intake_step(state, 2)
+    for key in student_keys:
+        state.pop(key)
+    app.preserve_navigation_state(state)
+    assert state["intake_step"] == 2
+    assert state["student_name_0"] == "Jesse"
+    assert state["student_grade_0"] == "Grade 5"
+
+    state.update(
+        {
+            "budget_mode_label": (
+                "A budget for each student or classroom"
+            ),
+            "budget_0": "85.00",
+        }
+    )
+    budget_keys = ("budget_mode_label", "budget_0")
+    app.navigate_intake_step(state, 3)
+    for key in budget_keys:
+        state.pop(key)
+    app.preserve_navigation_state(state)
+    assert state["intake_step"] == 3
+    assert state["budget_mode_label"] == (
+        "A budget for each student or classroom"
+    )
+    assert state["budget_0"] == "85.00"
+
+    state.update(
+        {
+            "shopping_preference_label": "Lowest landed cost",
+            "store_radius_miles": 7.5,
+            "fulfillment_label": "Best available",
+            "sales_tax_state": "Indiana",
+            "tax_rate_text": "7.0",
+        }
+    )
+    preference_keys = (
         "shopping_preference_label",
         "store_radius_miles",
         "fulfillment_label",
         "sales_tax_state",
         "tax_rate_text",
-        "list_mode_0",
-        "list_paste_0",
-        "clear:child-1:pencils:item",
     )
 
-    app.preserve_navigation_state(state)
-    state["intake_step"] = 2
-    for key in widget_keys:
+    app.navigate_intake_step(state, 2)
+    for key in preference_keys:
         state.pop(key)
     app.preserve_navigation_state(state)
-    state["intake_step"] = 1
+    assert state["intake_step"] == 2
+    assert state["budget_0"] == "85.00"
+    assert state["store_radius_miles"] == 7.5
+    assert state["fulfillment_label"] == "Best available"
 
-    assert {key: state[key] for key in widget_keys} == {
-        "entity_type_0": "Student",
-        "student_name_0": "Jesse",
-        "child_grade_0": "Grade 5",
-        "budget_mode_label": "A budget for each student or classroom",
-        "budget_0": "85.00",
-        "shopping_preference_label": "Lowest landed cost",
-        "store_radius_miles": 7.5,
-        "fulfillment_label": "Pickup",
-        "sales_tax_state": "Indiana",
-        "tax_rate_text": "7.0",
-        "list_mode_0": "Paste text",
-        "list_paste_0": "24 pencils",
-        "clear:child-1:pencils:item": "pencils",
-    }
+    app.navigate_intake_step(state, 1)
+    for key in budget_keys:
+        state.pop(key)
+    app.preserve_navigation_state(state)
+    assert state["intake_step"] == 1
+    assert state["student_name_0"] == "Jesse"
+    assert state["student_grade_0"] == "Grade 5"
+    assert state["budget_0"] == "85.00"
+    assert state["shopping_preference_label"] == "Lowest landed cost"
+    assert state["store_radius_miles"] == 7.5
+    assert state["fulfillment_label"] == "Best available"
     restored = app._intake_students_from_state(state, 1)
     assert restored[0]["label"] == "Jesse"
     assert restored[0]["grade"] == "Grade 5"
     assert restored[0]["entity_type"] == "student"
+
+
+def test_banner_navigation_preserves_every_completed_stage_value() -> None:
+    """FR-01-FR-06: a banner jump changes location and nothing else."""
+
+    list_inputs = (
+        ListInput(child_id="child-1", source="24 pencils"),
+    )
+    state: dict[str, object] = {
+        "screen": "summary",
+        "intake_step": 3,
+        "max_stage_reached": 4,
+        "max_intake_step_reached": 3,
+        "entity_type_0": "Student",
+        "student_name_0": "Maya",
+        "child_grade_0": "Grade 2",
+        "student_grade_0": "Grade 2",
+        "combined_budget_text": "150.00",
+        "shopping_preference_label": "Lowest landed cost",
+        "store_radius_miles": 10.0,
+        "fulfillment_label": "Best available",
+        "list_inputs": list_inputs,
+        "document_selections": {"child-1": object()},
+    }
+    preserved = {
+        key: value
+        for key, value in state.items()
+        if key not in {"screen", "intake_step"}
+    }
+
+    app.navigate_to_journey_stage(state, 1)
+
+    assert state["screen"] == "intake"
+    assert state["intake_step"] == 1
+    assert {
+        key: state[key]
+        for key in preserved
+    } == preserved
+    app.navigate_intake_step(state, 3)
+    assert state["intake_step"] == 3
+    assert state["student_name_0"] == "Maya"
+    assert state["combined_budget_text"] == "150.00"
+    assert state["list_inputs"] == list_inputs
+
+    class RerunSignal(Exception):
+        pass
+
+    class IntakeSectionColumn:
+        def __init__(self, section: int) -> None:
+            self.section = section
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del label, kwargs
+            return self.section == 1
+
+    class IntakeBannerStreamlit:
+        session_state = state
+
+        @staticmethod
+        def columns(count: int) -> tuple[IntakeSectionColumn, ...]:
+            return tuple(
+                IntakeSectionColumn(section)
+                for section in range(1, count + 1)
+            )
+
+        @staticmethod
+        def rerun() -> None:
+            raise RerunSignal
+
+    with pytest.raises(RerunSignal):
+        app._render_intake_step_progress(IntakeBannerStreamlit(), 3)
+    assert state["intake_step"] == 1
+    assert state["student_name_0"] == "Maya"
+    assert state["combined_budget_text"] == "150.00"
+    assert state["list_inputs"] == list_inputs
+
+    with pytest.raises(ValueError, match="not been reached"):
+        app.navigate_to_journey_stage(
+            {"max_stage_reached": 2},
+            3,
+        )
+
+
+def test_removing_entry_clears_only_its_budget_and_list() -> None:
+    """FR-01/FR-03: roster removal leaves independent session values intact."""
+
+    maya_list = ListInput(child_id="child-1", source="2 pencils")
+    noah_list = ListInput(child_id="child-2", source="1 binder")
+    maya_selection = object()
+    noah_selection = object()
+    state: dict[str, object] = {
+        "max_stage_reached": 4,
+        "max_intake_step_reached": 3,
+        "entity_type_0": "Student",
+        "child_label_0": "Maya",
+        "student_name_0": "Maya",
+        "child_grade_0": "Grade 2",
+        "budget_0": "60.00",
+        "entity_type_1": "Student",
+        "child_label_1": "Noah",
+        "student_name_1": "Noah",
+        "child_grade_1": "Grade 5",
+        "budget_1": "90.00",
+        "combined_budget_text": "150.00",
+        "intake": {
+            "children": (
+                {"child_id": "child-1", "label": "Maya"},
+                {"child_id": "child-2", "label": "Noah"},
+            ),
+            "budget_mode": "combined",
+            "budget_total": 15_000,
+            "budget_allocations": {
+                "child-1": 6_000,
+                "child-2": 9_000,
+            },
+        },
+        "list_inputs": (maya_list, noah_list),
+        "document_selections": {
+            "child-1": maya_selection,
+            "child-2": noah_selection,
+        },
+    }
+
+    notices = app.clear_inactive_intake_entries(state, 1)
+
+    assert "Noah's budget allocation was removed." in notices
+    assert "Noah's supply list was removed." in notices
+    assert "budget_1" not in state
+    assert state["budget_0"] == "60.00"
+    assert state["combined_budget_text"] == "150.00"
+    assert state["intake"]["budget_total"] == 15_000
+    assert state["intake"]["budget_allocations"] == {
+        "child-1": 6_000,
+    }
+    assert tuple(
+        child["child_id"] for child in state["intake"]["children"]
+    ) == ("child-1",)
+    assert state["list_inputs"] == (maya_list,)
+    assert state["document_selections"] == {
+        "child-1": maya_selection,
+    }
+    assert state["max_stage_reached"] == 1
+    assert state["max_intake_step_reached"] == 1
+
+
+def test_grade_change_clears_only_that_entry_section_selection() -> None:
+    """FR-05/FR-06: a grade edit preserves files and other selections."""
+
+    list_inputs = (
+        ListInput(child_id="child-1", source="Maya list"),
+        ListInput(child_id="child-2", source="Noah list"),
+    )
+    noah_selection = object()
+    state: dict[str, object] = {
+        "max_stage_reached": 4,
+        "intake_previous_grade_0": "Grade 2",
+        "document_sections_child-1": ("grade-2",),
+        "navigation_saved::document_sections_child-1": ("grade-2",),
+        "document_selections": {
+            "child-1": object(),
+            "child-2": noah_selection,
+        },
+        "list_inputs": list_inputs,
+        "extraction_cache_ready": True,
+        "organized_list_confirmed": True,
+    }
+
+    notices = app.clear_section_selection_after_grade_change(
+        state,
+        0,
+        "Grade 3",
+        "Maya",
+    )
+
+    assert notices == (
+        "Maya's document section selection was removed because the grade "
+        "changed.",
+    )
+    assert state["document_selections"] == {
+        "child-2": noah_selection,
+    }
+    assert "document_sections_child-1" not in state
+    assert "navigation_saved::document_sections_child-1" not in state
+    assert state["list_inputs"] == list_inputs
+    assert state["max_stage_reached"] == 2
+
+
+def test_budget_mode_change_clears_only_mode_being_left() -> None:
+    """FR-03: changing budget setup preserves lists and unrelated fields."""
+
+    list_inputs = (
+        ListInput(child_id="child-1", source="Maya list"),
+        ListInput(child_id="child-2", source="Noah list"),
+    )
+    state: dict[str, object] = {
+        "previous_budget_mode_label": (
+            "A budget for each student or classroom"
+        ),
+        "budget_0": "60.00",
+        "budget_1": "90.00",
+        "combined_budget_text": "150.00",
+        "list_inputs": list_inputs,
+        "shopping_preference_label": "Lowest landed cost",
+        "max_stage_reached": 4,
+    }
+
+    notices = app.clear_budget_fields_after_mode_change(
+        state,
+        "One combined budget",
+        2,
+    )
+
+    assert notices == ("The individual budget allocations were cleared.",)
+    assert state["budget_0"] == ""
+    assert state["budget_1"] == ""
+    assert state["combined_budget_text"] == "150.00"
+    assert state["list_inputs"] == list_inputs
+    assert state["shopping_preference_label"] == "Lowest landed cost"
+    assert state["max_stage_reached"] == 3
 
 
 def test_deliberate_removal_clears_saved_navigation_values() -> None:
@@ -626,6 +910,7 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert "GRADE_OPTIONS" in student_source
     assert "Select a grade" in student_source
     assert "Who are you adding?" in student_source
+    assert "key=active_grade_key" in student_source
     assert "Students in this classroom" in student_source
     assert (
         "Every quantity on the supply list will be multiplied "
@@ -656,6 +941,11 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert app.NO_SET_BUDGET_LABEL == "No set budget"
     assert "budget_validation_attempted" in budget_source
     assert "disabled=" not in budget_source
+    assert (
+        "Enter the total you want to spend, for example 75 or 85.50."
+        in budget_source
+    )
+    assert "tight budget" not in budget_source
     assert "forward.button" in budget_source
     assert "use_container_width=True" in budget_source
     assert 'st.subheader("Shopping preferences")' not in preferences_source
@@ -663,7 +953,14 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert '"Shopping preferences"' in preferences_source
     assert "Advanced shopping and tax options" in preferences_source
     assert "preferences_validation_attempted" in preferences_source
-    assert "disabled=" not in preferences_source
+    assert "disabled=radius_disabled" in preferences_source
+    assert "Not needed for delivery." in preferences_source
+    assert preferences_source.index("fulfillment_label = st.selectbox") < (
+        preferences_source.index("radius = float")
+    )
+    assert "Adjust distance, pickup or delivery, and tax." in (
+        preferences_source
+    )
     assert "forward.button" in preferences_source
     assert "use_container_width=True" in preferences_source
     assert "Shopping mode" not in preferences_source
@@ -1019,7 +1316,7 @@ def test_no_budget_summary_shows_cost_without_budget_comparison() -> None:
 
 
 def test_visible_navigation_uses_four_required_stages() -> None:
-    """Every internal screen maps to one of the four required stages."""
+    """Reached stages are clickable while current and future stages are not."""
 
     intake_sections_source = inspect.getsource(
         app._render_intake_step_progress
@@ -1041,25 +1338,47 @@ def test_visible_navigation_uses_four_required_stages() -> None:
     assert app.screen_phase_label("approval") == "Your shopping plan"
     assert app.screen_phase_label("summary") == "Your shopping plan"
     assert "st.progress" not in intake_sections_source
-    assert "rss-intake-sections" in intake_sections_source
+    assert "intake_section_navigation_" in intake_sections_source
 
-    rendered: list[tuple[str, bool]] = []
+    rendered: list[tuple[str, dict[str, object]]] = []
+
+    class StageColumn:
+        @staticmethod
+        def button(label: str, **kwargs: object) -> bool:
+            rendered.append((label, dict(kwargs)))
+            return False
 
     class StepperStreamlit:
+        session_state: dict[str, object] = {
+            "max_stage_reached": 3,
+        }
+
         @staticmethod
-        def markdown(value: str, unsafe_allow_html: bool) -> None:
-            rendered.append((value, unsafe_allow_html))
+        def columns(count: int) -> tuple[StageColumn, ...]:
+            return tuple(StageColumn() for _ in range(count))
 
     app._screen_progress(StepperStreamlit(), "review")
 
-    assert len(rendered) == 1
-    assert rendered[0][1] is True
-    assert "rss-stepper" in rendered[0][0]
-    assert rendered[0][0].count('aria-current="step"') == 1
-    assert (
-        'rss-stepper__item rss-stepper__item--current" '
-        'aria-current="step">Personalize'
-    ) in rendered[0][0]
+    assert len(rendered) == 4
+    assert [options["disabled"] for _, options in rendered] == [
+        False,
+        False,
+        True,
+        True,
+    ]
+    assert [options["type"] for _, options in rendered] == [
+        "secondary",
+        "secondary",
+        "primary",
+        "secondary",
+    ]
+    assert rendered[2][0].endswith("Personalize")
+    assert app.journey_stage_statuses(3, 3) == (
+        "completed",
+        "completed",
+        "current",
+        "unavailable",
+    )
 
 
 def test_resolved_assumptions_do_not_create_a_needs_attention_heading() -> None:

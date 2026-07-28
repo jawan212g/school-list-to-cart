@@ -130,6 +130,8 @@ INTAKE_ENTRY_VALUE_PREFIXES = (
     "student_name",
     "teacher_name",
     "child_grade",
+    "student_grade",
+    "classroom_grade",
     "student_count",
     "budget",
     "list_mode",
@@ -138,6 +140,7 @@ INTAKE_ENTRY_VALUE_PREFIXES = (
     "list_paste",
 )
 INTAKE_ENTRY_TYPE_TRACKER_PREFIX = "intake_previous_entity_type"
+INTAKE_ENTRY_GRADE_TRACKER_PREFIX = "intake_previous_grade"
 NAVIGATION_STATE_PREFIX = "navigation_saved::"
 NAVIGATION_WIDGET_KEYS = frozenset(
     {
@@ -162,6 +165,8 @@ NAVIGATION_WIDGET_PREFIXES = (
     "student_name_",
     "teacher_name_",
     "child_grade_",
+    "student_grade_",
+    "classroom_grade_",
     "student_count_",
     "budget_",
     "list_mode_",
@@ -2851,10 +2856,13 @@ def _initialize_state(st: Any) -> None:
         "demo_mode": False,
         "child_count": 1,
         "intake_step": 1,
+        "max_intake_step_reached": 1,
+        "max_stage_reached": 1,
         "student_validation_attempted": False,
         "budget_validation_attempted": False,
         "preferences_validation_attempted": False,
         "budget_mode_label": "One combined budget",
+        "previous_budget_mode_label": "One combined budget",
         "combined_budget_text": DEFAULT_BUDGET_TEXT,
         "shopping_preference_label": next(iter(SHOPPING_MODES)),
         "store_radius_miles": DEFAULT_RADIUS_MILES,
@@ -2936,35 +2944,107 @@ def _persistent_notice(st: Any) -> None:
         )
 
 
+def journey_stage_statuses(
+    current_stage: int,
+    max_stage_reached: int,
+) -> tuple[str, ...]:
+    """Classify four FR-01-FR-04 banner destinations."""
+
+    if current_stage not in {1, 2, 3, 4}:
+        raise ValueError("Current journey stage is outside the supported range")
+    reached = min(4, max(current_stage, max_stage_reached))
+    return tuple(
+        (
+            "current"
+            if stage == current_stage
+            else "completed"
+            if stage <= reached
+            else "unavailable"
+        )
+        for stage in range(1, 5)
+    )
+
+
+def navigate_to_journey_stage(
+    state: MutableMapping[str, Any],
+    target_stage: int,
+) -> None:
+    """Jump to a reached stage without discarding FR-01-FR-06 values."""
+
+    max_stage = int(state.get("max_stage_reached", 1))
+    if target_stage < 1 or target_stage > min(4, max_stage):
+        raise ValueError("That journey stage has not been reached yet")
+    preserve_navigation_state(state)
+    if target_stage == 1:
+        state["screen"] = "intake"
+        state["intake_step"] = 1
+        return
+    allowed_targets: Mapping[int, frozenset[str]] = {
+        2: frozenset({"lists", "sections"}),
+        3: frozenset({"review"}),
+        4: frozenset({"working", "approval", "summary"}),
+    }
+    default_targets = {2: "lists", 3: "review", 4: "working"}
+    stored_target = str(
+        state.get(
+            f"journey_stage_screen_{target_stage}",
+            default_targets[target_stage],
+        )
+    )
+    state["screen"] = (
+        stored_target
+        if stored_target in allowed_targets[target_stage]
+        else default_targets[target_stage]
+    )
+
+
 def _screen_progress(
     st: Any,
     screen: str,
     substep: str | None = None,
 ) -> None:
-    """Show one compact four-stage parent journey on every screen."""
+    """Show one compact, clickable four-stage parent journey."""
 
     del substep
     current_stage = int(SCREEN_PHASES[screen][0])
-    stages = "".join(
-        (
-            (
-                '<span class="rss-stepper__item rss-stepper__item--current" '
-                'aria-current="step">'
-            )
-            if index == current_stage
-            else '<span class="rss-stepper__item">'
+    st.session_state["max_stage_reached"] = max(
+        current_stage,
+        int(st.session_state.get("max_stage_reached", 1)),
+    )
+    st.session_state[f"journey_stage_screen_{current_stage}"] = screen
+    statuses = journey_stage_statuses(
+        current_stage,
+        int(st.session_state["max_stage_reached"]),
+    )
+    columns = st.columns(4)
+    for stage, (column, label, status) in enumerate(
+        zip(columns, JOURNEY_STAGES, statuses, strict=True),
+        start=1,
+    ):
+        marker = (
+            "●"
+            if status == "current"
+            else "✓"
+            if status == "completed"
+            else "○"
         )
-        + label
-        + "</span>"
-        for index, label in enumerate(JOURNEY_STAGES, start=1)
-    )
-    st.markdown(
-        (
-            '<nav class="rss-stepper" aria-label="Shopping plan progress">'
-            f"{stages}</nav>"
-        ),
-        unsafe_allow_html=True,
-    )
+        clicked = column.button(
+            f"{marker} {label}",
+            key=f"journey_stage_navigation_{stage}",
+            type="primary" if status == "current" else "secondary",
+            disabled=status != "completed",
+            use_container_width=True,
+            help=(
+                "Current stage"
+                if status == "current"
+                else "Go to this completed stage"
+                if status == "completed"
+                else "Complete the earlier stages first"
+            ),
+        )
+        if clicked:
+            navigate_to_journey_stage(st.session_state, stage)
+            st.rerun()
 
 
 def _render_development_diagnostic(st: Any) -> None:
@@ -3123,6 +3203,32 @@ def preserve_navigation_state(state: MutableMapping[str, Any]) -> None:
             state[key] = state[saved_key]
 
 
+def navigate_intake_step(
+    state: MutableMapping[str, Any],
+    target_step: int,
+) -> None:
+    """Preserve FR-01-FR-04 values before moving within intake."""
+
+    if target_step not in {1, 2, 3}:
+        raise ValueError("Intake step must be Students, Budget, or Preferences")
+    preserve_navigation_state(state)
+    state["intake_step"] = target_step
+    state["max_intake_step_reached"] = max(
+        target_step,
+        int(state.get("max_intake_step_reached", 1)),
+    )
+
+
+def navigate_back_to_screen(
+    state: MutableMapping[str, Any],
+    target_screen: str,
+) -> None:
+    """Preserve FR-01-FR-06 values before backward screen navigation."""
+
+    preserve_navigation_state(state)
+    state["screen"] = target_screen
+
+
 def _delete_navigation_value(
     state: MutableMapping[str, Any],
     key: str,
@@ -3149,15 +3255,89 @@ def _remember_upload_draft(
     return draft if isinstance(draft, ListUploadDraft) else None
 
 
+def _limit_reached_stage(
+    state: MutableMapping[str, Any],
+    latest_valid_stage: int,
+) -> None:
+    """Prevent navigation to work invalidated by a parent edit."""
+
+    if "max_stage_reached" in state:
+        state["max_stage_reached"] = min(
+            int(state["max_stage_reached"]),
+            latest_valid_stage,
+        )
+
+
+def _invalidate_plan_state(state: MutableMapping[str, Any]) -> None:
+    """Clear only shopping-plan state after an upstream edit."""
+
+    reset_values: Mapping[str, Any] = {
+        "result": None,
+        "approved_optimization": None,
+        "approval_outcomes": {},
+        "resolved_interrupts": {},
+        "approval_presentations_cache": None,
+        "budget_action_ids": (),
+        "parent_decisions": (),
+        "checkout_confirmation": None,
+    }
+    for key, value in reset_values.items():
+        if key in state:
+            state[key] = value
+
+
 def clear_inactive_intake_entries(
     state: MutableMapping[str, Any],
     active_count: int,
-) -> None:
+) -> tuple[str, ...]:
     """Delete hidden intake widget values when an entry is removed (FR-01)."""
 
     if not 0 <= active_count <= MAX_CHILDREN_PER_SESSION:
         raise ValueError("Active intake entry count is outside the allowed range")
+    notices: list[str] = []
     for index in range(active_count, MAX_CHILDREN_PER_SESSION):
+        child_id = f"child-{index + 1}"
+        label = str(
+            state.get(f"child_label_{index}")
+            or state.get(f"student_name_{index}")
+            or state.get(f"teacher_name_{index}")
+            or f"Student or classroom {index + 1}"
+        ).strip()
+        budget_key = f"budget_{index}"
+        had_budget = (
+            budget_key in state
+            or NAVIGATION_STATE_PREFIX + budget_key in state
+        )
+        list_value_keys = tuple(
+            f"{prefix}_{index}"
+            for prefix in (
+                "list_upload",
+                "list_upload_draft",
+                "list_paste",
+            )
+        )
+        saved_inputs = tuple(state.get("list_inputs", ()))
+        had_list = any(
+            state.get(key)
+            or state.get(NAVIGATION_STATE_PREFIX + key)
+            for key in list_value_keys
+        ) or any(
+            getattr(list_input, "child_id", None) == child_id
+            for list_input in saved_inputs
+        )
+        selections = state.get("document_selections", {})
+        had_selection = (
+            isinstance(selections, Mapping)
+            and child_id in selections
+        )
+        had_entry = any(
+            (
+                f"entity_type_{index}" in state,
+                f"child_label_{index}" in state,
+                f"student_name_{index}" in state,
+                f"teacher_name_{index}" in state,
+            )
+        )
         for prefix in INTAKE_ENTRY_VALUE_PREFIXES:
             _delete_navigation_value(state, f"{prefix}_{index}")
         _delete_navigation_value(state, f"entity_type_{index}")
@@ -3167,8 +3347,65 @@ def clear_inactive_intake_entries(
         )
         _delete_navigation_value(
             state,
-            f"document_sections_child-{index + 1}",
+            f"{INTAKE_ENTRY_GRADE_TRACKER_PREFIX}_{index}",
         )
+        _delete_navigation_value(
+            state,
+            f"document_sections_{child_id}",
+        )
+        if saved_inputs:
+            state["list_inputs"] = tuple(
+                list_input
+                for list_input in saved_inputs
+                if getattr(list_input, "child_id", None) != child_id
+            )
+        intake = state.get("intake")
+        if isinstance(intake, Mapping):
+            updated_intake = dict(intake)
+            updated_intake["children"] = tuple(
+                child
+                for child in tuple(intake.get("children", ()))
+                if str(child.get("child_id", "")) != child_id
+            )
+            allocations = dict(intake.get("budget_allocations", {}))
+            allocations.pop(child_id, None)
+            updated_intake["budget_allocations"] = allocations
+            state["intake"] = updated_intake
+        for mapping_key in (
+            "document_structures",
+            "document_selections",
+            "structure_errors",
+            "extracted_lists",
+            "extraction_errors",
+        ):
+            mapping = state.get(mapping_key)
+            if isinstance(mapping, Mapping) and child_id in mapping:
+                updated = dict(mapping)
+                updated.pop(child_id, None)
+                state[mapping_key] = updated
+        review_items = tuple(state.get("review_items", ()))
+        if review_items:
+            state["review_items"] = tuple(
+                item
+                for item in review_items
+                if getattr(item, "child_id", None) != child_id
+            )
+        if had_entry or had_budget or had_list or had_selection:
+            if had_budget:
+                notices.append(f"{label}'s budget allocation was removed.")
+            if had_list:
+                notices.append(f"{label}'s supply list was removed.")
+            if had_selection:
+                notices.append(
+                    f"{label}'s document section selection was removed."
+                )
+            _limit_reached_stage(state, 1)
+            if "max_intake_step_reached" in state:
+                state["max_intake_step_reached"] = 1
+            _invalidate_plan_state(state)
+            if "organized_list_confirmed" in state:
+                state["organized_list_confirmed"] = False
+    return tuple(notices)
 
 
 def reset_intake_entry_after_type_change(
@@ -3195,11 +3432,103 @@ def reset_intake_entry_after_type_change(
             state,
             f"document_sections_child-{index + 1}",
         )
+        _delete_navigation_value(
+            state,
+            f"{INTAKE_ENTRY_GRADE_TRACKER_PREFIX}_{index}",
+        )
     if normalized_type is None:
         _delete_navigation_value(state, tracker_key)
     else:
         state[tracker_key] = normalized_type
     return changed
+
+
+def clear_section_selection_after_grade_change(
+    state: MutableMapping[str, Any],
+    index: int,
+    grade: str | None,
+    label: str,
+) -> tuple[str, ...]:
+    """Clear only one FR-06 selection when its entry grade changes."""
+
+    tracker_key = f"{INTAKE_ENTRY_GRADE_TRACKER_PREFIX}_{index}"
+    normalized_grade = "" if grade is None else str(grade)
+    previous_grade = state.get(tracker_key)
+    state[tracker_key] = normalized_grade
+    if previous_grade is None or str(previous_grade) == normalized_grade:
+        return ()
+    child_id = f"child-{index + 1}"
+    selections = state.get("document_selections", {})
+    had_selection = (
+        isinstance(selections, Mapping)
+        and child_id in selections
+    )
+    _delete_navigation_value(state, f"document_sections_{child_id}")
+    if had_selection:
+        updated = dict(selections)
+        updated.pop(child_id, None)
+        state["document_selections"] = updated
+        state["extraction_cache_ready"] = False
+        state["organized_list_confirmed"] = False
+        _limit_reached_stage(state, 2)
+        _invalidate_plan_state(state)
+        return (
+            f"{label}'s document section selection was removed because "
+            "the grade changed.",
+        )
+    return ()
+
+
+def clear_budget_fields_after_mode_change(
+    state: MutableMapping[str, Any],
+    current_mode: str,
+    entry_count: int,
+) -> tuple[str, ...]:
+    """Clear only FR-03 fields belonging to the budget mode left."""
+
+    tracker_key = "previous_budget_mode_label"
+    previous_mode = state.get(tracker_key)
+    state[tracker_key] = current_mode
+    if previous_mode is None or str(previous_mode) == current_mode:
+        return ()
+    notices: list[str] = []
+    if previous_mode == "One combined budget":
+        _delete_navigation_value(state, "combined_budget_text")
+        state["combined_budget_text"] = ""
+        state[NAVIGATION_STATE_PREFIX + "combined_budget_text"] = ""
+        notices.append("The combined budget was cleared.")
+    elif previous_mode == "A budget for each student or classroom":
+        for index in range(entry_count):
+            key = f"budget_{index}"
+            _delete_navigation_value(state, key)
+            state[key] = ""
+            state[NAVIGATION_STATE_PREFIX + key] = ""
+        notices.append("The individual budget allocations were cleared.")
+    _limit_reached_stage(state, 3)
+    _invalidate_plan_state(state)
+    return tuple(notices)
+
+
+def update_pickup_radius_for_fulfillment(
+    state: MutableMapping[str, Any],
+    fulfillment_preference: str,
+) -> bool:
+    """Disable irrelevant FR-04 pickup distance and reset it on return."""
+
+    if fulfillment_preference not in {"pickup", "delivery", "either"}:
+        raise ValueError("Unsupported fulfillment preference")
+    tracker_key = "pickup_radius_previous_fulfillment"
+    previous_preference = state.get(tracker_key)
+    if (
+        previous_preference == "delivery"
+        and fulfillment_preference != "delivery"
+    ):
+        state["store_radius_miles"] = DEFAULT_RADIUS_MILES
+        state[
+            NAVIGATION_STATE_PREFIX + "store_radius_miles"
+        ] = DEFAULT_RADIUS_MILES
+    state[tracker_key] = fulfillment_preference
+    return fulfillment_preference == "delivery"
 
 
 def intake_entry_display_number(
@@ -3242,28 +3571,54 @@ def budget_entry_fields(
 
 
 def _render_intake_step_progress(st: Any, step: int) -> None:
-    """Keep the parent oriented within the three-part setup."""
+    """Render clickable completed sections within FR-01-FR-04 intake."""
 
     labels = (
         "Students",
         "Budget",
         "Shopping preferences",
     )
-    sections = "".join(
-        (
-            '<span class="rss-intake-sections__item '
-            'rss-intake-sections__item--current">'
-            if index == step
-            else '<span class="rss-intake-sections__item">'
+    max_reached = max(
+        step,
+        int(st.session_state.get("max_intake_step_reached", 1)),
+    )
+    st.session_state["max_intake_step_reached"] = max_reached
+    columns = st.columns(3)
+    for section, (column, label) in enumerate(
+        zip(columns, labels, strict=True),
+        start=1,
+    ):
+        status = (
+            "current"
+            if section == step
+            else "completed"
+            if section <= max_reached
+            else "unavailable"
         )
-        + label
-        + "</span>"
-        for index, label in enumerate(labels, start=1)
-    )
-    st.markdown(
-        f'<div class="rss-intake-sections">{sections}</div>',
-        unsafe_allow_html=True,
-    )
+        marker = (
+            "●"
+            if status == "current"
+            else "✓"
+            if status == "completed"
+            else "○"
+        )
+        clicked = column.button(
+            f"{marker} {label}",
+            key=f"intake_section_navigation_{section}",
+            type="primary" if status == "current" else "secondary",
+            disabled=status != "completed",
+            use_container_width=True,
+            help=(
+                "Current section"
+                if status == "current"
+                else "Go to this completed section"
+                if status == "completed"
+                else "Complete the earlier sections first"
+            ),
+        )
+        if clicked:
+            navigate_intake_step(st.session_state, section)
+            st.rerun()
 
 
 def _navigation_button_columns(st: Any) -> tuple[Any, Any]:
@@ -3289,7 +3644,11 @@ def _render_student_step(st: Any) -> None:
             ),
         )
     )
-    clear_inactive_intake_entries(st.session_state, student_count)
+    for notice in clear_inactive_intake_entries(
+        st.session_state,
+        student_count,
+    ):
+        st.info(escape_streamlit_dollars(notice))
     validation_attempted = bool(
         st.session_state.get("student_validation_attempted", False)
     )
@@ -3331,7 +3690,13 @@ def _render_student_step(st: Any) -> None:
             else:
                 st.session_state[grade_key] = None
         current_type = st.session_state.get(entity_key)
-        reset_intake_entry_after_type_change(
+        previous_entry_name = str(
+            st.session_state.get(f"child_label_{index}")
+            or st.session_state.get(f"student_name_{index}")
+            or st.session_state.get(f"teacher_name_{index}")
+            or f"Student or classroom {index + 1}"
+        ).strip()
+        type_changed = reset_intake_entry_after_type_change(
             st.session_state,
             index,
             (
@@ -3341,6 +3706,18 @@ def _render_student_step(st: Any) -> None:
             ),
         )
         st.session_state.setdefault(name_key, "")
+        active_grade_key = (
+            f"{str(current_type).casefold()}_grade_{index}"
+            if current_type in {"Student", "Classroom"}
+            else None
+        )
+        if (
+            not type_changed
+            and active_grade_key is not None
+            and active_grade_key not in st.session_state
+            and grade_key in st.session_state
+        ):
+            st.session_state[active_grade_key] = st.session_state[grade_key]
         if current_type == "Classroom":
             st.session_state.setdefault(
                 teacher_name_key,
@@ -3432,14 +3809,31 @@ def _render_student_step(st: Any) -> None:
                 placeholder=name_placeholder,
             )
             st.session_state[name_key] = name
+            if active_grade_key is None:
+                raise RuntimeError("An entry type is required before grade")
             grade = grade_column.selectbox(
                 "Grade",
                 GRADE_OPTIONS,
                 index=None,
-                key=grade_key,
+                key=active_grade_key,
                 placeholder="Select a grade",
             )
+            st.session_state[grade_key] = grade
             grade_text = "" if grade is None else str(grade)
+            for notice in clear_section_selection_after_grade_change(
+                st.session_state,
+                index,
+                grade_text,
+                name.strip() or previous_entry_name,
+            ):
+                st.info(escape_streamlit_dollars(notice))
+            if type_changed:
+                st.info(
+                    escape_streamlit_dollars(
+                        f"{previous_entry_name}'s previous entry details "
+                        "were cleared because the entry type changed."
+                    )
+                )
             if not name.strip():
                 name_error = (
                     "Enter the teacher name."
@@ -3494,7 +3888,7 @@ def _render_student_step(st: Any) -> None:
     else:
         st.session_state["student_validation_attempted"] = False
         st.session_state["ui_error_active"] = False
-        st.session_state["intake_step"] = 2
+        navigate_intake_step(st.session_state, 2)
         st.rerun()
 
 
@@ -3506,8 +3900,8 @@ def _render_budget_step(st: Any) -> None:
         int(st.session_state["child_count"]),
     )
     st.caption(
-        "Use one amount for the whole plan, set one for each student or "
-        "classroom, or continue without a budget constraint."
+        "Choose one total, one amount for each student or classroom, or no "
+        "set budget."
     )
     budget_mode_label = st.radio(
         "Budget setup",
@@ -3519,6 +3913,12 @@ def _render_budget_step(st: Any) -> None:
         horizontal=True,
         key="budget_mode_label",
     )
+    for notice in clear_budget_fields_after_mode_change(
+        st.session_state,
+        str(budget_mode_label),
+        len(students),
+    ):
+        st.info(escape_streamlit_dollars(notice))
     validation_attempted = bool(
         st.session_state.get("budget_validation_attempted", False)
     )
@@ -3528,7 +3928,7 @@ def _render_budget_step(st: Any) -> None:
             r"Combined budget (\$)",
             key="combined_budget_text",
             help=(
-                "You can type a tight budget directly, such as 75 or 85.50."
+                "Enter the total you want to spend, for example 75 or 85.50."
             ),
         )
         error = budget_entry_error(combined_budget)
@@ -3561,7 +3961,7 @@ def _render_budget_step(st: Any) -> None:
     )
     back, forward = _navigation_button_columns(st)
     if back.button("Back to students", use_container_width=True):
-        st.session_state["intake_step"] = 1
+        navigate_intake_step(st.session_state, 1)
         st.session_state["budget_validation_attempted"] = False
         st.session_state["ui_error_active"] = False
         st.rerun()
@@ -3578,7 +3978,7 @@ def _render_budget_step(st: Any) -> None:
         st.rerun()
     else:
         st.session_state["budget_validation_attempted"] = False
-        st.session_state["intake_step"] = 3
+        navigate_intake_step(st.session_state, 3)
         st.session_state["ui_error_active"] = False
         st.rerun()
 
@@ -3614,8 +4014,8 @@ def _render_preferences_step(st: Any) -> None:
         int(st.session_state["child_count"]),
     )
     st.caption(
-        "Choose what matters most. The cart can compare total cost, favor "
-        "one stop, or use only stores you select."
+        "Choose how you want the plan to balance cost, stores, and "
+        "convenience."
     )
     mode_label = st.selectbox(
         "Shopping preferences",
@@ -3662,8 +4062,17 @@ def _render_preferences_step(st: Any) -> None:
 
     with st.expander("Advanced shopping and tax options"):
         st.caption(
-            "Use these only if distance, pickup or delivery, or a known tax "
-            "rate should shape the plan."
+            "Adjust distance, pickup or delivery, and tax."
+        )
+        fulfillment_label = st.selectbox(
+            "Pickup or delivery preference",
+            tuple(FULFILLMENT_OPTIONS),
+            key="fulfillment_label",
+        )
+        fulfillment_preference = FULFILLMENT_OPTIONS[fulfillment_label]
+        radius_disabled = update_pickup_radius_for_fulfillment(
+            st.session_state,
+            fulfillment_preference,
         )
         radius = float(
             st.number_input(
@@ -3673,17 +4082,14 @@ def _render_preferences_step(st: Any) -> None:
                 step=0.5,
                 key="store_radius_miles",
                 help=(
-                    "This limits trips to pickup locations. It never limits "
-                    "stores that deliver."
+                    "Limits pickup trips only. Delivery stores are always "
+                    "available."
                 ),
+                disabled=radius_disabled,
             )
         )
-        fulfillment_label = st.selectbox(
-            "Pickup or delivery preference",
-            tuple(FULFILLMENT_OPTIONS),
-            key="fulfillment_label",
-        )
-        fulfillment_preference = FULFILLMENT_OPTIONS[fulfillment_label]
+        if radius_disabled:
+            st.caption("Not needed for delivery.")
         st.caption(
             "These are simulated distances from a notional home location, "
             "not distances calculated from an address."
@@ -3710,8 +4116,8 @@ def _render_preferences_step(st: Any) -> None:
             "Sales tax rate override (%)",
             key="tax_rate_text",
             help=(
-                "This starts with the selected state's general rate. Change "
-                "it only if you know the rate you want the estimate to use."
+                "Starts with the selected state's general rate. Edit it to "
+                "use a different rate."
             ),
         )
         try:
@@ -3747,7 +4153,7 @@ def _render_preferences_step(st: Any) -> None:
     )
     back, forward = _navigation_button_columns(st)
     if back.button("Back to budget", use_container_width=True):
-        st.session_state["intake_step"] = 2
+        navigate_intake_step(st.session_state, 2)
         st.session_state["preferences_validation_attempted"] = False
         st.session_state["ui_error_active"] = False
         st.rerun()
@@ -3789,6 +4195,7 @@ def _render_preferences_step(st: Any) -> None:
     st.session_state["checkout_confirmation"] = None
     st.session_state["preferences_validation_attempted"] = False
     st.session_state["ui_error_active"] = False
+    _limit_reached_stage(st.session_state, 3)
     st.session_state["progress_substep"] = "adding the lists"
     st.session_state["screen"] = "lists"
     st.rerun()
@@ -3937,6 +4344,7 @@ def _render_lists(st: Any) -> None:
             st.session_state["structure_cache_ready"] = False
             st.session_state["review_items"] = ()
             st.session_state["organized_list_confirmed"] = False
+            _limit_reached_stage(st.session_state, 2)
             st.session_state["progress_substep"] = "reading the lists"
             st.session_state["screen"] = "working"
             st.rerun()
@@ -4050,7 +4458,7 @@ def _render_lists(st: Any) -> None:
     left, right = _navigation_button_columns(st)
     if left.button("Back", use_container_width=True):
         st.session_state["progress_substep"] = "setup"
-        st.session_state["screen"] = "intake"
+        navigate_back_to_screen(st.session_state, "intake")
         st.rerun()
     if right.button(
         "Organize my list",
@@ -4074,6 +4482,7 @@ def _render_lists(st: Any) -> None:
         st.session_state["extraction_cache_ready"] = False
         st.session_state["review_items"] = ()
         st.session_state["organized_list_confirmed"] = False
+        _limit_reached_stage(st.session_state, 2)
         st.session_state["allow_unresolved_items"] = False
         st.session_state["list_identity_confirmed"] = False
         st.session_state["result"] = None
@@ -4608,7 +5017,7 @@ def _render_list_identity_warnings(
         st.rerun()
     if return_to_lists:
         st.session_state["progress_substep"] = "adding the lists"
-        st.session_state["screen"] = "lists"
+        navigate_back_to_screen(st.session_state, "lists")
         st.rerun()
 
 
@@ -5479,7 +5888,7 @@ def _render_sections(st: Any) -> None:
             use_container_width=True,
         )
     if return_to_lists:
-        st.session_state["screen"] = "lists"
+        navigate_back_to_screen(st.session_state, "lists")
         st.rerun()
     if submitted:
         try:
@@ -5495,6 +5904,9 @@ def _render_sections(st: Any) -> None:
             return
         st.session_state["document_selections"] = selections
         st.session_state["extraction_cache_ready"] = False
+        st.session_state["organized_list_confirmed"] = False
+        _limit_reached_stage(st.session_state, 2)
+        _invalidate_plan_state(st.session_state)
         st.session_state["progress_substep"] = "reading selected sections"
         st.session_state["screen"] = "working"
         st.rerun()
@@ -5756,7 +6168,7 @@ def _render_review(st: Any) -> None:
         )
 
     if return_to_lists:
-        st.session_state["screen"] = "lists"
+        navigate_back_to_screen(st.session_state, "lists")
         st.rerun()
     if not submitted:
         return
@@ -5798,7 +6210,8 @@ def _render_review(st: Any) -> None:
     st.session_state["extracted_lists"] = confirmed
     st.session_state["organized_list_confirmed"] = True
     st.session_state["allow_unresolved_items"] = False
-    st.session_state["result"] = None
+    _limit_reached_stage(st.session_state, 3)
+    _invalidate_plan_state(st.session_state)
     st.session_state["progress_substep"] = (
         "comparing products, stores, and the budget"
     )
@@ -5839,7 +6252,7 @@ def _route_pipeline_result(
                 )
             )
         if st.button("Return to lists"):
-            st.session_state["screen"] = "lists"
+            navigate_back_to_screen(st.session_state, "lists")
             st.rerun()
         return
 
@@ -5878,7 +6291,7 @@ def _render_working(st: Any) -> None:
         st.session_state["ui_error_active"] = True
         st.error("Session setup or supply lists are missing.")
         if st.button("Return to lists"):
-            st.session_state["screen"] = "lists"
+            navigate_back_to_screen(st.session_state, "lists")
             st.rerun()
         return
     child_labels = {
@@ -6026,7 +6439,7 @@ def _render_working(st: Any) -> None:
                 )
             )
         if st.button("Return to lists"):
-            st.session_state["screen"] = "lists"
+            navigate_back_to_screen(st.session_state, "lists")
             st.rerun()
         return
 
@@ -6090,7 +6503,7 @@ def _render_working(st: Any) -> None:
                 )
             )
             if st.button("Return to lists"):
-                st.session_state["screen"] = "lists"
+                navigate_back_to_screen(st.session_state, "lists")
                 st.rerun()
             return
         st.session_state["ui_error_active"] = bool(
@@ -8568,7 +8981,7 @@ def _render_summary(st: Any) -> None:
         st.session_state["checkout_confirmation"] = None
         st.session_state["ui_error_active"] = False
         st.session_state["progress_substep"] = "setup"
-        st.session_state["screen"] = "intake"
+        navigate_back_to_screen(st.session_state, "intake")
         st.rerun()
     if right.button("Start a new session", use_container_width=True):
         clear_session_data(st)
@@ -8720,6 +9133,36 @@ def _apply_custom_css(st: Any) -> None:
             background-color: var(--rss-notebook);
             color: #ffffff;
             animation: rss-step-in 220ms ease-out both;
+        }
+        [class*="st-key-journey_stage_navigation_"] button,
+        [class*="st-key-intake_section_navigation_"] button {
+            min-height: 3rem;
+            padding: 0.45rem 0.65rem;
+            line-height: 1.2;
+        }
+        [class*="st-key-journey_stage_navigation_"]
+        button[kind="primary"]:disabled,
+        [class*="st-key-intake_section_navigation_"]
+        button[kind="primary"]:disabled {
+            border-color: var(--rss-notebook);
+            background-color: var(--rss-notebook);
+            color: #ffffff !important;
+            opacity: 1;
+        }
+        [class*="st-key-journey_stage_navigation_"]
+        button[kind="primary"]:disabled *,
+        [class*="st-key-intake_section_navigation_"]
+        button[kind="primary"]:disabled * {
+            color: #ffffff !important;
+        }
+        [class*="st-key-journey_stage_navigation_"]
+        button[kind="secondary"]:disabled,
+        [class*="st-key-intake_section_navigation_"]
+        button[kind="secondary"]:disabled {
+            border-color: #c7d2cc;
+            background-color: #f1f3f1;
+            color: #6d7771;
+            opacity: 0.72;
         }
         .rss-intake-sections {
             display: flex;
