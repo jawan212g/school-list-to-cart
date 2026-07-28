@@ -260,6 +260,45 @@ def test_condition_1_budget_exceeded_fires_once() -> None:
     )
 
 
+def test_no_budget_never_fires_the_budget_interrupt() -> None:
+    """FR-26: an absent ceiling cannot create a budget breach."""
+
+    offer = _offer()
+    need = _need()
+    batch = evaluate_gate(
+        _context(
+            need,
+            offer,
+            _candidate(need, offer),
+            _optimization(offer, within_budget=None),
+        )
+    )
+
+    assert all(
+        interrupt.kind != "budget_exceeded"
+        for interrupt in batch.interrupts
+    )
+
+
+def test_no_budget_preserves_non_budget_approval_conditions() -> None:
+    """FR-26: removing the ceiling does not bypass product approvals."""
+
+    offer = _offer(price=1_600, returnable=False)
+    need = _need()
+    batch = evaluate_gate(
+        _context(
+            need,
+            offer,
+            _candidate(need, offer),
+            _optimization(offer, within_budget=None),
+        )
+    )
+
+    assert tuple(
+        interrupt.kind for interrupt in batch.interrupts
+    ) == ("non_returnable_threshold",)
+
+
 def test_condition_2_major_substitution_fires_once() -> None:
     offer = _offer()
     need = _need()

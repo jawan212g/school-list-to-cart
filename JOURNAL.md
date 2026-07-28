@@ -1077,3 +1077,76 @@ lightweight motion without changing pipeline or calculation behavior.
 Deploy the branch and test one Student and one Classroom entry, including switching
 between the types once, leaving a required field blank, and completing an in-budget
 plan with reduced-motion both enabled and disabled.
+
+## 2026-07-28 — Complete intake fixes and add no-budget planning
+
+### Objective
+
+Clarify student and classroom intake, repair per-entry classroom budgets, and add an
+explicit no-budget path without changing extraction, matching, or optimizer
+calculations.
+
+### Work completed
+
+- Reworded the entry-count question and shortened the student-name placeholder to
+  Maya.
+- Added separate display counters, so mixed intake entries read Student 1,
+  Classroom 1, Student 2, and Classroom 2. Stable internal record IDs remain unique
+  and independent of those display labels.
+- Moved Continue actions to the right side of their intake cards and enforced white
+  text for every primary button, including nested Streamlit label elements.
+- Renamed the classroom-size field and added an information tooltip explaining that
+  list quantities are multiplied by the classroom count.
+- Changed per-entry budget copy and coverage so both student and classroom records
+  receive an allocation.
+- Added the non-default No set budget option. It passes `None` as the deterministic
+  budget ceiling, so the existing optimizer still minimizes landed cost while budget
+  interrupts and shortfall comparisons remain absent.
+- Reconciled BR-05 for sessions without a budget: donation add-ons are offered after
+  required coverage is complete because there is no 90% threshold to evaluate. Their
+  exact added landed cost is still calculated through the normal optimization path.
+- Updated the summary and text export to identify a no-budget plan without implying
+  that a budget constraint was satisfied.
+
+### Decisions made
+
+- Kept Student and Classroom numbering strictly presentational. Internal IDs remain
+  the existing globally unique `child-1`, `child-2` sequence so list ownership and
+  decision references do not collide.
+- Preserved every non-budget approval condition when no budget is selected.
+- Recorded the requested no-budget donation behavior as a named BR-05 reconciliation
+  rather than weakening the existing 90% rule for budgeted sessions.
+
+### Problems or limitations
+
+- BRD BR-05 describes only budgeted sessions; the no-budget behavior requested in
+  chat is an explicit specification extension and should be added to the BRD later.
+- Streamlit is unavailable on this Windows ARM64 machine, so right alignment, tooltip
+  placement, and button contrast were verified structurally rather than in a live
+  browser.
+
+### Files created or changed
+
+- Updated `app.py`, `agent/addons.py`, `agent/pipeline.py`, `agent/rules.py`,
+  `tests/test_app.py`, `tests/test_addons.py`, `tests/test_gate.py`, and
+  `JOURNAL.md`.
+
+### Testing performed
+
+- Focused intake, add-on, and gate suites: 61 passed.
+- Complete automated suite: 229 passed in 2.61 seconds.
+- Python compilation completed without errors.
+- Git whitespace validation completed without errors; only the repository's existing
+  LF-to-CRLF conversion warnings were reported.
+
+### Remaining work
+
+- Confirm the mixed Student/Classroom display counters, classroom help tooltip,
+  primary-button contrast, and no-budget donation panel in deployed Streamlit.
+
+### Recommended next step
+
+Run one deployed no-budget session with a student and a classroom, confirm both
+receive their own per-entry budget field when that mode is selected, then return to
+no-budget mode and verify the summary shows exact landed cost without a budget
+comparison.

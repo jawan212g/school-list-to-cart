@@ -156,6 +156,44 @@ def test_br05_hides_donations_while_a_required_item_is_unmet() -> None:
     )
 
 
+def test_no_budget_still_minimizes_cost_and_offers_donations() -> None:
+    """BR-05: no ceiling skips budget review but preserves thrift and add-ons."""
+
+    result = run_pipeline(
+        PipelineSession(
+            session_id="no-budget",
+            children=("child",),
+            budget_total=None,
+            budget_mode="none",
+            fulfillment_pref="pickup",
+            tax_basis_points=0,
+        ),
+        [ListInput(child_id="child", source="list")],
+        stores=[_store()],
+        offers=[
+            _offer("BACKPACK-HIGH", "backpacks", 9_000),
+            _offer("BACKPACK-LOW", "backpacks", 8_000),
+            _offer("PENCILS", "pencils", 1_000),
+        ],
+        suitability_judge=StructuredSuitabilityJudge(),
+        extractor=_extractor,
+    )
+
+    assert result.proposed_cart.budget_cents is None
+    assert result.proposed_cart.within_budget is None
+    assert result.proposed_cart.shortfall_cents == 0
+    assert result.proposed_cart.landed_cost == 8_000
+    assert result.proposed_cart.plan.lines[0].sku == "BACKPACK-LOW"
+    assert all(
+        interrupt.kind != "budget_exceeded"
+        for interrupt in result.approval_batch.interrupts
+    )
+    assert result.addon_proposal.eligible is True
+    assert "does not apply" in result.addon_proposal.reason
+    assert result.addon_proposal.resulting_landed_cost_cents == 9_000
+    assert result.addon_proposal.incremental_landed_cost_cents == 1_000
+
+
 def test_individual_donations_reoptimize_exactly_and_stay_separate() -> None:
     """BR-05: each classroom donation has an exact threshold-aware result."""
 

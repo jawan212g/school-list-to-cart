@@ -2640,6 +2640,8 @@ def build_text_summary(
                 )
             )
         )
+    else:
+        lines.append("BUDGET: NO SET BUDGET")
     lines.extend([
         "Simulated catalog; fictional stores; no payment was collected.",
         "",
@@ -3040,6 +3042,29 @@ def _intake_students_from_state(
     return tuple(students)
 
 
+def intake_entry_display_number(
+    state: Mapping[str, Any],
+    index: int,
+    entry_type: str,
+) -> int:
+    """Return a display-only Student or Classroom counter (FR-01/FR-05)."""
+
+    if entry_type not in {"Student", "Classroom"}:
+        raise ValueError(f"Unsupported intake entry type: {entry_type}")
+    matching_prior_entries = sum(
+        str(state.get(f"entity_type_{prior_index}") or "") in {
+            entry_type,
+            (
+                "One student"
+                if entry_type == "Student"
+                else "A classroom group"
+            ),
+        }
+        for prior_index in range(index)
+    )
+    return matching_prior_entries + 1
+
+
 def _render_intake_step_progress(st: Any, step: int) -> None:
     """Keep the parent oriented within the three-part setup."""
 
@@ -3070,7 +3095,7 @@ def _render_student_step(st: Any) -> None:
 
     student_count = int(
         st.number_input(
-            "How many students or classroom groups?",
+            "How many students or classrooms are you shopping for?",
             min_value=1,
             max_value=MAX_CHILDREN_PER_SESSION,
             step=1,
@@ -3141,10 +3166,24 @@ def _render_student_step(st: Any) -> None:
         else:
             current_name = ""
         default_heading = (
-            f"Classroom {index + 1}"
+            "Classroom "
+            + str(
+                intake_entry_display_number(
+                    st.session_state,
+                    index,
+                    "Classroom",
+                )
+            )
             if current_type == "Classroom"
             else (
-                f"Student {index + 1}"
+                "Student "
+                + str(
+                    intake_entry_display_number(
+                        st.session_state,
+                        index,
+                        "Student",
+                    )
+                )
                 if current_type == "Student"
                 else f"Student or classroom {index + 1}"
             )
@@ -3185,7 +3224,7 @@ def _render_student_step(st: Any) -> None:
             name_placeholder = (
                 "Ms. Rivera"
                 if is_classroom
-                else "Maya, or just 'Grade 2'"
+                else "Maya"
             )
             active_name_key = (
                 teacher_name_key
@@ -3233,18 +3272,24 @@ def _render_student_step(st: Any) -> None:
                 count_key = f"student_count_{index}"
                 st.session_state.setdefault(count_key, 20)
                 field_columns[2].number_input(
-                    "Number of students",
+                    "Students in this classroom",
                     min_value=1,
                     max_value=MAX_CLASSROOM_STUDENTS,
                     step=1,
                     key=count_key,
+                    help=(
+                        "Every quantity on the supply list will be multiplied "
+                        "by this number."
+                    ),
                 )
     st.session_state["ui_error_active"] = (
         validation_attempted and bool(validation_errors)
     )
-    continue_clicked = st.button(
+    _, continue_column = st.columns([2, 1])
+    continue_clicked = continue_column.button(
         "Continue to budget",
         type="primary",
+        use_container_width=True,
     )
     if not continue_clicked:
         return
@@ -3267,12 +3312,16 @@ def _render_budget_step(st: Any) -> None:
         int(st.session_state["child_count"]),
     )
     st.caption(
-        "Use one amount for the whole plan, or set a separate amount for "
-        "each student."
+        "Use one amount for the whole plan, set one for each student or "
+        "classroom, or continue without a budget constraint."
     )
     budget_mode_label = st.radio(
         "Budget setup",
-        ("One combined budget", "A budget for each student"),
+        (
+            "One combined budget",
+            "A budget for each student or classroom",
+            "No set budget — just show me the best plan",
+        ),
         horizontal=True,
         key="budget_mode_label",
     )
@@ -3293,7 +3342,7 @@ def _render_budget_step(st: Any) -> None:
             budget_errors.append(error)
             if validation_attempted:
                 st.error(escape_streamlit_dollars(error))
-    else:
+    elif budget_mode_label == "A budget for each student or classroom":
         columns = st.columns(2)
         for index, student in enumerate(students):
             budget_key = f"budget_{index}"
@@ -3311,6 +3360,11 @@ def _render_budget_step(st: Any) -> None:
                 budget_errors.append(message)
                 if validation_attempted:
                     column.error(escape_streamlit_dollars(message))
+    else:
+        st.info(
+            "The plan will still minimize landed cost. Budget comparisons "
+            "and budget approval questions will be skipped."
+        )
     st.session_state["ui_error_active"] = (
         validation_attempted and bool(budget_errors)
     )
@@ -3323,6 +3377,7 @@ def _render_budget_step(st: Any) -> None:
     continue_clicked = forward.button(
         "Continue to shopping preferences",
         type="primary",
+        use_container_width=True,
     )
     if not continue_clicked:
         return
@@ -3340,7 +3395,7 @@ def _render_budget_step(st: Any) -> None:
 def _budget_from_intake_state(
     state: Mapping[str, Any],
     students: Sequence[Mapping[str, Any]],
-) -> tuple[str, int, Mapping[str, int]]:
+) -> tuple[str, int | None, Mapping[str, int]]:
     """Convert already-validated FR-03 widget values at the UI boundary."""
 
     if state.get("budget_mode_label") == "One combined budget":
@@ -3349,6 +3404,11 @@ def _budget_from_intake_state(
             money_to_cents(str(state.get("combined_budget_text", ""))),
             {},
         )
+    if (
+        state.get("budget_mode_label")
+        == "No set budget — just show me the best plan"
+    ):
+        return "none", None, {}
     allocations = {
         str(student["child_id"]): money_to_cents(
             str(state.get(f"budget_{index}", ""))
@@ -3506,6 +3566,7 @@ def _render_preferences_step(st: Any) -> None:
     continue_clicked = forward.button(
         "Continue to the lists",
         type="primary",
+        use_container_width=True,
     )
     if not continue_clicked:
         return
@@ -3807,10 +3868,15 @@ def _render_lists(st: Any) -> None:
 
 def _pipeline_session(intake: Mapping[str, Any]) -> PipelineSession:
     children = intake["children"]
+    raw_budget_total = intake["budget_total"]
     return PipelineSession(
         session_id=str(intake["session_id"]),
         children=tuple(child["child_id"] for child in children),
-        budget_total=int(intake["budget_total"]),
+        budget_total=(
+            None
+            if raw_budget_total is None
+            else int(raw_budget_total)
+        ),
         budget_mode=str(intake["budget_mode"]),  # type: ignore[arg-type]
         shopping_mode=str(intake["shopping_mode"]),  # type: ignore[arg-type]
         store_radius_miles=float(intake["store_radius_miles"]),
@@ -7120,7 +7186,7 @@ def donation_offer_is_visible(
     result: PipelineResult,
     required_plan_is_complete: bool,
 ) -> bool:
-    """Offer BR-05 donations only after every required item is covered."""
+    """Offer BR-05 donations after every required item is covered."""
 
     return (
         result.addon_proposal.eligible
@@ -7209,11 +7275,17 @@ def _render_addons(
         raise ValueError(
             "Eligible donations require an exact selection evaluation."
         )
-    st.success(
-        "The required-item cart is at or below 90% of the budget, so these "
-        "donation items can be considered. Each amount below is recalculated "
-        "against the current selection."
-    )
+    if result.session.budget_total is None:
+        st.success(
+            "No set budget was selected, so the 90% threshold does not "
+            "apply. Each donation below shows its exact added landed cost."
+        )
+    else:
+        st.success(
+            "The required-item cart is at or below 90% of the budget, so "
+            "these donation items can be considered. Each amount below is "
+            "recalculated against the current selection."
+        )
     generation = int(st.session_state["approval_generation"])
     select_all, clear_all = st.columns(2)
     if select_all.button(
@@ -7300,11 +7372,9 @@ def _render_addons(
             ),
         )
 
-    budget_cents = result.session.budget_total or 0
-    budget_remaining = (
-        budget_cents - evaluation.resulting_landed_cost_cents
-    )
-    left, middle, right = st.columns(3)
+    budget_cents = result.session.budget_total
+    metric_columns = st.columns(2 if budget_cents is None else 3)
+    left, middle = metric_columns[:2]
     left.metric(
         "Resulting landed cost",
         format_streamlit_money(
@@ -7317,14 +7387,18 @@ def _render_addons(
             evaluation.incremental_landed_cost_cents
         ),
     )
-    right.metric(
-        (
-            "Budget remaining"
-            if budget_remaining >= 0
-            else "Budget shortfall"
-        ),
-        format_streamlit_money(abs(budget_remaining)),
-    )
+    if budget_cents is not None:
+        budget_remaining = (
+            budget_cents - evaluation.resulting_landed_cost_cents
+        )
+        metric_columns[2].metric(
+            (
+                "Budget remaining"
+                if budget_remaining >= 0
+                else "Budget shortfall"
+            ),
+            format_streamlit_money(abs(budget_remaining)),
+        )
     blockers = []
     if evaluation.review_requirement_ids:
         blockers.append("one or more add-ons needs review")
@@ -7779,14 +7853,18 @@ def _render_list_interpretation(
 def _render_summary_headline(
     st: Any,
     optimization: OptimizationResult,
-    budget_cents: int,
+    budget_cents: int | None,
     is_complete: bool,
     copy: CopySet,
 ) -> None:
     """Lead with cost, budget status, and plan completeness."""
 
-    variance = budget_cents - optimization.landed_cost
-    if variance < 0:
+    variance = (
+        None
+        if budget_cents is None
+        else budget_cents - optimization.landed_cost
+    )
+    if variance is not None and variance < 0:
         st.error(
             "Budget shortfall: "
             f"{format_streamlit_money(abs(variance))}. "
@@ -7797,7 +7875,11 @@ def _render_summary_headline(
             "Required items are missing because one or more are not in the "
             "cart."
         )
-    if is_complete and variance >= 0 and copy.register == "warm":
+    if (
+        is_complete
+        and (variance is None or variance >= 0)
+        and copy.register == "warm"
+    ):
         st.markdown(
             (
                 '<div class="rss-plan-ready" role="status">'
@@ -7810,22 +7892,25 @@ def _render_summary_headline(
 
     st.header(copy.summary_heading)
     st.caption(copy.headline_heading)
-    columns = st.columns(3)
+    columns = st.columns(2 if budget_cents is None else 3)
     columns[0].metric(
         "Landed cost",
         format_streamlit_money(optimization.landed_cost),
     )
-    if variance >= 0:
-        columns[1].metric(
-            "Budget remaining",
-            format_streamlit_money(variance),
-        )
+    if budget_cents is None:
+        st.caption("No budget comparison selected.")
     else:
-        columns[1].metric(
-            "Budget shortfall",
-            format_streamlit_money(abs(variance)),
-        )
-    columns[2].metric(
+        if variance is not None and variance >= 0:
+            columns[1].metric(
+                "Budget remaining",
+                format_streamlit_money(variance),
+            )
+        else:
+            columns[1].metric(
+                "Budget shortfall",
+                format_streamlit_money(abs(variance or 0)),
+            )
+    columns[-1].metric(
         "Plan status",
         copy.complete_status if is_complete else "Required items missing",
     )
@@ -7928,9 +8013,11 @@ def _render_summary(st: Any) -> None:
         st.session_state["addon_evaluation"] = None
         st.session_state["include_addons"] = False
     is_complete = required_plan_is_complete
+    budget_total = intake["budget_total"]
     tone_state = ToneState(
         has_shortfall=(
-            optimization.landed_cost > int(intake["budget_total"])
+            budget_total is not None
+            and optimization.landed_cost > int(budget_total)
         ),
         has_unmet_required=not is_complete,
         has_extraction_failure=bool(result.extraction_failures),
@@ -7942,7 +8029,7 @@ def _render_summary(st: Any) -> None:
     _render_summary_headline(
         st,
         optimization,
-        int(intake["budget_total"]),
+        None if budget_total is None else int(budget_total),
         is_complete,
         copy,
     )
@@ -8525,10 +8612,16 @@ def _apply_custom_css(st: Any) -> None:
             transform: translateY(0);
         }
         .stButton > button[kind="primary"],
+        button[data-testid="baseButton-primary"],
         [data-testid="stFormSubmitButton"] > button[kind="primary"] {
             background-color: var(--rss-chalkboard);
             border-color: var(--rss-chalkboard);
-            color: white;
+            color: #ffffff !important;
+        }
+        .stButton > button[kind="primary"] *,
+        button[data-testid="baseButton-primary"] *,
+        [data-testid="stFormSubmitButton"] > button[kind="primary"] * {
+            color: #ffffff !important;
         }
         [data-testid="stProgress"] > div > div > div > div {
             background-color: var(--rss-notebook);

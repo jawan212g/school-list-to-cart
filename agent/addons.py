@@ -13,7 +13,11 @@ from agent.optimize import (
     OptimizationResult,
     optimize_cart,
 )
-from agent.rules import OPTIONAL_ITEM_HEADROOM_PERCENT, PERCENT_DENOMINATOR
+from agent.rules import (
+    OPTIONAL_ITEM_HEADROOM_BYPASSED_WITHOUT_BUDGET,
+    OPTIONAL_ITEM_HEADROOM_PERCENT,
+    PERCENT_DENOMINATOR,
+)
 from data.loader import Offer, Store
 
 
@@ -189,7 +193,7 @@ def propose_addons(
     *,
     student_counts_by_child: Mapping[str, int] | None = None,
 ) -> AddOnProposal:
-    """Price optional lines only when BR-05 headroom exists (FR-09)."""
+    """Price optional lines under the applicable BR-05 rule (FR-09)."""
 
     items = _optional_items(normalization)
     if not items:
@@ -197,12 +201,6 @@ def propose_addons(
             eligible=False,
             reason="No optional or donation items were found.",
             items=(),
-        )
-    if base_optimization.budget_cents is None:
-        return AddOnProposal(
-            eligible=False,
-            reason="A budget is required before add-ons can be offered.",
-            items=items,
         )
     if not base_optimization.is_complete:
         return AddOnProposal(
@@ -213,18 +211,33 @@ def propose_addons(
             ),
             items=items,
         )
-    within_headroom = (
-        base_optimization.landed_cost * PERCENT_DENOMINATOR
-        <= base_optimization.budget_cents * OPTIONAL_ITEM_HEADROOM_PERCENT
-    )
-    if not within_headroom:
-        return AddOnProposal(
-            eligible=False,
-            reason=(
-                "The required-item cart is above the BR-05 headroom threshold."
-            ),
-            items=items,
+    if base_optimization.budget_cents is None:
+        if not OPTIONAL_ITEM_HEADROOM_BYPASSED_WITHOUT_BUDGET:
+            raise RuntimeError(
+                "BR-05 must define add-on behavior without a budget"
+            )
+        eligibility_reason = (
+            "No budget constraint was set, so the BR-05 headroom threshold "
+            "does not apply."
         )
+    else:
+        within_headroom = (
+            base_optimization.landed_cost * PERCENT_DENOMINATOR
+            <= (
+                base_optimization.budget_cents
+                * OPTIONAL_ITEM_HEADROOM_PERCENT
+            )
+        )
+        if not within_headroom:
+            return AddOnProposal(
+                eligible=False,
+                reason=(
+                    "The required-item cart is above the BR-05 headroom "
+                    "threshold."
+                ),
+                items=items,
+            )
+        eligibility_reason = "The base cart is at or below 90% of the budget."
 
     optional_ids = frozenset(item.requirement_id for item in items)
     optional_needs = _separate_optional_needs(
@@ -263,7 +276,7 @@ def propose_addons(
     )
     return AddOnProposal(
         eligible=True,
-        reason="The base cart is at or below 90% of the budget.",
+        reason=eligibility_reason,
         items=items,
         optimization=optimization,
         purchase_needs=combined_needs,

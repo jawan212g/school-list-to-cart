@@ -204,6 +204,102 @@ def test_student_and_classroom_fields_preserve_grade_context() -> None:
     ) == ("grade-3",)
 
 
+def test_student_and_classroom_display_counters_are_separate_only_in_ui() -> None:
+    """FR-01/FR-05: labels count by type while internal IDs stay unique."""
+
+    state = {
+        "entity_type_0": "Student",
+        "child_label_0": "Maya",
+        "child_grade_0": "Grade 2",
+        "entity_type_1": "Classroom",
+        "child_label_1": "Ms. Rivera",
+        "child_grade_1": "Grade 3",
+        "student_count_1": 20,
+        "entity_type_2": "Student",
+        "child_label_2": "Noah",
+        "child_grade_2": "Grade 5",
+        "entity_type_3": "Classroom",
+        "child_label_3": "Mr. Chen",
+        "child_grade_3": "Grade 4",
+        "student_count_3": 24,
+    }
+
+    assert app.intake_entry_display_number(state, 0, "Student") == 1
+    assert app.intake_entry_display_number(state, 1, "Classroom") == 1
+    assert app.intake_entry_display_number(state, 2, "Student") == 2
+    assert app.intake_entry_display_number(state, 3, "Classroom") == 2
+    assert tuple(
+        entry["child_id"]
+        for entry in app._intake_students_from_state(state, 4)
+    ) == ("child-1", "child-2", "child-3", "child-4")
+
+
+def test_individual_budgets_include_students_and_classrooms() -> None:
+    """FR-03/FR-05: every intake entry receives an allocation."""
+
+    students = app._intake_students_from_state(
+        {
+            "entity_type_0": "Student",
+            "child_label_0": "Maya",
+            "child_grade_0": "Grade 2",
+            "entity_type_1": "Classroom",
+            "child_label_1": "Ms. Rivera",
+            "child_grade_1": "Grade 3",
+            "student_count_1": 20,
+        },
+        2,
+    )
+
+    mode, total, allocations = app._budget_from_intake_state(
+        {
+            "budget_mode_label": (
+                "A budget for each student or classroom"
+            ),
+            "budget_0": "50.00",
+            "budget_1": "250.00",
+        },
+        students,
+    )
+
+    assert mode == "per_child"
+    assert total == 30_000
+    assert allocations == {
+        "child-1": 5_000,
+        "child-2": 25_000,
+    }
+
+
+def test_no_budget_intake_has_no_ceiling_or_allocations() -> None:
+    """No-budget intake stays explicit and is never the default option."""
+
+    students = app._intake_students_from_state(
+        {
+            "entity_type_0": "Student",
+            "child_label_0": "Maya",
+            "child_grade_0": "Grade 2",
+        },
+        1,
+    )
+    mode, total, allocations = app._budget_from_intake_state(
+        {
+            "budget_mode_label": (
+                "No set budget — just show me the best plan"
+            ),
+        },
+        students,
+    )
+    budget_source = inspect.getsource(app._render_budget_step)
+
+    assert mode == "none"
+    assert total is None
+    assert allocations == {}
+    assert budget_source.index('"One combined budget"') < (
+        budget_source.index(
+            '"No set budget — just show me the best plan"'
+        )
+    )
+
+
 def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     """The parent intake hides development controls and internal vocabulary."""
 
@@ -221,12 +317,20 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert "Step 1" not in student_source
     assert "Student name or nickname" in student_source
     assert "Teacher name" in student_source
-    assert "Maya, or just 'Grade 2'" in student_source
+    assert 'else "Maya"' in student_source
     assert "Ms. Rivera" in student_source
     assert "GRADE_OPTIONS" in student_source
     assert "Select a grade" in student_source
     assert "Who are you adding?" in student_source
-    assert "Number of students" in student_source
+    assert "Students in this classroom" in student_source
+    assert (
+        "Every quantity on the supply list will be multiplied "
+        in student_source
+    )
+    assert (
+        "How many students or classrooms are you shopping for?"
+        in student_source
+    )
     assert student_source.index("Who are you adding?") < (
         student_source.index("text_input")
     )
@@ -239,17 +343,24 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert "student_validation_attempted" in student_source
     assert "if validation_attempted" in student_source
     assert "disabled=" not in student_source
+    assert "continue_column.button" in student_source
+    assert "use_container_width=True" in student_source
     assert 'st.subheader("Budget")' not in budget_source
     assert "Step 2" not in budget_source
-    assert "A budget for each student" in budget_source
+    assert "A budget for each student or classroom" in budget_source
+    assert "No set budget — just show me the best plan" in budget_source
     assert "budget_validation_attempted" in budget_source
     assert "disabled=" not in budget_source
+    assert "forward.button" in budget_source
+    assert "use_container_width=True" in budget_source
     assert 'st.subheader("Shopping preferences")' not in preferences_source
     assert "Step 3" not in preferences_source
     assert '"Shopping preferences"' in preferences_source
     assert "Advanced shopping and tax options" in preferences_source
     assert "preferences_validation_attempted" in preferences_source
     assert "disabled=" not in preferences_source
+    assert "forward.button" in preferences_source
+    assert "use_container_width=True" in preferences_source
     assert "Shopping mode" not in preferences_source
 
 
@@ -273,6 +384,8 @@ def test_visual_system_keeps_notebook_pattern_behind_opaque_cards() -> None:
     assert "@keyframes rss-celebrate-in" in css_source
     assert "prefers-reduced-motion: reduce" in css_source
     assert "@media (max-width: 700px)" in css_source
+    assert 'button[kind="primary"] *' in css_source
+    assert "color: #ffffff !important" in css_source
 
 
 def test_landing_keeps_context_in_one_collapsed_explainer() -> None:
@@ -465,6 +578,97 @@ def test_complete_plan_gets_one_nonblocking_celebration() -> None:
     ]
     assert len(celebrations) == 1
     assert "All set — your shopping plan is ready." in celebrations[0]
+
+
+def test_no_budget_summary_shows_cost_without_budget_comparison() -> None:
+    """A no-budget plan never implies that a ceiling was met."""
+
+    result = _real_pipeline_result("Grade 2")
+    optimization = replace(
+        result.proposed_cart,
+        budget_cents=None,
+        within_budget=None,
+        shortfall_cents=0,
+    )
+    events: list[tuple[str, str]] = []
+    column_counts: list[int] = []
+
+    class MetricColumn:
+        def metric(self, label: str, value: str) -> None:
+            events.append((f"metric:{label}", value))
+
+    class HeadlineStreamlit:
+        def error(self, value: str) -> None:
+            events.append(("error", value))
+
+        def markdown(
+            self,
+            value: str,
+            unsafe_allow_html: bool,
+        ) -> None:
+            assert unsafe_allow_html is True
+            events.append(("markdown", value))
+
+        def header(self, value: str) -> None:
+            events.append(("header", value))
+
+        def caption(self, value: str) -> None:
+            events.append(("caption", value))
+
+        def columns(self, count: int) -> tuple[MetricColumn, ...]:
+            column_counts.append(count)
+            return tuple(MetricColumn() for _ in range(count))
+
+    app._render_summary_headline(
+        HeadlineStreamlit(),
+        optimization,
+        None,
+        True,
+        app.WARM_COPY,
+    )
+
+    assert column_counts == [2]
+    assert ("caption", "No budget comparison selected.") in events
+    assert any(kind == "metric:Landed cost" for kind, _ in events)
+    assert not any(
+        kind in {"metric:Budget remaining", "metric:Budget shortfall"}
+        for kind, _ in events
+    )
+    no_budget_result = replace(
+        result,
+        session=replace(
+            result.session,
+            budget_total=None,
+            budget_mode="none",
+        ),
+        proposed_cart=optimization,
+    )
+    export = app.build_text_summary(
+        no_budget_result,
+        optimization,
+        result.matches,
+        (
+            Store(
+                store_id="S",
+                name="Fixture Store",
+                distance_miles=1.0,
+                pickup_fee=0,
+                pickup_minimum=0,
+                delivery_fee=0,
+                delivery_minimum=0,
+                tax_applies=False,
+            ),
+        ),
+        {"child-1": "Maya"},
+        {},
+        (),
+        (),
+    )
+
+    assert "BUDGET: NO SET BUDGET" in export
+    assert "BUDGET REMAINING" not in export
+    assert "BUDGET SHORTFALL" not in export
+    assert "lines.append" not in inspect.getsource(app._render_review)
 
 
 def test_visible_navigation_uses_four_required_stages() -> None:

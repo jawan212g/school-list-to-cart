@@ -56,7 +56,7 @@ from agent.schema import ExtractionEnvelope
 from data.loader import Offer, Store, load_catalog, load_stores
 
 
-BudgetMode = Literal["combined", "per_child"]
+BudgetMode = Literal["combined", "per_child", "none"]
 ApprovalKind = Literal[
     "budget",
     "major_substitution",

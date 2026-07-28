@@ -32,6 +32,9 @@ REQUIRED_ITEM_AUTO_DROP_ALLOWED = False  # BR-04: required items stay in the car
 
 OPTIONAL_ITEMS_INCLUDED_BY_DEFAULT = False  # BR-05: optional items start excluded.
 OPTIONAL_ITEM_HEADROOM_PERCENT = 90  # BR-05: add-ons appear at 90% of budget.
+OPTIONAL_ITEM_HEADROOM_BYPASSED_WITHOUT_BUDGET = True
+# BR-05 reconciliation: without a budget constraint there is no 90% threshold,
+# so optional items may be offered after required coverage is complete.
 MINIMUM_BUDGET_CENTS = 1  # E-37: zero and negative budgets are invalid.
 MAX_CHILDREN_PER_SESSION = 10  # E-38: reasonable live-session child limit.
 
