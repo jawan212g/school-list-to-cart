@@ -225,6 +225,19 @@ class RequirementAttributes(BaseModel):
         return tuple(normalized)
 
 
+class RequirementSource(BaseModel):
+    """One exact source contributing to a consolidated requirement."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    source_req_id: str = Field(min_length=1)
+    document_name: str | None = None
+    section_name: str | None = None
+    page_number: int = Field(default=NONPAGINATED_SOURCE_PAGE, ge=1)
+    exact_line: str = Field(min_length=1)
+    quantity: int = Field(ge=0)
+
+
 class Requirement(BaseModel):
     """One normalized school-list line matching BRD Section 8 (FR-07)."""
 
@@ -254,6 +267,7 @@ class Requirement(BaseModel):
     source_section: str | None = None
     source_page: int = Field(default=NONPAGINATED_SOURCE_PAGE, ge=1)
     source_language: str | None = None
+    sources: tuple[RequirementSource, ...] = ()
     attributes: RequirementAttributes = Field(
         default_factory=RequirementAttributes
     )
@@ -524,6 +538,7 @@ class SupplyItemReview(BaseModel):
     source_section: str | None = None
     source_page: int | None = Field(default=None, ge=1)
     source_language: str | None = None
+    sources: tuple[RequirementSource, ...] = ()
     notes: str | None = None
     source_text: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)

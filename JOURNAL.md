@@ -1688,3 +1688,85 @@ for genuinely unresolved sections.
 
 Deploy the Part A screen, run the Ms. K Grade 1/Highly Capable scenario once, and
 then repeat the two Maple baseline runs while OpenAI connectivity is healthy.
+
+## 2026-07-28 - Consolidate repeated section requirements
+
+### Objective
+
+Correct same-student duplicates across selected document sections or separate lists,
+and make every section-resolution explanation derive from the parent's live choice.
+
+### Work completed
+
+- Diagnosed the pre-fix requirement path as concatenation: extracted requirements
+  were appended before normalization, and aggregation then summed matching rows.
+- Added a deterministic same-student merge keyed by the normalized identity already
+  used for aggregation.
+- Made agreeing quantities count once, while disagreeing quantities produce one
+  parent question with total-all as the default, a source-specific choice for every
+  contributing line, and a custom quantity.
+- Added source provenance to production Requirement and SupplyItemReview objects and
+  retained it across review confirmation, pipeline execution, and replanning.
+- Allowed separate list inputs for one student and merged their extraction envelopes
+  before normalization.
+- Corrected BR-18 so an explicit section selection resolves the document; a mismatched
+  selection is an inline warning identifying it as the parent's choice.
+- Routed whole-document grade context through DocumentStructureEnvelope rather than
+  the selected extraction pages.
+- Recomputed the other-grade exclusion count from ResolvedSectionChoice.
+- Deduplicated section source links by document and page, and identified the old
+  duplicate as two display paths rather than a double cart resolution.
+- Added per-section rule-versus-parent attribution, named multilingual repetitions in
+  plain language, and kept the no-grade checkbox enabled with its exact line and page.
+
+### Decisions made
+
+- Added BR-20 through BR-22 without renumbering existing rules.
+- Kept quantity consolidation and conflict resolution entirely model-free.
+- Put the quantity-conflict question in the list-resolution stage before Personalize,
+  leaving the Personalize, approval, setup, matching, gate, and optimizer behavior
+  unchanged.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 environment. The new AppTest is
+  collected but skipped locally and must execute in the deployed x86 environment.
+- The required OpenAI Maple regression attempt timed out for both lists again, so its
+  zero-dollar failure object is not a valid baseline.
+- A same-extraction Kelley run completed, but provider reading drift produced a
+  $75.94 cart at both $150 and $85, four visible interrupt groups, and no $85 budget
+  plan. The merge reported zero duplicate conflicts, so this difference from the
+  historical $111.21/$71.07 OpenAI baseline was not caused by requirement merging.
+- The full configured Kelley path, including production model-assisted matching,
+  produced a $108.31 landed cart with four interrupts at $150. Reusing that same
+  extraction at $85 produced a $69.19 recommended plan and five interrupts. Neither
+  run contained a requirement-merge interrupt.
+
+### Files created or changed
+
+- Added `agent/requirement_merge.py` and `tests/test_requirement_merge.py`.
+- Updated `agent/aggregate.py`, `agent/extract.py`, `agent/pipeline.py`, `agent/review.py`,
+  `agent/rules.py`, `agent/schema.py`, `agent/sections.py`, `app.py`,
+  `tests/test_app.py`, `tests/test_pipeline.py`, `tests/test_sections.py`, and
+  `tests/test_streamlit_lifecycle.py`.
+
+### Testing performed
+
+- Focused requirement, section, pipeline, app, and AppTest selection: 92 passed,
+  1 skipped.
+- Kelley shared-extraction regression: $75.94 at both budget settings, four visible
+  interrupt groups, zero merge interrupts.
+- Kelley production matching: $108.31 landed and four interrupts at $150; $69.19
+  recommended budget plan and five interrupts at $85.
+- OpenAI regression: both extraction requests timed out; no comparable cart produced.
+
+### Remaining work
+
+- Execute the Streamlit AppTest in the deployed environment.
+- Re-run the historical OpenAI Maple baselines when the endpoint responds within the
+  configured timeout.
+
+### Recommended next step
+
+Deploy this list-resolution block, verify the mixed Grade 5 plus Highly Capable
+selection once, then repeat the OpenAI Maple baseline from one shared extraction.

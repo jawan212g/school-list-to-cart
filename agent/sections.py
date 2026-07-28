@@ -141,6 +141,8 @@ class ResolvedSectionChoice:
     selected_section_ids: tuple[str, ...]
     selected_section_labels: tuple[str, ...]
     manually_overridden: bool = False
+    automatically_selected_ids: tuple[str, ...] = ()
+    parent_selected_ids: tuple[str, ...] = ()
 
     @property
     def can_continue(self) -> bool:
@@ -264,6 +266,9 @@ def build_resolved_section_choice(
         section.section_id: section.label
         for section in resolution.primary_language_sections
     }
+    auto_ids = {
+        section.section_id for section in resolution.auto_selected
+    }
     return ResolvedSectionChoice(
         resolution=resolution,
         selected_section_ids=selected_ids,
@@ -273,6 +278,12 @@ def build_resolved_section_choice(
             if section_id in labels_by_id
         ),
         manually_overridden=manually_overridden,
+        automatically_selected_ids=tuple(
+            section_id for section_id in selected_ids if section_id in auto_ids
+        ),
+        parent_selected_ids=tuple(
+            section_id for section_id in selected_ids if section_id not in auto_ids
+        ),
     )
 
 

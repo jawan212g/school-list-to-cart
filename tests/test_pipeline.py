@@ -105,6 +105,92 @@ def test_pipeline_wires_two_lists_through_one_optimized_cart() -> None:
     assert all(decision.actor == "agent" for decision in result.decisions)
 
 
+def test_two_lists_for_one_student_merge_equal_requirement_once() -> None:
+    """BR-20/BR-22: separate lists merge by production requirement identity."""
+
+    store = Store(
+        store_id="S",
+        name="Store",
+        distance_miles=1.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=0,
+        delivery_minimum=0,
+        tax_applies=False,
+    )
+    offer = Offer(
+        sku="BACKPACK",
+        store_id="S",
+        brand="Generic",
+        title="Backpack",
+        category="backpacks",
+        pack_size=1,
+        unit_price=2_000,
+        pack_price=2_000,
+        stock_qty=2,
+        is_returnable=True,
+        attributes={},
+    )
+
+    def extractor(
+        source: str,
+        *,
+        child_id: str,
+        mime_type: str | None,
+        client: object,
+    ) -> ExtractionEnvelope:
+        del mime_type, client
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="backpack",
+                    child_id=child_id,
+                    raw_text="1 backpack",
+                    canonical_item="backpacks",
+                    quantity=1,
+                    source_section=source,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+
+    result = run_pipeline(
+        PipelineSession(
+            session_id="same-student-two-lists",
+            children=("child-a",),
+            budget_total=5_000,
+            fulfillment_pref="pickup",
+            tax_basis_points=0,
+        ),
+        (
+            ListInput(
+                child_id="child-a",
+                source="Grade 5",
+                document_name="grade-five.txt",
+            ),
+            ListInput(
+                child_id="child-a",
+                source="Highly Capable",
+                document_name="highly-capable.txt",
+            ),
+        ),
+        stores=(store,),
+        offers=(offer,),
+        suitability_judge=StructuredSuitabilityJudge(),
+        extractor=extractor,
+    )
+
+    assert len(result.extractions["child-a"].requirements) == 1
+    merged = result.extractions["child-a"].requirements[0]
+    assert merged.quantity == 1
+    assert tuple(source.document_name for source in merged.sources) == (
+        "grade-five.txt",
+        "highly-capable.txt",
+    )
+    assert result.unit_needs[0].quantity == 1
+    assert result.proposed_cart.landed_cost == 2_000
+
+
 def test_per_entry_budgets_reach_cost_attribution_and_budget_review() -> None:
     """FR-03/BR-09: mixed-entry allocations survive through the budget gate."""
 

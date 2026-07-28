@@ -775,8 +775,8 @@ def _call_model(
     provider_config: ProviderConfig | None = None,
     section_selection: DocumentSelection | None = None,
 ) -> ExtractionEnvelope:
-    instructions = SYSTEM_INSTRUCTION + _selection_instruction(
-        section_selection
+    instructions = (
+        f"{SYSTEM_INSTRUCTION}{_selection_instruction(section_selection)}"
     )
     if retry:
         instructions = (
@@ -1176,7 +1176,7 @@ def apply_extraction_security_filters(
         )
         if signature in accepted_signatures:
             skipped_lines.append(
-                "Duplicate reading suppressed: " + secured.raw_text
+                f"Duplicate reading suppressed: {secured.raw_text}"
             )
             continue
         accepted_signatures.add(signature)

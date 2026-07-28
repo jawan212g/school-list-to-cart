@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
@@ -52,7 +53,12 @@ from agent.rules import (
     SUBSTITUTION_NONE,
     non_returnable_offer_requires_approval,
 )
-from agent.schema import ExtractionEnvelope
+from agent.requirement_merge import (
+    RequirementQuantityInterrupt,
+    consolidate_requirements,
+    requirement_source,
+)
+from agent.schema import ExtractionEnvelope, Requirement
 from data.loader import Offer, Store, load_catalog, load_stores
 
 
@@ -142,6 +148,9 @@ class PipelineResult:
     addon_proposal: AddOnProposal
     budget_analysis: BudgetAnalysis | None = None
     source_matches: MatchResult | None = None
+    requirement_merge_interrupts: tuple[
+        RequirementQuantityInterrupt, ...
+    ] = ()
 
 
 CatalogChangeKind = Literal["stockout", "price_change"]
@@ -388,13 +397,11 @@ def run_pipeline(
     for child_id in child_ids:
         if child_id not in session.children:
             raise ValueError(f"List child_id is not in the session: {child_id}")
-    if len(set(child_ids)) != len(child_ids):
-        raise ValueError("Only one list per child_id is supported")
-
     extractions: dict[str, ExtractionEnvelope] = {}
     extraction_failures: dict[str, str] = {}
     extracted_requirements = []
-    completed_envelopes: dict[str, ExtractionEnvelope] = {}
+    merge_interrupts: list[RequirementQuantityInterrupt] = []
+    completed_envelopes: dict[int, ExtractionEnvelope] = {}
 
     def extract_one(list_input: ListInput) -> ExtractionEnvelope:
         return require_extracted_requirements(
@@ -411,12 +418,12 @@ def run_pipeline(
         max_workers=min(max(len(lists), 1), MODEL_MAX_CONCURRENCY)
     ) as executor:
         futures = {
-            executor.submit(extract_one, list_input): list_input
-            for list_input in lists
+            executor.submit(extract_one, list_input): (index, list_input)
+            for index, list_input in enumerate(lists)
         }
         completed_extractions = 0
         for future in as_completed(futures):
-            list_input = futures[future]
+            list_index, list_input = futures[future]
             completed_extractions += 1
             if progress_callback is not None:
                 progress_callback(
@@ -426,38 +433,126 @@ def run_pipeline(
                     f"Read {completed_extractions} of {len(lists)} lists",
                 )
             try:
-                completed_envelopes[list_input.child_id] = future.result()
+                completed_envelopes[list_index] = future.result()
             except Exception as error:
                 extraction_failures[list_input.child_id] = (
                     f"{type(error).__name__}: {error}"
                 )
-    for list_input in lists:
-        extraction = completed_envelopes.get(list_input.child_id)
+    requirements_by_child: dict[str, list[Requirement]] = {}
+    envelopes_by_child: dict[str, list[ExtractionEnvelope]] = {}
+    child_list_counts = Counter(child_ids)
+    child_list_indexes: Counter[str] = Counter()
+    for list_index, list_input in enumerate(lists):
+        extraction = completed_envelopes.get(list_index)
         if extraction is None:
             continue
+        child_list_indexes[list_input.child_id] += 1
         extraction = apply_extraction_security_filters(
                 extraction,
                 list_input.child_id,
             )
-        extraction = extraction.model_copy(
-            update={
-                "requirements": tuple(
-                    requirement.model_copy(
-                        update={
-                            "req_id": (
-                                f"{list_input.child_id}:{requirement.req_id}"
-                            ),
-                            "source_document": (
-                                list_input.resolved_document_name
-                            ),
-                        }
+        stamped_requirements = tuple(
+            requirement.model_copy(
+                update={
+                    "req_id": (
+                        f"{list_input.child_id}:"
+                        + (
+                            f"list-{child_list_indexes[list_input.child_id]}:"
+                            if child_list_counts[list_input.child_id] > 1
+                            else ""
+                        )
+                        + requirement.req_id
+                    ),
+                    "source_document": (
+                        requirement.source_document
+                        or list_input.resolved_document_name
+                    ),
+                }
+            )
+            for requirement in extraction.requirements
+        )
+        stamped_requirements = tuple(
+            requirement.model_copy(
+                update={
+                    "sources": (
+                        requirement.sources
+                        or (requirement_source(requirement),)
                     )
-                    for requirement in extraction.requirements
-                )
+                }
+            )
+            for requirement in stamped_requirements
+        )
+        requirements_by_child.setdefault(list_input.child_id, []).extend(
+            stamped_requirements
+        )
+        envelopes_by_child.setdefault(list_input.child_id, []).append(
+            extraction
+        )
+
+    for child_id, child_envelopes in envelopes_by_child.items():
+        merge_result = consolidate_requirements(
+            requirements_by_child[child_id]
+        )
+        first = child_envelopes[0]
+        combined = first.model_copy(
+            update={
+                "stated_grades": tuple(
+                    dict.fromkeys(
+                        grade
+                        for envelope in child_envelopes
+                        for grade in envelope.stated_grades
+                    )
+                ),
+                "stated_teachers": tuple(
+                    dict.fromkeys(
+                        teacher
+                        for envelope in child_envelopes
+                        for teacher in envelope.stated_teachers
+                    )
+                ),
+                "requirements": merge_result.requirements,
+                "manual_review_required": any(
+                    envelope.manual_review_required
+                    for envelope in child_envelopes
+                ),
+                "review_reasons": tuple(
+                    dict.fromkeys(
+                        reason
+                        for envelope in child_envelopes
+                        for reason in envelope.review_reasons
+                    )
+                ),
+                "deferred_review_reasons": tuple(
+                    dict.fromkeys(
+                        reason
+                        for envelope in child_envelopes
+                        for reason in envelope.deferred_review_reasons
+                    )
+                ),
+                "document_selection": (
+                    first.document_selection
+                    if all(
+                        envelope.document_selection
+                        == first.document_selection
+                        for envelope in child_envelopes
+                    )
+                    else None
+                ),
+                "uninterpreted_lines": tuple(
+                    line
+                    for envelope in child_envelopes
+                    for line in envelope.uninterpreted_lines
+                ),
+                "skipped_lines": tuple(
+                    line
+                    for envelope in child_envelopes
+                    for line in envelope.skipped_lines
+                ),
             }
         )
-        extractions[list_input.child_id] = extraction
-        extracted_requirements.extend(extraction.requirements)
+        extractions[child_id] = combined
+        extracted_requirements.extend(combined.requirements)
+        merge_interrupts.extend(merge_result.interrupts)
 
     if progress_callback is not None:
         progress_callback(
@@ -605,6 +700,7 @@ def run_pipeline(
         addon_proposal=addon_proposal,
         budget_analysis=budget_analysis,
         source_matches=matches,
+        requirement_merge_interrupts=tuple(merge_interrupts),
     )
 
 
@@ -865,6 +961,7 @@ def replan_after_catalog_change(
         addon_proposal=addon_proposal,
         budget_analysis=budget_analysis,
         source_matches=refreshed_source_matches,
+        requirement_merge_interrupts=prior.requirement_merge_interrupts,
     )
 
     previous_ids = frozenset(

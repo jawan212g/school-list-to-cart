@@ -1996,6 +1996,55 @@ def test_wrong_list_grade_warns_before_cart_build() -> None:
     ) == ()
 
 
+def test_identity_warning_uses_whole_document_and_explicit_scope_resolves() -> None:
+    """BR-18: whole-document grades inform context; a chosen scope proceeds."""
+
+    extraction = ExtractionEnvelope(
+        stated_grades=("Grade 5", "Grade 6", "Grade 7", "Grade 8"),
+        requirements=(),
+    )
+    structure = DocumentStructureEnvelope(
+        sections=tuple(
+            DocumentSection(
+                section_id=f"grade-{grade}",
+                label=f"Grade {grade}",
+                grades=(f"Grade {grade}",),
+                page_numbers=(1 if grade < 5 else 2,),
+                source_line=f"Grade {grade}",
+            )
+            for grade in range(1, 9)
+        )
+    )
+    children = (
+        {"child_id": "child-1", "label": "Maya", "grade": "Pre-K"},
+    )
+
+    warnings = app.detect_list_identity_warnings(
+        {"child-1": extraction},
+        children,
+        {"child-1": structure},
+    )
+
+    assert len(warnings) == 1
+    assert warnings[0].stated_grades == tuple(
+        f"Grade {grade}" for grade in range(1, 9)
+    )
+
+    selected = extraction.model_copy(
+        update={
+            "document_selection": DocumentSelection(
+                selected_section_ids=("grade-5",),
+                selected_section_labels=("Grade 5",),
+            )
+        }
+    )
+    assert app.detect_list_identity_warnings(
+        {"child-1": selected},
+        children,
+        {"child-1": structure},
+    ) == ()
+
+
 def test_prior_schema_extraction_cannot_crash_identity_check() -> None:
     """A pre-metadata Pydantic session object is upgraded at the boundary."""
 

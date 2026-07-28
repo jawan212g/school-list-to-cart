@@ -110,6 +110,37 @@ def _effective_attributes(
     return effective
 
 
+def normalized_requirement_identity(
+    item: Requirement | NormalizedRequirement,
+) -> tuple[Any, ...]:
+    """Return the same normalized identity used for aggregation (FR-14)."""
+
+    if isinstance(item, NormalizedRequirement):
+        requirement = item.source
+        canonical_item = item.canonical_item
+        unit_type = item.unit_type
+        requirement_attributes = _effective_attributes(
+            canonical_item,
+            item.attributes,
+        )
+    else:
+        requirement = item
+        canonical_item = requirement.canonical_item
+        unit_type = requirement.unit_type
+        requirement_attributes = _effective_attributes(
+            canonical_item,
+            requirement.attributes.model_dump(exclude_none=True),
+        )
+    return (
+        canonical_item,
+        _normalized_brand(requirement.brand_lock),
+        unit_type,
+        _effective_exclusions(canonical_item, requirement.exclusions),
+        requirement.is_required,
+        _freeze(requirement_attributes),
+    )
+
+
 def aggregate_requirements(
     requirements: Iterable[Requirement | NormalizedRequirement],
     *,
@@ -153,19 +184,9 @@ def aggregate_requirements(
             raise ValueError("Classroom student counts must be positive")
         quantity *= student_count
 
-        normalized_brand = _normalized_brand(requirement.brand_lock)
-        normalized_exclusions = _effective_exclusions(
-            canonical_item,
-            requirement.exclusions,
-        )
-        key = (
-            canonical_item,
-            normalized_brand,
-            unit_type,
-            normalized_exclusions,
-            requirement.is_required,
-            _freeze(requirement_attributes),
-        )
+        key = normalized_requirement_identity(item)
+        normalized_brand = key[1]
+        normalized_exclusions = key[3]
         accumulator = grouped.get(key)
         if accumulator is None:
             preserved_brand = (

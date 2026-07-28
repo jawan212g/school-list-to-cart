@@ -88,6 +88,21 @@ GRADE_TOKEN_NUMBER_INDEX = 0
 NONPAGINATED_SOURCE_PAGE = 1
 # BR-19: pasted and TXT source evidence uses page 1 for uniform provenance.
 
+REQUIREMENT_MERGE_EQUAL_QUANTITY_ACTION = "use_once"
+# BR-20: the same normalized item for one student with agreeing quantities is one requirement.
+
+REQUIREMENT_MERGE_CONFLICT_DEFAULT_ACTION = "total"
+# BR-21: disagreeing same-item quantities require one parent choice, defaulting to their total.
+
+REQUIREMENT_SOURCE_DEDUPLICATION_FIELDS = (
+    "document_name",
+    "section_name",
+    "page_number",
+    "exact_line",
+    "quantity",
+)
+# BR-22: consolidated requirements retain every distinct document, section, page, line, and quantity source.
+
 SectionResolutionAction = Literal[
     "auto_select",
     "rule_out",

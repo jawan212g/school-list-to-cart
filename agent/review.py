@@ -357,6 +357,7 @@ def organize_extractions(
             source_section=requirement.source_section,
             source_page=requirement.source_page,
             source_language=requirement.source_language,
+            sources=requirement.sources,
             notes=None,
             source_text=requirement.raw_text,
             confidence=requirement.extraction_confidence,
@@ -724,6 +725,7 @@ def confirmed_requirements(
                 source_section=row.source_section,
                 source_page=row.source_page,
                 source_language=row.source_language,
+                sources=row.sources,
                 attributes=RequirementAttributes.model_validate(attributes),
                 extraction_confidence=row.confidence,
             )

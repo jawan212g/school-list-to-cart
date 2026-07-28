@@ -108,9 +108,39 @@ def test_section_explanation_and_submitted_selection_share_one_state() -> None:
         "1st Grade",
         "Highly Capable Class",
     )
+    assert choice.automatically_selected_ids == ("grade-1-en",)
+    assert choice.parent_selected_ids == ("highly-capable-en",)
     assert selection.selected_section_ids == choice.selected_section_ids
     assert selection.selected_section_labels == choice.selected_section_labels
     assert "grade-1-es" in selection.ignored_section_ids
+
+
+def test_translation_context_names_detected_languages() -> None:
+    """BR-16: parent copy names languages instead of internal mechanics."""
+
+    structure = _district_structure().model_copy(
+        update={
+            "languages": ("English", "Spanish", "Haitian Creole"),
+            "sections": (
+                *_district_structure().sections,
+                DocumentSection(
+                    section_id="grade-1-ht",
+                    label="1ye Ane",
+                    grades=("Grade 1",),
+                    page_numbers=(5,),
+                    language="Haitian Creole",
+                    source_line="1ye Ane",
+                    duplicate_of_section_id="grade-1-en",
+                ),
+            ),
+        }
+    )
+    resolution = resolve_document_sections(structure, "Grade 1")
+
+    assert app._translation_context(structure, resolution) == (
+        "This document repeats the lists in Spanish and Haitian Creole. "
+        "The English version was read."
+    )
 
 
 def test_grade_mismatch_is_a_blocked_resolution_with_covered_grades() -> None:
@@ -124,6 +154,97 @@ def test_grade_mismatch_is_a_blocked_resolution_with_covered_grades() -> None:
     assert not resolution.has_grade_match
     assert resolution.covered_grades == ("Grade 1", "Grade 2")
     assert not build_resolved_section_choice(resolution).can_continue
+
+
+def test_explicit_mismatched_section_resolves_without_br18_stop() -> None:
+    """BR-18: a parent-selected section is a valid resolution."""
+
+    structure = _district_structure()
+    resolution = resolve_document_sections(structure, "Grade 7")
+    choice = build_resolved_section_choice(
+        resolution,
+        override_section_ids=("grade-2-en",),
+    )
+
+    assert choice.can_continue
+    assert choice.automatically_selected_ids == ()
+    assert choice.parent_selected_ids == ("grade-2-en",)
+    assert choice_to_document_selection(
+        structure,
+        choice,
+    ).selected_section_ids == ("grade-2-en",)
+
+
+def test_covered_grades_come_from_every_document_section() -> None:
+    """BR-18: mismatch context describes the whole document."""
+
+    resolution = resolve_document_sections(
+        _district_structure(),
+        "Grade 7",
+    )
+
+    assert resolution.covered_grades == ("Grade 1", "Grade 2")
+
+
+def test_override_recomputes_other_grade_exclusion_count() -> None:
+    """Part A-2: exclusion text uses the resolved choice state."""
+
+    resolution = resolve_document_sections(
+        _district_structure(),
+        "Grade 1",
+    )
+    original = build_resolved_section_choice(resolution)
+    override = build_resolved_section_choice(
+        resolution,
+        override_section_ids=("grade-1-en", "grade-2-en"),
+    )
+
+    assert app._section_exclusion_summary(resolution, original) == (
+        "1 section was for another grade"
+    )
+    assert app._section_exclusion_summary(resolution, override) == ""
+
+
+def test_source_reference_display_deduplicates_document_and_page() -> None:
+    """BR-22: one document page is linked once even through two UI paths."""
+
+    calls: list[tuple[int | None, str]] = []
+
+    class FakeSt:
+        session_state: dict[str, object] = {}
+
+    original_renderer = app._render_source_reference
+    try:
+        app._render_source_reference = (
+            lambda st, list_input, *, page_number, source_line, key: (
+                calls.append((page_number, source_line))
+            )
+        )
+        seen: set[tuple[str, int | None]] = set()
+        section = _district_structure().sections[2]
+        list_input = ListInput(
+            child_id="child-1",
+            source="list",
+            document_name="district.pdf",
+        )
+        app._render_section_source_links(
+            FakeSt(),
+            list_input,
+            (section,),
+            key_prefix="question",
+            rendered_sources=seen,
+        )
+        app._render_section_source_links(
+            FakeSt(),
+            list_input,
+            (section,),
+            key_prefix="selected",
+            rendered_sources=seen,
+        )
+    finally:
+        app._render_source_reference = original_renderer
+
+    assert calls == [(3, "Highly Capable Class")]
 
 
 def test_translated_only_document_has_no_primary_source_to_select() -> None:

@@ -101,6 +101,11 @@ from agent.rules import (
     SUBSTITUTION_NONE,
     grade_token_identifier,
 )
+from agent.requirement_merge import (
+    RequirementMergeResult,
+    consolidate_extractions,
+    requirement_source,
+)
 from agent.sections import (
     ResolvedSectionChoice,
     SectionResolution,
@@ -276,6 +281,7 @@ SCREEN_PHASES: Mapping[str, tuple[str, str]] = {
     "lists": ("2", JOURNEY_STAGES[1]),
     "working": ("4", JOURNEY_STAGES[3]),
     "sections": ("2", JOURNEY_STAGES[1]),
+    "requirement_merge": ("2", JOURNEY_STAGES[1]),
     "review": ("3", JOURNEY_STAGES[2]),
     "approval": ("4", JOURNEY_STAGES[3]),
     "summary": ("4", JOURNEY_STAGES[3]),
@@ -842,8 +848,9 @@ def _grade_display(value: str) -> str:
 def detect_list_identity_warnings(
     extractions: Mapping[str, object],
     children: Sequence[Mapping[str, Any]],
+    structures: Mapping[str, DocumentStructureEnvelope] | None = None,
 ) -> tuple[ListIdentityWarning, ...]:
-    """Compare extracted list grades with intake grades before cart build."""
+    """Compare whole-document grades with intake grades before cart build."""
 
     warnings: list[ListIdentityWarning] = []
     for child in children:
@@ -852,18 +859,35 @@ def detect_list_identity_warnings(
         if extracted_value is None:
             continue
         extraction = validate_extraction_envelope(extracted_value)
-        if not extraction.stated_grades:
+        if (
+            extraction.document_selection is not None
+            and extraction.document_selection.selected_section_ids
+        ):
+            continue
+        structure = (structures or {}).get(child_id)
+        stated_grades = (
+            tuple(
+                dict.fromkeys(
+                    grade
+                    for section in structure.sections
+                    for grade in section.grades
+                )
+            )
+            if structure is not None
+            else extraction.stated_grades
+        )
+        if not stated_grades:
             continue
         entered_grade = str(child["grade"])
         if any(
             _grade_statement_matches(entered_grade, stated_grade)
-            for stated_grade in extraction.stated_grades
+            for stated_grade in stated_grades
         ):
             continue
         stated_text = _join_names(
             tuple(
                 _grade_display(grade)
-                for grade in extraction.stated_grades
+                for grade in stated_grades
             )
         )
         entered_text = _grade_display(entered_grade)
@@ -871,7 +895,7 @@ def detect_list_identity_warnings(
             ListIdentityWarning(
                 child_label=str(child["label"]),
                 entered_grade=entered_grade,
-                stated_grades=extraction.stated_grades,
+                stated_grades=stated_grades,
                 stated_teachers=extraction.stated_teachers,
                 message=(
                     f"This list appears to be for {stated_text}, but you "
@@ -2952,8 +2976,12 @@ def _initialize_state(st: Any) -> None:
         "structure_errors": {},
         "structure_cache_ready": False,
         "extracted_lists": {},
+        "unmerged_extracted_lists": {},
         "extraction_errors": {},
         "extraction_cache_ready": False,
+        "requirement_merge_result": None,
+        "requirement_merge_resolved": False,
+        "requirement_merge_choices": {},
         "review_items": (),
         "organized_list_confirmed": False,
         "allow_unresolved_items": False,
@@ -3053,7 +3081,7 @@ def navigate_to_journey_stage(
         state["intake_step"] = 1
         return
     allowed_targets: Mapping[int, frozenset[str]] = {
-        2: frozenset({"lists", "sections"}),
+        2: frozenset({"lists", "sections", "requirement_merge"}),
         3: frozenset({"review"}),
         4: frozenset({"working", "approval", "summary"}),
     }
@@ -3744,6 +3772,7 @@ def clear_inactive_intake_entries(
             "document_selections",
             "structure_errors",
             "extracted_lists",
+            "unmerged_extracted_lists",
             "extraction_errors",
         ):
             mapping = state.get(mapping_key)
@@ -3873,6 +3902,10 @@ def clear_section_selection_after_grade_change(
         updated.pop(child_id, None)
         state["document_selections"] = updated
         state["extraction_cache_ready"] = False
+        state["unmerged_extracted_lists"] = {}
+        state["requirement_merge_result"] = None
+        state["requirement_merge_resolved"] = False
+        state["requirement_merge_choices"] = {}
         state["organized_list_confirmed"] = False
         _limit_reached_stage(state, 2)
         _invalidate_plan_state(state)
@@ -5129,8 +5162,12 @@ def _render_lists(st: Any) -> None:
         st.session_state["structure_errors"] = {}
         st.session_state["structure_cache_ready"] = False
         st.session_state["extracted_lists"] = {}
+        st.session_state["unmerged_extracted_lists"] = {}
         st.session_state["extraction_errors"] = {}
         st.session_state["extraction_cache_ready"] = False
+        st.session_state["requirement_merge_result"] = None
+        st.session_state["requirement_merge_resolved"] = False
+        st.session_state["requirement_merge_choices"] = {}
         st.session_state["review_items"] = ()
         st.session_state["organized_list_confirmed"] = False
         _limit_reached_stage(st.session_state, 2)
@@ -5461,14 +5498,23 @@ def _extract_list_inputs(
                 completed[list_input.child_id] = extraction.model_copy(
                     update={
                         "requirements": tuple(
-                            requirement.model_copy(
+                            stamped.model_copy(
                                 update={
-                                    "source_document": (
-                                        list_input.resolved_document_name
+                                    "sources": (
+                                        requirement_source(stamped),
                                     )
                                 }
                             )
                             for requirement in extraction.requirements
+                            for stamped in (
+                                requirement.model_copy(
+                                    update={
+                                        "source_document": (
+                                            list_input.resolved_document_name
+                                        )
+                                    }
+                                ),
+                            )
                         )
                     }
                 )
@@ -6449,11 +6495,17 @@ def _render_section_source_links(
     sections: Sequence[DocumentSection],
     *,
     key_prefix: str,
+    rendered_sources: set[tuple[str, int | None]] | None = None,
 ) -> None:
-    """Render one-click provenance for every stated section."""
+    """Render each document-page source once, even through two UI paths."""
 
+    seen = rendered_sources if rendered_sources is not None else set()
     for section in sections:
         for page_number in section.page_numbers or (None,):
+            source_key = (list_input.resolved_document_name, page_number)
+            if source_key in seen:
+                continue
+            seen.add(source_key)
             _render_source_reference(
                 st,
                 list_input,
@@ -6467,12 +6519,18 @@ def _render_section_source_links(
 
 def _section_exclusion_summary(
     resolution: SectionResolution,
+    choice: ResolvedSectionChoice,
 ) -> str:
     """Name excluded section counts without listing irrelevant rows."""
 
     parts = []
-    if resolution.other_grade_sections:
-        count = len(resolution.other_grade_sections)
+    other_grade_sections = tuple(
+        section
+        for section in resolution.other_grade_sections
+        if section.section_id not in choice.selected_section_ids
+    )
+    if other_grade_sections:
+        count = len(other_grade_sections)
         parts.append(
             f"{count} "
             + (
@@ -6481,17 +6539,35 @@ def _section_exclusion_summary(
                 else "sections were for other grades"
             )
         )
-    if resolution.translated_duplicates:
-        count = len(resolution.translated_duplicates)
-        parts.append(
-            f"{count} translated "
-            + (
-                "copy was kept as source context"
-                if count == 1
-                else "copies were kept as source context"
+    return "; ".join(parts)
+
+
+def _translation_context(
+    structure: DocumentStructureEnvelope,
+    resolution: SectionResolution,
+) -> str:
+    """Explain multilingual repetition in terms useful to a parent."""
+
+    translated_languages = tuple(
+        dict.fromkeys(
+            section.language
+            for section in resolution.translated_duplicates
+            if section.language
+            and (
+                resolution.primary_language is None
+                or section.language.casefold()
+                != resolution.primary_language.casefold()
             )
         )
-    return "; ".join(parts)
+    )
+    if not translated_languages:
+        return ""
+    read_language = resolution.primary_language or "source-language"
+    return (
+        "This document repeats the lists in "
+        + _join_names(translated_languages)
+        + f". The {read_language} version was read."
+    )
 
 
 def _render_sections(st: Any) -> None:
@@ -6564,6 +6640,7 @@ def _render_sections(st: Any) -> None:
         document_name = list_input.resolved_document_name
 
         with st.container(border=True):
+            rendered_sources: set[tuple[str, int | None]] = set()
             st.subheader(
                 escape_streamlit_dollars(
                     f"{child['label']} · {grade}"
@@ -6598,7 +6675,7 @@ def _render_sections(st: Any) -> None:
                     ),
                     key=f"{key_prefix}:blocked-action",
                 )
-            elif not resolution.has_grade_match:
+            elif not resolution.has_grade_match and not choice.can_continue:
                 covered = (
                     _join_names(resolution.covered_grades)
                     or "no identified grades"
@@ -6621,37 +6698,66 @@ def _render_sections(st: Any) -> None:
                     key=f"{key_prefix}:blocked-action",
                 )
             elif choice.selected_section_labels:
-                reason = (
-                    "your manual selection"
-                    if choice.manually_overridden
-                    else f"the grade entered for {child['label']}"
-                )
                 st.success(
                     escape_streamlit_dollars(
                         "Will read "
                         + _join_names(choice.selected_section_labels)
-                        + f" from {document_name}, based on {reason}."
+                        + f" from {document_name}."
                     )
                 )
+                if not resolution.has_grade_match:
+                    st.warning(
+                        escape_streamlit_dollars(
+                            f"{document_name} has no section matching {grade}. "
+                            "You chose "
+                            + _join_names(choice.selected_section_labels)
+                            + ", so the list can continue."
+                        )
+                    )
+                labels_by_id = {
+                    section.section_id: section.label
+                    for section in resolution.primary_language_sections
+                }
+                for section_id in choice.automatically_selected_ids:
+                    st.caption(
+                        escape_streamlit_dollars(
+                            f"{labels_by_id[section_id]} was matched to "
+                            f"{child['label']}'s entered grade."
+                        )
+                    )
+                for section_id in choice.parent_selected_ids:
+                    st.caption(
+                        escape_streamlit_dollars(
+                            f"{labels_by_id[section_id]} was chosen by you."
+                        )
+                    )
 
             override_toggle_key = f"{key_prefix}:override-enabled"
             for section in resolution.parent_questions:
                 st.checkbox(
                     f"Also use {section.label} for {child['label']}?",
                     key=f"{key_prefix}:question:{section.section_id}",
-                    disabled=bool(
-                        st.session_state[override_toggle_key]
-                    ),
                     help=(
                         "This section has no grade token, so it cannot be "
                         "included or excluded automatically."
                     ),
+                )
+                page_text = (
+                    "page " + ", ".join(map(str, section.page_numbers))
+                    if section.page_numbers
+                    else "the uploaded list"
+                )
+                st.caption(
+                    escape_streamlit_dollars(
+                        f"From {page_text}: {section.source_line}"
+                    )
                 )
                 _render_section_source_links(
                     st,
                     list_input,
                     (section,),
                     key_prefix=f"{key_prefix}:question-source",
+                    rendered_sources=rendered_sources,
                 )
 
             selected_sections_by_id = {
@@ -6667,9 +6773,13 @@ def _render_sections(st: Any) -> None:
                     if section_id in selected_sections_by_id
                 ),
                 key_prefix=f"{key_prefix}:selected-source",
+                rendered_sources=rendered_sources,
             )
 
-            exclusion_summary = _section_exclusion_summary(resolution)
+            exclusion_summary = _section_exclusion_summary(
+                resolution,
+                choice,
+            )
             if exclusion_summary:
                 st.caption(
                     escape_streamlit_dollars(
@@ -6701,10 +6811,14 @@ def _render_sections(st: Any) -> None:
                         st.session_state[override_toggle_key]
                     ),
                 )
-                st.caption(
-                    "Translated copies are source context only and are never "
-                    "available as separate choices."
+                translation_context = _translation_context(
+                    structure,
+                    resolution,
                 )
+                if translation_context:
+                    st.caption(
+                        escape_streamlit_dollars(translation_context)
+                    )
 
     back_column, continue_column = _navigation_button_columns(st)
     return_to_lists = back_column.button(
@@ -6745,12 +6859,154 @@ def _render_sections(st: Any) -> None:
             return
         st.session_state["document_selections"] = selections
         st.session_state["extraction_cache_ready"] = False
+        st.session_state["unmerged_extracted_lists"] = {}
+        st.session_state["requirement_merge_result"] = None
+        st.session_state["requirement_merge_resolved"] = False
+        st.session_state["requirement_merge_choices"] = {}
         st.session_state["organized_list_confirmed"] = False
         _limit_reached_stage(st.session_state, 2)
         _invalidate_plan_state(st.session_state)
         st.session_state["progress_substep"] = "reading selected sections"
         st.session_state["screen"] = "working"
         st.rerun()
+
+
+def _requirement_source_label(source: Any) -> str:
+    """Name one contributing list line without internal identifiers."""
+
+    location = source.document_name or "Supply list"
+    if source.section_name:
+        location += f" · {source.section_name}"
+    location += f" · page {source.page_number}"
+    return location
+
+
+def _render_requirement_merge(st: Any) -> None:
+    """Resolve same-item quantity disagreements before Personalize."""
+
+    result = st.session_state.get("requirement_merge_result")
+    if not isinstance(result, RequirementMergeResult) or not result.interrupts:
+        st.session_state["requirement_merge_resolved"] = True
+        st.session_state["screen"] = "working"
+        st.rerun()
+        return
+    intake = st.session_state["intake"]
+    child_labels = {
+        str(child["child_id"]): str(child["label"])
+        for child in intake["children"]
+    }
+    input_by_child = {
+        list_input.child_id: list_input
+        for list_input in st.session_state["list_inputs"]
+    }
+
+    st.header("Choose how repeated items should count")
+    st.write(
+        "The same item appears with different quantities in more than one "
+        "part of a list. Choose one quantity before the item enters your cart."
+    )
+    selections: dict[str, tuple[str, int | None]] = {}
+    with st.form("requirement-quantity-merge"):
+        for interrupt in result.interrupts:
+            child_label = child_labels.get(
+                interrupt.child_id,
+                interrupt.child_id,
+            )
+            with st.container(border=True):
+                st.subheader(
+                    escape_streamlit_dollars(
+                        f"{_item_display_name(interrupt.canonical_item)} "
+                        f"for {child_label}"
+                    )
+                )
+                source_options = tuple(
+                    (
+                        f"Use {source.quantity} from "
+                        f"{_requirement_source_label(source)}",
+                        source.quantity,
+                    )
+                    for source in interrupt.sources
+                )
+                option_labels = (
+                    (
+                        "Total all quantities "
+                        f"({interrupt.default_quantity})"
+                    ),
+                    *(label for label, _ in source_options),
+                    "Enter a different quantity",
+                )
+                selected_label = st.radio(
+                    "Which quantity should be used?",
+                    option_labels,
+                    index=0,
+                    key=f"{interrupt.interrupt_id}:choice",
+                )
+                custom_quantity = int(
+                    st.number_input(
+                        "Different quantity",
+                        min_value=1,
+                        value=interrupt.default_quantity,
+                        step=1,
+                        key=f"{interrupt.interrupt_id}:custom",
+                    )
+                )
+                if selected_label == option_labels[0]:
+                    selections[interrupt.interrupt_id] = (
+                        "total",
+                        interrupt.default_quantity,
+                    )
+                elif selected_label == option_labels[-1]:
+                    selections[interrupt.interrupt_id] = (
+                        "custom",
+                        custom_quantity,
+                    )
+                else:
+                    source_index = option_labels.index(selected_label) - 1
+                    selections[interrupt.interrupt_id] = (
+                        "source",
+                        source_options[source_index][1],
+                    )
+                list_input = input_by_child.get(interrupt.child_id)
+                for source in interrupt.sources:
+                    st.caption(
+                        escape_streamlit_dollars(
+                            f"{_requirement_source_label(source)}: "
+                            f"{source.exact_line}"
+                        )
+                    )
+                    if list_input is not None:
+                        _render_source_reference(
+                            st,
+                            list_input,
+                            page_number=source.page_number,
+                            source_line=source.exact_line,
+                            key=(
+                                f"{interrupt.interrupt_id}:"
+                                f"{source.source_req_id}"
+                            ),
+                        )
+        submitted = st.form_submit_button(
+            "Continue with these quantities",
+            type="primary",
+            use_container_width=True,
+        )
+    if not submitted:
+        return
+    quantity_choices = {
+        interrupt_id: int(quantity)
+        for interrupt_id, (_, quantity) in selections.items()
+        if quantity is not None
+    }
+    merged, resolved = consolidate_extractions(
+        st.session_state["unmerged_extracted_lists"],
+        quantity_choices=quantity_choices,
+    )
+    st.session_state["extracted_lists"] = merged
+    st.session_state["requirement_merge_result"] = resolved
+    st.session_state["requirement_merge_choices"] = selections
+    st.session_state["requirement_merge_resolved"] = True
+    st.session_state["screen"] = "working"
+    st.rerun()
 
 
 def _render_review(st: Any) -> None:
@@ -7271,7 +7527,16 @@ def _render_working(st: Any) -> None:
                 **st.session_state["structure_errors"],
                 **extraction_errors,
             }
-            st.session_state["extracted_lists"] = extractions
+            merged_extractions, merge_result = consolidate_extractions(
+                extractions
+            )
+            st.session_state["unmerged_extracted_lists"] = extractions
+            st.session_state["extracted_lists"] = merged_extractions
+            st.session_state["requirement_merge_result"] = merge_result
+            st.session_state["requirement_merge_resolved"] = (
+                not bool(merge_result.interrupts)
+            )
+            st.session_state["requirement_merge_choices"] = {}
             st.session_state["extraction_errors"] = extraction_errors
             st.session_state["extraction_cache_ready"] = True
             st.session_state["ui_error_active"] = bool(extraction_errors)
@@ -7282,9 +7547,22 @@ def _render_working(st: Any) -> None:
 
     extractions = st.session_state["extracted_lists"]
     extraction_errors = st.session_state["extraction_errors"]
+    merge_result = st.session_state.get("requirement_merge_result")
+    if (
+        isinstance(merge_result, RequirementMergeResult)
+        and merge_result.interrupts
+        and not st.session_state["requirement_merge_resolved"]
+    ):
+        st.session_state["progress_substep"] = (
+            "resolving repeated item quantities"
+        )
+        st.session_state["screen"] = "requirement_merge"
+        st.rerun()
+        return
     identity_warnings = detect_list_identity_warnings(
         extractions,
         intake["children"],
+        structures,
     )
     if (
         identity_warnings
@@ -10391,6 +10669,7 @@ def main() -> None:
         "lists": _render_lists,
         "working": _render_working,
         "sections": _render_sections,
+        "requirement_merge": _render_requirement_merge,
         "review": _render_review,
         "approval": _render_approval,
         "summary": _render_summary,

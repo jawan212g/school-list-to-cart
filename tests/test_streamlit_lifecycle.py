@@ -79,6 +79,14 @@ st.session_state.setdefault(
                     language="English",
                     source_line="Highly Capable Class",
                 ),
+                DocumentSection(
+                    section_id="grade-2",
+                    label="2nd Grade",
+                    grades=("Grade 2",),
+                    page_numbers=(2,),
+                    language="English",
+                    source_line="2nd Grade",
+                ),
             ),
         )
     },
@@ -319,6 +327,7 @@ def test_section_statement_and_submitted_scope_use_same_live_state() -> None:
         if checkbox.label == "Also use Highly Capable Class for Ms. K?"
     )
     assert question.value is False
+    assert question.disabled is False
     question.set_value(True).run()
     _assert_no_exception(test_app)
     success_text = " ".join(str(item.value) for item in test_app.success)
@@ -334,3 +343,29 @@ def test_section_statement_and_submitted_scope_use_same_live_state() -> None:
         "1st Grade",
         "Highly Capable Class",
     )
+
+
+def test_section_override_recomputes_excluded_section_count() -> None:
+    """Part A-2: live override state changes the not-read count."""
+
+    test_app = _run_section_screen()
+    captions = " ".join(str(item.value) for item in test_app.caption)
+    assert "1 section was for another grade" in captions
+
+    override = next(
+        checkbox
+        for checkbox in test_app.checkbox
+        if checkbox.label == "Use a different section selection"
+    )
+    override.set_value(True).run()
+    _assert_no_exception(test_app)
+    selector = next(
+        item
+        for item in test_app.multiselect
+        if item.label == "Sections for Ms. K"
+    )
+    selector.set_value(["grade-1", "grade-2"]).run()
+    _assert_no_exception(test_app)
+
+    captions = " ".join(str(item.value) for item in test_app.caption)
+    assert "section was for another grade" not in captions
