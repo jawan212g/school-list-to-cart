@@ -103,6 +103,45 @@ REQUIREMENT_SOURCE_DEDUPLICATION_FIELDS = (
 )
 # BR-22: consolidated requirements retain every distinct document, section, page, line, and quantity source.
 
+EXPLICIT_PACKAGE_COUNT_PATTERNS = (
+    r"\b(\d+)\s*(?:count|ct)\b",
+    r"\b(?:pack|box|set|package)\s+of\s+(\d+)\b",
+    r"\b(\d+)-(?:pack|box|set)\b",
+    r"\b(\d+)\s+(?:per|in each)\s+(?:pack|box|set|package)\b",
+    r"\b(?:pack|box|set|package)\s+(\d+)\b",
+)
+# BR-23: only these source-text forms establish an explicit package count.
+
+EXACT_BRAND_REQUIREMENT_SIGNALS = (
+    "brand required",
+    "brand name only",
+    "no substitutes",
+    "no substitutions",
+)
+# BR-24: exact-brand status requires explicit source language; a brand mention alone is not enough.
+
+BRAND_PREFERENCE_SIGNALS = (
+    "are best",
+    "is best",
+    "preferred",
+    "we like",
+)
+# BR-24: preference wording never creates an exact-brand requirement.
+
+REQUIREMENT_ITEM_IDENTITY_FIELDS = (
+    "child_id",
+    "requirement_type",
+    "supply_scope",
+    "canonical_item",
+    "unit_type",
+    "condition_group_id",
+    "condition_option",
+)
+# BR-25: same-student merge identity is the normalized item, not brand or descriptor attributes.
+
+REQUIREMENT_CONSTRAINT_CONFLICT_ACTION = "parent_choice"
+# BR-26: genuinely incompatible constraints merge once but cannot proceed without one parent choice.
+
 SectionResolutionAction = Literal[
     "auto_select",
     "rule_out",
@@ -244,6 +283,9 @@ STANDARD_PACK_COUNTS = {
     "pencil_sharpeners": 2,
 }  # E-02: standard sizes used only when a count is omitted.
 
+DETERMINISTIC_PACKAGE_COUNTS = STANDARD_PACK_COUNTS
+# BR-23: an unstated package count is looked up by normalized item identity, never supplied by the model.
+
 STANDARD_CONTAINER_CONTENT_COUNTS = {
     "notebook_paper": 150,
 }  # E-02: assumed contents for catalog units sold as one container.
@@ -278,6 +320,45 @@ CATEGORY_IMPLIED_EXCLUSION_TERMS = {
 CATEGORY_IMPLIED_ATTRIBUTE_TERMS = {
     "composition_notebooks": frozenset({"spiral"}),
 }  # BR-13: redundant free-text attributes must not split identical needs.
+
+
+def explicit_package_count(source_line: str) -> int | None:
+    """Return only a package count stated in a BR-23 source form."""
+
+    for pattern in EXPLICIT_PACKAGE_COUNT_PATTERNS:
+        match = re.search(pattern, source_line, flags=re.IGNORECASE)
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
+def required_brand_from_source(
+    source_line: str,
+    proposed_brand: str | None,
+) -> str | None:
+    """Apply BR-24 to a model-proposed brand lock."""
+
+    if proposed_brand is None or not proposed_brand.strip():
+        return None
+    source = source_line.casefold()
+    brand = proposed_brand.strip()
+    brand_text = brand.casefold()
+    explicit = any(
+        signal in source for signal in EXACT_BRAND_REQUIREMENT_SIGNALS
+    ) or bool(
+        re.search(
+            rf"\bmust\s+be\s+{re.escape(brand_text)}\b",
+            source,
+        )
+    ) or bool(
+        re.search(
+            rf"\b{re.escape(brand_text)}\s+only\b",
+            source,
+        )
+    )
+    if not explicit:
+        return None
+    return brand
 
 
 def pack_count_difference_is_major(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import sys
 from dataclasses import dataclass, replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -2559,6 +2560,51 @@ def test_section_table_is_sparse_and_omits_translated_duplicates() -> None:
         for row in rows
         for value in row.values()
     )
+
+
+def test_brand_choice_is_mutually_exclusive_in_production_shape() -> None:
+    """BR-24: exact brand and equivalent brands cannot both be active."""
+
+    item = SupplyItemReview(
+        review_id="review",
+        req_id="req",
+        child_id="child-1",
+        item_name="pencils",
+        required_quantity=1,
+        source_text="1 pencil",
+        confidence=1.0,
+        brand_required=True,
+        allow_equivalents=True,
+    )
+
+    assert item.brand_required is True
+    assert item.allow_equivalents is False
+    source = inspect.getsource(app._render_review_detail_controls)
+    assert 'radio(' in source
+    assert '"Brand choice"' in source
+    assert '"Exact brand required"' in source
+    assert '"Allow equivalent brands"' not in source
+
+
+def test_saved_list_page_count_uses_retained_production_input() -> None:
+    """FR-06: saved-list display names the real retained PDF page count."""
+
+    pdf_path = Path("tests/sample_lists/Machiasschoolsupplylist 1.pdf")
+    pdf_input = ListInput(
+        child_id="child-1",
+        source=pdf_path,
+        mime_type="application/pdf",
+        document_name=pdf_path.name,
+    )
+    text_input = ListInput(
+        child_id="child-2",
+        source="2 pencils",
+        mime_type="text/plain",
+        document_name="pasted-list.txt",
+    )
+
+    assert app._saved_list_page_count(pdf_input) == 3
+    assert app._saved_list_page_count(text_input) == 1
 
 
 def test_grade_preselection_handles_ordinals_and_preserves_parent_changes() -> None:

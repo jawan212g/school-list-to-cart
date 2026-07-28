@@ -311,6 +311,8 @@ def test_demo_structure_does_not_double_the_grade_prefix() -> None:
 
     assert structure.sections[0].label == "Grade 1 supply list"
     assert structure.sections[0].source_line == "Grade 1 supply list"
+    assert app._grade_display_title("Grade 2") == "Grade 2"
+    assert app._grade_display_title("2") == "Grade 2"
 
 
 def test_extracted_line_provenance_survives_into_parent_review() -> None:

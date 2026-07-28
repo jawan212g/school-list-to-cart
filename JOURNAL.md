@@ -1770,3 +1770,61 @@ and make every section-resolution explanation derive from the parent's live choi
 
 Deploy this list-resolution block, verify the mixed Grade 5 plus Highly Capable
 selection once, then repeat the OpenAI Maple baseline from one shared extraction.
+
+## 2026-07-28 - Stabilize assumptions and reconcile merged constraints
+
+### Objective
+
+Make package assumptions reproducible, merge same-item requirements despite
+non-identity descriptors, and remove split section/brand/quantity state from the
+lists workflow.
+
+### Work completed
+
+- Added deterministic package-count recovery and assumptions keyed by canonical
+  item; unsupported model-supplied counts are discarded and flagged for review.
+- Made exact-brand locks depend on explicit source wording. Bare brand mentions and
+  preference language now leave equivalent brands available.
+- Narrowed same-student merge identity to the canonical item context, reconciled
+  compatible constraints, and emitted one source-backed parent choice for genuinely
+  incompatible constraints.
+- Routed the section override multiselect through `ResolvedSectionChoice`, made the
+  review brand choice mutually exclusive, displayed every consolidated source, and
+  made custom or named-source quantity choices change the merged requirement.
+- Normalized grade display text and exposed retained list filename, page count, and
+  student assignment on the lists screen.
+
+### Decisions made
+
+- Added BR-23 through BR-26 without renumbering prior rules.
+- Kept model correction at the schema boundary and all quantity/constraint
+  reconciliation deterministic and model-free.
+- Preserved size, material, and acceptable-color fields because matching uses them;
+  the optimizer does not inspect them directly.
+
+### Problems or limitations
+
+- The configured Kelley GPT API was nondeterministic across two consecutive
+  regression attempts: the first produced 33 requirements and a $104.69 cart; the
+  paired baseline produced 31 requirements and a $90.31 cart. This prevents
+  attributing the full historical baseline change to this code block.
+- Streamlit remains intentionally unavailable on Windows ARM64, so the production
+  AppTest module is skipped locally and must run in the deployed x86 environment.
+
+### Testing performed
+
+- `py -3.12-arm64 -m pytest -q`: 276 passed, 1 skipped.
+- Kelley GPT API (`gpt-oss-20b`) paired regression: $90.31 landed and four
+  interrupts at $150; using the exact same extraction at $85 produced an $83.72
+  recommended plan and six interrupts. No requirement-merge interrupt appeared.
+
+### Remaining work
+
+- Run the Streamlit AppTest module in the deployed x86 environment.
+- Re-run the paired Maple comparison with a stable captured extraction if a strict
+  before/after attribution is required.
+
+### Recommended next step
+
+Deploy Part A-3 and verify the Grade 5 plus Highly Capable section override, merged
+source display, and custom quantity control once in the live Streamlit interface.

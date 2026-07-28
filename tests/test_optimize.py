@@ -131,7 +131,7 @@ def test_aggregation_rolls_up_children_but_separates_brand_locks() -> None:
         Requirement(
             req_id="r3",
             child_id="child-b",
-            raw_text="4 Ticonderoga pencils",
+            raw_text="4 Ticonderoga pencils, brand required",
             canonical_item="pencils",
             quantity=4,
             brand_lock="Ticonderoga",

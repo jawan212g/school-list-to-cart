@@ -695,8 +695,7 @@ def confirmed_requirements(
                 "material": row.material,
             }
         )
-        confirmed.append(
-            Requirement(
+        confirmed_requirement = Requirement(
                 req_id=row.req_id,
                 child_id=row.child_id,
                 raw_text=row.source_text,
@@ -705,9 +704,7 @@ def confirmed_requirements(
                 quantity_is_range=row.quantity_is_range,
                 quantity_max=row.quantity_max,
                 unit_type=row.unit,
-                brand_lock=(
-                    row.brand if row.brand_required else None
-                ),
+                brand_lock=None,
                 exclusions=(),
                 is_required=is_required,
                 is_purchasable=is_purchasable,
@@ -726,8 +723,19 @@ def confirmed_requirements(
                 source_page=row.source_page,
                 source_language=row.source_language,
                 sources=row.sources,
-                attributes=RequirementAttributes.model_validate(attributes),
+                attributes=RequirementAttributes(),
                 extraction_confidence=row.confidence,
+            )
+        confirmed.append(
+            confirmed_requirement.model_copy(
+                update={
+                    "brand_lock": (
+                        row.brand if row.brand_required else None
+                    ),
+                    "attributes": RequirementAttributes.model_validate(
+                        attributes
+                    ),
+                }
             )
         )
     return tuple(confirmed)

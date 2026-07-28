@@ -12,11 +12,11 @@ from agent.rules import (
     CANONICAL_ITEM_ALIASES,
     CONFIDENCE_FLOOR,
     COUNT_BASED_CATEGORIES,
+    DETERMINISTIC_PACKAGE_COUNTS,
     NON_PURCHASABLE_CATEGORY,
     PAPER_CATEGORIES,
     REAM_SHEET_COUNT,
     STANDARD_CONTAINER_CONTENT_COUNTS,
-    STANDARD_PACK_COUNTS,
 )
 from agent.schema import AttributeValue, Requirement, UnitType
 
@@ -183,7 +183,7 @@ def normalize_requirement(requirement: Requirement) -> NormalizedRequirement:
         if canonical_item in COUNT_BASED_CATEGORIES:
             count = _explicit_count(attributes)
             if count is None:
-                count = STANDARD_PACK_COUNTS.get(canonical_item)
+                count = DETERMINISTIC_PACKAGE_COUNTS.get(canonical_item)
                 if count is not None:
                     flags.append(f"standard_pack_count_assumed:{count}")
             if count is None:

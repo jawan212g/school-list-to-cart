@@ -54,6 +54,7 @@ from agent.rules import (
     non_returnable_offer_requires_approval,
 )
 from agent.requirement_merge import (
+    RequirementConstraintInterrupt,
     RequirementQuantityInterrupt,
     consolidate_requirements,
     requirement_source,
@@ -149,7 +150,7 @@ class PipelineResult:
     budget_analysis: BudgetAnalysis | None = None
     source_matches: MatchResult | None = None
     requirement_merge_interrupts: tuple[
-        RequirementQuantityInterrupt, ...
+        RequirementQuantityInterrupt | RequirementConstraintInterrupt, ...
     ] = ()
 
 
@@ -400,7 +401,9 @@ def run_pipeline(
     extractions: dict[str, ExtractionEnvelope] = {}
     extraction_failures: dict[str, str] = {}
     extracted_requirements = []
-    merge_interrupts: list[RequirementQuantityInterrupt] = []
+    merge_interrupts: list[
+        RequirementQuantityInterrupt | RequirementConstraintInterrupt
+    ] = []
     completed_envelopes: dict[int, ExtractionEnvelope] = {}
 
     def extract_one(list_input: ListInput) -> ExtractionEnvelope:
@@ -553,6 +556,7 @@ def run_pipeline(
         extractions[child_id] = combined
         extracted_requirements.extend(combined.requirements)
         merge_interrupts.extend(merge_result.interrupts)
+        merge_interrupts.extend(merge_result.constraint_interrupts)
 
     if progress_callback is not None:
         progress_callback(

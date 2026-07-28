@@ -14,6 +14,8 @@ from agent.rules import (
     CANONICAL_ITEM_ALIASES,
     CORRECTED_EXTRACTION_CONFIDENCE,
     NONPAGINATED_SOURCE_PAGE,
+    explicit_package_count,
+    required_brand_from_source,
 )
 
 
@@ -299,6 +301,14 @@ class Requirement(BaseModel):
             if normalized.get("requirement_type", "required") == "required":
                 normalized["requirement_type"] = "optional"
         raw_text = str(normalized.get("raw_text", ""))
+        normalized["brand_lock"] = required_brand_from_source(
+            raw_text,
+            (
+                str(normalized["brand_lock"])
+                if normalized.get("brand_lock") is not None
+                else None
+            ),
+        )
         canonical_item = str(normalized.get("canonical_item", ""))
         corrected = False
         detected_item = _canonical_item_from_raw(raw_text)
@@ -311,6 +321,9 @@ class Requirement(BaseModel):
             normalized["canonical_item"] = detected_item
             corrected = True
         attributes = normalized.get("attributes")
+        if attributes is None:
+            attributes = {}
+            normalized["attributes"] = attributes
         if isinstance(attributes, Mapping) and "|" in raw_text:
             selected_cell = raw_text.split("|", 1)[1]
             selected_cell = selected_cell.split(":", 1)[-1].strip()
@@ -346,6 +359,12 @@ class Requirement(BaseModel):
                 attributes = mutable_attributes
                 corrected = True
         if isinstance(attributes, Mapping):
+            explicit_count = explicit_package_count(raw_text)
+            mutable_attributes = dict(attributes)
+            if mutable_attributes.get("count") != explicit_count:
+                corrected = True
+            mutable_attributes["count"] = explicit_count
+            attributes = mutable_attributes
             corrected_attributes, attributes_changed = (
                 _correct_attribute_fields(
                     raw_text,
@@ -546,6 +565,18 @@ class SupplyItemReview(BaseModel):
     already_owned: bool = False
     allow_equivalents: bool = True
     issue_codes: tuple[str, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def keep_brand_choice_mutually_exclusive(cls, value: Any) -> Any:
+        """Represent exact brand versus equivalents as one choice."""
+
+        if not isinstance(value, Mapping):
+            return value
+        normalized = dict(value)
+        if normalized.get("brand_required") is True:
+            normalized["allow_equivalents"] = False
+        return normalized
 
     @field_validator("color")
     @classmethod

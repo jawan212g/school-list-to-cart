@@ -332,6 +332,15 @@ def test_section_statement_and_submitted_scope_use_same_live_state() -> None:
     _assert_no_exception(test_app)
     success_text = " ".join(str(item.value) for item in test_app.success)
     assert "Will read 1st Grade and Highly Capable Class" in success_text
+    override_selector = next(
+        item
+        for item in test_app.multiselect
+        if item.label == "Sections for Ms. K"
+    )
+    assert override_selector.value == [
+        "grade-1",
+        "highly-capable",
+    ]
 
     _click_label(test_app, "Continue with these sections")
     selection = test_app.session_state["document_selections"]["child-1"]

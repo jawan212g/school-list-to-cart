@@ -132,6 +132,69 @@ def test_e02_missing_notebook_paper_count_sets_assumption_flag() -> None:
     assert "standard_pack_count_assumed:150" in normalized.assumption_flags
 
 
+def test_unstated_marker_pack_count_is_identical_across_model_runs() -> None:
+    """BR-23: model-proposed counts cannot change one source assumption."""
+
+    first = Requirement(
+        req_id="markers-first",
+        child_id="child-a",
+        raw_text="1 set Coloured markers (wide or thin)",
+        canonical_item="markers",
+        quantity=1,
+        unit_type="pack",
+        attributes={"count": 16},
+        extraction_confidence=1.0,
+    )
+    second = Requirement(
+        req_id="markers-second",
+        child_id="child-a",
+        raw_text="1 set Coloured markers (wide or thin)",
+        canonical_item="markers",
+        quantity=1,
+        unit_type="pack",
+        attributes={"count": 10},
+        extraction_confidence=1.0,
+    )
+
+    first_normalized = normalize_requirement(first)
+    second_normalized = normalize_requirement(second)
+
+    assert first.attributes.count is None
+    assert second.attributes.count is None
+    assert first_normalized.quantity == 10
+    assert second_normalized.quantity == 10
+    assert first_normalized.assumption_flags == (
+        "standard_pack_count_assumed:10",
+        "manual_review_required",
+    )
+    assert (
+        second_normalized.assumption_flags
+        == first_normalized.assumption_flags
+    )
+
+
+def test_explicit_package_count_is_recovered_when_attributes_are_omitted() -> None:
+    """BR-23: the source line, not model attributes, establishes a count."""
+
+    requirement = Requirement(
+        req_id="markers-explicit",
+        child_id="child-a",
+        raw_text="1 set of 16 colored markers",
+        canonical_item="markers",
+        quantity=1,
+        unit_type="pack",
+        extraction_confidence=1.0,
+    )
+
+    normalized = normalize_requirement(requirement)
+
+    assert requirement.attributes.count == 16
+    assert normalized.quantity == 16
+    assert "standard_pack_count_assumed:10" not in (
+        normalized.assumption_flags
+    )
+
+
 def test_color_alternatives_are_stored_as_acceptable_values() -> None:
     """FR-19: black or blue remains two equally acceptable exact matches."""
 

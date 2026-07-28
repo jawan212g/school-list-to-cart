@@ -97,6 +97,7 @@ from agent.rules import (
     MAX_UPLOAD_BYTES,
     MINIMUM_BUDGET_CENTS,
     MODEL_MAX_CONCURRENCY,
+    NONPAGINATED_SOURCE_PAGE,
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     SUBSTITUTION_NONE,
     grade_token_identifier,
@@ -118,6 +119,7 @@ from agent.schema import (
     DocumentSelection,
     DocumentStructureEnvelope,
     ExtractionEnvelope,
+    RequirementSource,
     SupplyItemReview,
     validate_extraction_envelope,
 )
@@ -843,6 +845,15 @@ def _grade_display(value: str) -> str:
     if cleaned.casefold().startswith(("grade ", "grades ")):
         return cleaned.casefold()
     return f"grade {cleaned}"
+
+
+def _grade_display_title(value: str) -> str:
+    """Return one grade label that cannot acquire a second prefix."""
+
+    displayed = _grade_display(value)
+    if displayed == "pre-K":
+        return displayed
+    return displayed[:1].upper() + displayed[1:]
 
 
 def detect_list_identity_warnings(
@@ -2982,6 +2993,7 @@ def _initialize_state(st: Any) -> None:
         "requirement_merge_result": None,
         "requirement_merge_resolved": False,
         "requirement_merge_choices": {},
+        "requirement_constraint_choices": {},
         "review_items": (),
         "organized_list_confirmed": False,
         "allow_unresolved_items": False,
@@ -3906,6 +3918,7 @@ def clear_section_selection_after_grade_change(
         state["requirement_merge_result"] = None
         state["requirement_merge_resolved"] = False
         state["requirement_merge_choices"] = {}
+        state["requirement_constraint_choices"] = {}
         state["organized_list_confirmed"] = False
         _limit_reached_stage(state, 2)
         _invalidate_plan_state(state)
@@ -4995,6 +5008,21 @@ def _build_list_inputs(
     return tuple(inputs)
 
 
+def _saved_list_page_count(list_input: ListInput) -> int:
+    """Return the visible page count for one retained session-only list."""
+
+    if list_input.mime_type != "application/pdf":
+        return NONPAGINATED_SOURCE_PAGE
+    data = _list_input_bytes(list_input)
+    if data is None:
+        return NONPAGINATED_SOURCE_PAGE
+    document = pdfium.PdfDocument(data)
+    try:
+        return len(document)
+    finally:
+        document.close()
+
+
 def _render_lists(st: Any) -> None:
     intake = st.session_state["intake"]
     if intake is None:
@@ -5017,6 +5045,25 @@ def _render_lists(st: Any) -> None:
         == expected_child_ids
     ):
         st.success("Your previously supplied lists are still available.")
+        labels_by_child = {
+            str(child["child_id"]): str(child["label"])
+            for child in children
+        }
+        st.table(
+            escape_streamlit_data(
+                tuple(
+                    {
+                        "Saved list": item.resolved_document_name,
+                        "Pages": _saved_list_page_count(item),
+                        "For": labels_by_child.get(
+                            item.child_id,
+                            item.child_id,
+                        ),
+                    }
+                    for item in saved_inputs
+                )
+            )
+        )
         if st.button("Rebuild using the saved lists"):
             st.session_state["result"] = None
             st.session_state["list_identity_confirmed"] = False
@@ -5082,7 +5129,10 @@ def _render_lists(st: Any) -> None:
                     (
                         "Shared district document"
                         if shared_source
-                        else f"{child['label']} · Grade {child['grade']}"
+                        else (
+                            f"{child['label']} · "
+                            f"{_grade_display_title(str(child['grade']))}"
+                        )
                     )
                 )
             )
@@ -5168,6 +5218,7 @@ def _render_lists(st: Any) -> None:
         st.session_state["requirement_merge_result"] = None
         st.session_state["requirement_merge_resolved"] = False
         st.session_state["requirement_merge_choices"] = {}
+        st.session_state["requirement_constraint_choices"] = {}
         st.session_state["review_items"] = ()
         st.session_state["organized_list_confirmed"] = False
         _limit_reached_stage(st.session_state, 2)
@@ -6175,17 +6226,17 @@ def _render_review_detail_controls(
             ),
             key=f"{key_prefix}:scope",
         )
-        brand_required = first.checkbox(
-            "Exact brand required",
-            value=item.brand_required,
-            key=f"{key_prefix}:brand-required",
+        brand_mode = first.radio(
+            "Brand choice",
+            (
+                "Equivalent brands are okay",
+                "Exact brand required",
+            ),
+            index=1 if item.brand_required else 0,
+            key=f"{key_prefix}:brand-choice",
         )
-        allow_equivalents = first.checkbox(
-            "Allow equivalent brands",
-            value=item.allow_equivalents,
-            key=f"{key_prefix}:equivalents",
-            disabled=brand_required,
-        )
+        brand_required = brand_mode == "Exact brand required"
+        allow_equivalents = not brand_required
         optional = second.checkbox(
             "Optional item",
             value=item.optional,
@@ -6296,7 +6347,10 @@ def _render_compact_review_row(
         )
         with source_column:
             source_inputs = {
-                list_input.child_id: list_input
+                (
+                    list_input.child_id,
+                    list_input.resolved_document_name,
+                ): list_input
                 for list_input in st.session_state.get("list_inputs", ())
             }
             for member in members:
@@ -6309,18 +6363,59 @@ def _render_compact_review_row(
                             )
                         )
                     )
-                st.write(
-                    escape_streamlit_dollars(member.source_text)
-                )
-                list_input = source_inputs.get(member.child_id)
-                if list_input is not None:
-                    _render_source_reference(
-                        st,
-                        list_input,
-                        page_number=member.source_page,
-                        source_line=member.source_text,
-                        key=f"{key_prefix}:item-source:{member.review_id}",
+                sources = member.sources
+                if len(sources) > 1:
+                    st.caption(
+                        f"Combined from {len(sources)} places in the list"
                     )
+                source_rows = sources or (
+                    RequirementSource(
+                        source_req_id=member.req_id,
+                        document_name=member.source_document,
+                        section_name=member.source_section,
+                        page_number=(
+                            member.source_page
+                            or NONPAGINATED_SOURCE_PAGE
+                        ),
+                        exact_line=member.source_text,
+                        quantity=member.required_quantity or 0,
+                    ),
+                )
+                for source in source_rows:
+                    page_text = (
+                        f"Page {source.page_number}: "
+                        if source.page_number is not None
+                        else ""
+                    )
+                    st.write(
+                        escape_streamlit_dollars(
+                            page_text + source.exact_line
+                        )
+                    )
+                    list_input = source_inputs.get(
+                        (member.child_id, source.document_name)
+                    ) or next(
+                        (
+                            candidate
+                            for (
+                                child_id,
+                                _,
+                            ), candidate in source_inputs.items()
+                            if child_id == member.child_id
+                        ),
+                        None,
+                    )
+                    if list_input is not None:
+                        _render_source_reference(
+                            st,
+                            list_input,
+                            page_number=source.page_number,
+                            source_line=source.exact_line,
+                            key=(
+                                f"{key_prefix}:item-source:"
+                                f"{source.source_req_id}"
+                            ),
+                        )
         with understanding_column:
             st.write(
                 escape_streamlit_dollars(
@@ -6477,16 +6572,20 @@ def _section_choice_from_state(
         )
         if bool(state[question_key]):
             selected_question_ids.append(section.section_id)
+    override_enabled = bool(state[override_toggle_key])
     override_ids = (
         tuple(state[override_selection_key])
-        if bool(state[override_toggle_key])
+        if override_enabled
         else None
     )
-    return build_resolved_section_choice(
+    choice = build_resolved_section_choice(
         resolution,
         selected_question_ids=tuple(selected_question_ids),
         override_section_ids=override_ids,
     )
+    if not override_enabled:
+        state[override_selection_key] = list(choice.selected_section_ids)
+    return choice
 
 
 def _render_section_source_links(
@@ -6863,6 +6962,7 @@ def _render_sections(st: Any) -> None:
         st.session_state["requirement_merge_result"] = None
         st.session_state["requirement_merge_resolved"] = False
         st.session_state["requirement_merge_choices"] = {}
+        st.session_state["requirement_constraint_choices"] = {}
         st.session_state["organized_list_confirmed"] = False
         _limit_reached_stage(st.session_state, 2)
         _invalidate_plan_state(st.session_state)
@@ -6882,10 +6982,13 @@ def _requirement_source_label(source: Any) -> str:
 
 
 def _render_requirement_merge(st: Any) -> None:
-    """Resolve same-item quantity disagreements before Personalize."""
+    """Resolve same-item quantity or constraint disagreements."""
 
     result = st.session_state.get("requirement_merge_result")
-    if not isinstance(result, RequirementMergeResult) or not result.interrupts:
+    if (
+        not isinstance(result, RequirementMergeResult)
+        or not (result.interrupts or result.constraint_interrupts)
+    ):
         st.session_state["requirement_merge_resolved"] = True
         st.session_state["screen"] = "working"
         st.rerun()
@@ -6900,97 +7003,148 @@ def _render_requirement_merge(st: Any) -> None:
         for list_input in st.session_state["list_inputs"]
     }
 
-    st.header("Choose how repeated items should count")
+    st.header("Choose what quantity goes in the cart")
     st.write(
-        "The same item appears with different quantities in more than one "
-        "part of a list. Choose one quantity before the item enters your cart."
+        "The same item appears differently in more than one part of a list. "
+        "Choose once before it enters your cart."
     )
     selections: dict[str, tuple[str, int | None]] = {}
-    with st.form("requirement-quantity-merge"):
-        for interrupt in result.interrupts:
-            child_label = child_labels.get(
-                interrupt.child_id,
-                interrupt.child_id,
+    constraint_choices: dict[str, object] = {}
+    for interrupt in result.interrupts:
+        child_label = child_labels.get(
+            interrupt.child_id,
+            interrupt.child_id,
+        )
+        with st.container(border=True):
+            st.subheader(
+                escape_streamlit_dollars(
+                    f"How many "
+                    f"{_item_display_name(interrupt.canonical_item)} "
+                    f"should be purchased for {child_label}?"
+                )
             )
-            with st.container(border=True):
-                st.subheader(
-                    escape_streamlit_dollars(
-                        f"{_item_display_name(interrupt.canonical_item)} "
-                        f"for {child_label}"
-                    )
+            source_options = tuple(
+                (
+                    "Use the quantity from "
+                    f"{_requirement_source_label(source)} "
+                    f"({source.quantity})",
+                    source.quantity,
                 )
-                source_options = tuple(
-                    (
-                        f"Use {source.quantity} from "
-                        f"{_requirement_source_label(source)}",
-                        source.quantity,
-                    )
-                    for source in interrupt.sources
+                for source in interrupt.sources
+            )
+            option_labels = (
+                (
+                    "Add every list's quantity together "
+                    f"({interrupt.default_quantity}) — default"
+                ),
+                *(label for label, _ in source_options),
+                "Choose my own quantity",
+            )
+            selected_label = st.radio(
+                "Quantity to purchase",
+                option_labels,
+                index=0,
+                key=f"{interrupt.interrupt_id}:choice",
+            )
+            if selected_label == option_labels[0]:
+                selections[interrupt.interrupt_id] = (
+                    "total",
+                    interrupt.default_quantity,
                 )
-                option_labels = (
-                    (
-                        "Total all quantities "
-                        f"({interrupt.default_quantity})"
-                    ),
-                    *(label for label, _ in source_options),
-                    "Enter a different quantity",
+                st.caption(
+                    f"The cart quantity will be {interrupt.default_quantity}."
                 )
-                selected_label = st.radio(
-                    "Which quantity should be used?",
-                    option_labels,
-                    index=0,
-                    key=f"{interrupt.interrupt_id}:choice",
-                )
+            elif selected_label == option_labels[-1]:
                 custom_quantity = int(
                     st.number_input(
-                        "Different quantity",
+                        "Quantity to purchase",
                         min_value=1,
                         value=interrupt.default_quantity,
                         step=1,
                         key=f"{interrupt.interrupt_id}:custom",
                     )
                 )
-                if selected_label == option_labels[0]:
-                    selections[interrupt.interrupt_id] = (
-                        "total",
-                        interrupt.default_quantity,
+                selections[interrupt.interrupt_id] = (
+                    "custom",
+                    custom_quantity,
+                )
+                st.caption(f"The cart quantity will be {custom_quantity}.")
+            else:
+                source_index = option_labels.index(selected_label) - 1
+                selected_quantity = source_options[source_index][1]
+                selections[interrupt.interrupt_id] = (
+                    "source",
+                    selected_quantity,
+                )
+                st.caption(
+                    f"The cart quantity will be {selected_quantity}."
+                )
+            list_input = input_by_child.get(interrupt.child_id)
+            for source in interrupt.sources:
+                st.caption(
+                    escape_streamlit_dollars(
+                        f"{_requirement_source_label(source)}: "
+                        f"{source.exact_line}"
                     )
-                elif selected_label == option_labels[-1]:
-                    selections[interrupt.interrupt_id] = (
-                        "custom",
-                        custom_quantity,
+                )
+                if list_input is not None:
+                    _render_source_reference(
+                        st,
+                        list_input,
+                        page_number=source.page_number,
+                        source_line=source.exact_line,
+                        key=(
+                            f"{interrupt.interrupt_id}:"
+                            f"{source.source_req_id}"
+                        ),
                     )
-                else:
-                    source_index = option_labels.index(selected_label) - 1
-                    selections[interrupt.interrupt_id] = (
-                        "source",
-                        source_options[source_index][1],
-                    )
-                list_input = input_by_child.get(interrupt.child_id)
-                for source in interrupt.sources:
+
+    for interrupt in result.constraint_interrupts:
+        child_label = child_labels.get(
+            interrupt.child_id,
+            interrupt.child_id,
+        )
+        with st.container(border=True):
+            st.subheader(
+                escape_streamlit_dollars(
+                    f"Choose the {interrupt.field_name.replace('_', ' ')} "
+                    f"for {_item_display_name(interrupt.canonical_item)} "
+                    f"for {child_label}"
+                )
+            )
+            labels = tuple(
+                f"{option.value} — {_requirement_source_label(option.sources[0])}"
+                for option in interrupt.options
+            )
+            selected = st.radio(
+                "Which list detail should be used?",
+                labels,
+                index=None,
+                key=f"{interrupt.interrupt_id}:constraint",
+            )
+            if selected is not None:
+                selected_index = labels.index(selected)
+                constraint_choices[interrupt.interrupt_id] = (
+                    interrupt.options[selected_index].value
+                )
+            for option in interrupt.options:
+                for source in option.sources:
                     st.caption(
                         escape_streamlit_dollars(
                             f"{_requirement_source_label(source)}: "
                             f"{source.exact_line}"
                         )
                     )
-                    if list_input is not None:
-                        _render_source_reference(
-                            st,
-                            list_input,
-                            page_number=source.page_number,
-                            source_line=source.exact_line,
-                            key=(
-                                f"{interrupt.interrupt_id}:"
-                                f"{source.source_req_id}"
-                            ),
-                        )
-        submitted = st.form_submit_button(
-            "Continue with these quantities",
-            type="primary",
-            use_container_width=True,
-        )
+
+    submitted = st.button(
+        "Continue with these choices",
+        type="primary",
+        use_container_width=True,
+    )
     if not submitted:
+        return
+    if len(constraint_choices) != len(result.constraint_interrupts):
+        st.error("Choose one value for each conflicting list detail.")
         return
     quantity_choices = {
         interrupt_id: int(quantity)
@@ -7000,10 +7154,12 @@ def _render_requirement_merge(st: Any) -> None:
     merged, resolved = consolidate_extractions(
         st.session_state["unmerged_extracted_lists"],
         quantity_choices=quantity_choices,
+        constraint_choices=constraint_choices,
     )
     st.session_state["extracted_lists"] = merged
     st.session_state["requirement_merge_result"] = resolved
     st.session_state["requirement_merge_choices"] = selections
+    st.session_state["requirement_constraint_choices"] = constraint_choices
     st.session_state["requirement_merge_resolved"] = True
     st.session_state["screen"] = "working"
     st.rerun()
@@ -7534,9 +7690,13 @@ def _render_working(st: Any) -> None:
             st.session_state["extracted_lists"] = merged_extractions
             st.session_state["requirement_merge_result"] = merge_result
             st.session_state["requirement_merge_resolved"] = (
-                not bool(merge_result.interrupts)
+                not bool(
+                    merge_result.interrupts
+                    or merge_result.constraint_interrupts
+                )
             )
             st.session_state["requirement_merge_choices"] = {}
+            st.session_state["requirement_constraint_choices"] = {}
             st.session_state["extraction_errors"] = extraction_errors
             st.session_state["extraction_cache_ready"] = True
             st.session_state["ui_error_active"] = bool(extraction_errors)
@@ -7550,7 +7710,10 @@ def _render_working(st: Any) -> None:
     merge_result = st.session_state.get("requirement_merge_result")
     if (
         isinstance(merge_result, RequirementMergeResult)
-        and merge_result.interrupts
+        and (
+            merge_result.interrupts
+            or merge_result.constraint_interrupts
+        )
         and not st.session_state["requirement_merge_resolved"]
     ):
         st.session_state["progress_substep"] = (
