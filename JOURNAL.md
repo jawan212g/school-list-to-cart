@@ -1007,3 +1007,73 @@ selection.
 Deploy the branch and verify that the first student fields are visible without
 scrolling on a normal laptop, then select a Grade 3 classroom group and confirm its
 district-list section is preselected.
+
+## 2026-07-28 — Personalize intake wording, flow, and motion
+
+### Objective
+
+Frame list review as parent-controlled cart personalization, reveal only fields that
+apply to the selected entry type, defer validation until navigation, and restore
+lightweight motion without changing pipeline or calculation behavior.
+
+### Work completed
+
+- Renamed the four stages to Your students, Their lists, Personalize, and Your
+  shopping plan everywhere they appear.
+- Reframed the organized-list screen around choosing what enters the cart. The primary
+  columns are now From the list, For your cart, and Choose, while original source
+  evidence and confirmation controls remain intact.
+- Replaced the collapsed explainer with the exact requested purpose, How it works,
+  What's real and what isn't, and Your privacy copy.
+- Changed student intake to ask Student or Classroom first with no default selection.
+  Student reveals name or nickname and grade; Classroom reveals teacher name, grade,
+  and number of students.
+- Kept separate temporary student-name and teacher-name widget values so switching
+  type does not carry an irrelevant name into the other form.
+- Removed the introductory student instruction and retained the example only as the
+  name-field placeholder.
+- Changed student, budget, and preference validation to appear only after the parent
+  tries to continue. Navigation buttons remain available so the validation can occur
+  on exit.
+- Strengthened first-render input borders with an explicit input-parent border and
+  inset edge, plus hover and focus treatment.
+- Added quick card, field, step, button, and focus transitions; all motion is reduced
+  to effectively zero when the browser requests reduced motion.
+- Added a short, nonblocking ready-state animation only for a complete, within-budget
+  warm plan.
+
+### Decisions made
+
+- Preserved the mandatory FR-12 source evidence and human confirmation while changing
+  the screen's framing from auditing the model to personalizing the cart.
+- Kept incomplete, shortfall, and error states free of celebration.
+- Implemented motion in CSS only, avoiding timers or state changes that could delay
+  the five-minute demonstration path.
+
+### Problems or limitations
+
+- Streamlit is unavailable on this Windows ARM64 machine, so first-render border
+  appearance and animation timing could not be observed in a live browser. DOM
+  selectors, output copy, state paths, reduced-motion handling, and complete-plan
+  conditions were verified through automated tests and Python compilation.
+
+### Files created or changed
+
+- Updated `app.py`, `tests/test_app.py`, and `JOURNAL.md`.
+
+### Testing performed
+
+- Focused application suite: 40 passed.
+- Complete automated suite: 222 passed in 5.32 seconds.
+- Python compilation completed without errors.
+
+### Remaining work
+
+- Confirm the first-render text-input border, type reveal, transition speed, and
+  ready-state moment in the deployed Streamlit application.
+
+### Recommended next step
+
+Deploy the branch and test one Student and one Classroom entry, including switching
+between the types once, leaving a required field blank, and completing an in-budget
+plan with reduced-motion both enabled and disabled.

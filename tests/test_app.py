@@ -147,8 +147,8 @@ def test_state_selection_prefills_general_rate_without_overwriting_override() ->
     assert app.state_tax_rate_percent("Oregon") == "0.0"
 
 
-def test_student_fields_validate_as_the_parent_types() -> None:
-    """FR-01/FR-05: missing intake fields have immediate plain messages."""
+def test_student_and_classroom_fields_preserve_grade_context() -> None:
+    """FR-01/FR-05: classrooms retain grade and quantity context."""
 
     assert app.student_input_errors("", "") == (
         "Enter a student name or nickname.",
@@ -176,7 +176,7 @@ def test_student_fields_validate_as_the_parent_types() -> None:
         {
             "child_label_0": "Ms. Rivera's class",
             "child_grade_0": "Grade 3",
-            "entity_type_0": "A classroom group",
+            "entity_type_0": "Classroom",
             "student_count_0": 24,
         },
         1,
@@ -220,21 +220,36 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert 'st.subheader("Students")' not in student_source
     assert "Step 1" not in student_source
     assert "Student name or nickname" in student_source
+    assert "Teacher name" in student_source
     assert "Maya, or just 'Grade 2'" in student_source
+    assert "Ms. Rivera" in student_source
     assert "GRADE_OPTIONS" in student_source
     assert "Select a grade" in student_source
-    assert "Who this covers" in student_source
-    assert "Students in group" in student_source
+    assert "Who are you adding?" in student_source
+    assert "Number of students" in student_source
+    assert student_source.index("Who are you adding?") < (
+        student_source.index("text_input")
+    )
+    assert "index=None" in student_source
+    assert student_source.index("if entity_type is None") < (
+        student_source.index("text_input")
+    )
+    assert "Choose Student or Classroom." in student_source
     assert '"Shopping for"' not in student_source
-    assert "disabled=bool(immediate_errors)" in student_source
+    assert "student_validation_attempted" in student_source
+    assert "if validation_attempted" in student_source
+    assert "disabled=" not in student_source
     assert 'st.subheader("Budget")' not in budget_source
     assert "Step 2" not in budget_source
     assert "A budget for each student" in budget_source
-    assert "disabled=bool(budget_errors)" in budget_source
+    assert "budget_validation_attempted" in budget_source
+    assert "disabled=" not in budget_source
     assert 'st.subheader("Shopping preferences")' not in preferences_source
     assert "Step 3" not in preferences_source
     assert '"Shopping preferences"' in preferences_source
     assert "Advanced shopping and tax options" in preferences_source
+    assert "preferences_validation_attempted" in preferences_source
+    assert "disabled=" not in preferences_source
     assert "Shopping mode" not in preferences_source
 
 
@@ -250,7 +265,13 @@ def test_visual_system_keeps_notebook_pattern_behind_opaque_cards() -> None:
     assert ".rss-stepper" in css_source
     assert '.rss-stepper__item--current' in css_source
     assert '[data-baseweb="input"]' in css_source
+    assert "div:has(> input)" in css_source
     assert "border: 1.5px solid" in css_source
+    assert "box-shadow: inset" in css_source
+    assert "@keyframes rss-card-in" in css_source
+    assert "@keyframes rss-fields-in" in css_source
+    assert "@keyframes rss-celebrate-in" in css_source
+    assert "prefers-reduced-motion: reduce" in css_source
     assert "@media (max-width: 700px)" in css_source
 
 
@@ -258,25 +279,70 @@ def test_landing_keeps_context_in_one_collapsed_explainer() -> None:
     """Purpose, process, limitations, and privacy share one compact place."""
 
     title_source = inspect.getsource(app._render_app_title)
-    notice_source = inspect.getsource(app._persistent_notice)
     main_source = inspect.getsource(app.main)
+    events: list[tuple[str, object]] = []
+
+    class ExpanderContext:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class ExplainerStreamlit:
+        @staticmethod
+        def expander(label: str, expanded: bool) -> ExpanderContext:
+            events.append(("expander", (label, expanded)))
+            return ExpanderContext()
+
+        @staticmethod
+        def write(value: str) -> None:
+            events.append(("write", value))
+
+        @staticmethod
+        def markdown(value: str) -> None:
+            events.append(("markdown", value))
+
+    app._persistent_notice(ExplainerStreamlit())
 
     assert app.APP_TAGLINE == "Sorted before the first bell."
     assert "rss-title__ready" in title_source
     assert "rss-title__set" in title_source
     assert "rss-title__school" in title_source
-    assert "How Ready, Set, School works" in notice_source
-    assert "expanded=False" in notice_source
-    assert "The four stops are simple" in notice_source
-    assert "A language model interprets the list" in notice_source
-    assert "The catalog, stores, prices, stock, fees, and distances are" in (
-        notice_source
+    assert events == [
+        ("expander", ("How Ready, Set, School works", False)),
+        (
+            "write",
+            "Ready, Set, School turns a school supply list into a shopping "
+            "plan you control.",
+        ),
+        ("markdown", "**How it works**"),
+        (
+            "write",
+            "Add your students, upload their lists, personalize what goes in "
+            "the cart, and get a plan with prices, stores, and totals.",
+        ),
+        ("markdown", "**What's real and what isn't**"),
+        (
+            "write",
+            "A language model reads the list. Everything after that — "
+            "quantities, package sizes, prices, tax, totals — is calculated, "
+            "not guessed. The catalog, stores, prices, and distances are "
+            "simulated for this demonstration.",
+        ),
+        ("markdown", "**Your privacy**"),
+        (
+            "write",
+            "We don't store anything about your kids. Close the tab and it's "
+            "gone. Checkout is simulated and never asks for payment.",
+        ),
+    ]
+    assert all(
+        "tax holidays" not in str(value).casefold()
+        for _, value in events
     )
-    assert "We don't store anything about your kids" in notice_source
     assert "_render_intake_walkthrough" not in main_source
     assert not hasattr(app, "_render_intake_walkthrough")
-    assert "tax holidays" not in notice_source.casefold()
-    assert "state-specific" not in notice_source.casefold()
 
 
 def test_decision_log_copy_uses_student_terminology() -> None:
@@ -352,6 +418,55 @@ def test_shortfall_state_renders_the_plain_summary_headings() -> None:
     )
 
 
+def test_complete_plan_gets_one_nonblocking_celebration() -> None:
+    """A complete, within-budget warm plan receives the ready-state moment."""
+
+    result = _real_pipeline_result("Grade 2")
+    optimization = result.proposed_cart
+    events: list[tuple[str, str]] = []
+
+    class MetricColumn:
+        def metric(self, label: str, value: str) -> None:
+            events.append((f"metric:{label}", value))
+
+    class HeadlineStreamlit:
+        def error(self, value: str) -> None:
+            events.append(("error", value))
+
+        def markdown(
+            self,
+            value: str,
+            unsafe_allow_html: bool,
+        ) -> None:
+            assert unsafe_allow_html is True
+            events.append(("markdown", value))
+
+        def header(self, value: str) -> None:
+            events.append(("header", value))
+
+        def caption(self, value: str) -> None:
+            events.append(("caption", value))
+
+        def columns(self, count: int) -> tuple[MetricColumn, ...]:
+            return tuple(MetricColumn() for _ in range(count))
+
+    app._render_summary_headline(
+        HeadlineStreamlit(),
+        optimization,
+        optimization.landed_cost + 100,
+        True,
+        app.WARM_COPY,
+    )
+
+    celebrations = [
+        value
+        for kind, value in events
+        if kind == "markdown" and "rss-plan-ready" in value
+    ]
+    assert len(celebrations) == 1
+    assert "All set — your shopping plan is ready." in celebrations[0]
+
+
 def test_visible_navigation_uses_four_required_stages() -> None:
     """Every internal screen maps to one of the four required stages."""
 
@@ -361,19 +476,19 @@ def test_visible_navigation_uses_four_required_stages() -> None:
     assert app.JOURNEY_STAGES == (
         "Your students",
         "Their lists",
-        "Check our work",
-        "Your plan",
+        "Personalize",
+        "Your shopping plan",
     )
     assert app.screen_phase_label("intake") == "Your students"
     assert app.screen_phase_label("lists") == "Their lists"
     assert (
         app.screen_phase_label("working", "reading the lists")
-        == "Your plan"
+        == "Your shopping plan"
     )
     assert app.screen_phase_label("sections") == "Their lists"
-    assert app.screen_phase_label("review") == "Check our work"
-    assert app.screen_phase_label("approval") == "Your plan"
-    assert app.screen_phase_label("summary") == "Your plan"
+    assert app.screen_phase_label("review") == "Personalize"
+    assert app.screen_phase_label("approval") == "Your shopping plan"
+    assert app.screen_phase_label("summary") == "Your shopping plan"
     assert "st.progress" not in intake_sections_source
     assert "rss-intake-sections" in intake_sections_source
 
@@ -392,7 +507,7 @@ def test_visible_navigation_uses_four_required_stages() -> None:
     assert rendered[0][0].count('aria-current="step"') == 1
     assert (
         'rss-stepper__item rss-stepper__item--current" '
-        'aria-current="step">Check our work'
+        'aria-current="step">Personalize'
     ) in rendered[0][0]
 
 
@@ -969,8 +1084,8 @@ def test_review_understanding_leads_with_plain_item_and_quantity() -> None:
     )
 
 
-def test_review_framing_names_section_counts_and_uncertainty() -> None:
-    """The screen opens with an honest per-child reading statement."""
+def test_review_framing_names_cart_choices_and_uncertainty() -> None:
+    """The personalization screen leads with the parent's cart choices."""
 
     envelope = ExtractionEnvelope(
         document_selection=DocumentSelection(
@@ -1017,22 +1132,22 @@ def test_review_framing_names_section_counts_and_uncertainty() -> None:
         envelope,
         items,
     ) == (
-        "We read 2nd Grade list and found 2 items. "
-        "1 looks clear. Please check 1."
+        "2nd Grade list: 1 item is ready for the cart. "
+        "Choose how to handle 1 item before moving on."
     )
 
 
-def test_review_screen_no_longer_uses_the_wide_internal_editor() -> None:
-    """The primary review path is compact source, understanding, confirmation."""
+def test_personalize_screen_keeps_source_beside_cart_choice() -> None:
+    """The primary path is compact source, cart choice, and confirmation."""
 
     source = inspect.getsource(app._render_review)
 
     assert "data_editor" not in source
-    assert source.index("What the list said") < source.index(
-        "What we understood"
-    )
-    assert source.index("What we understood") < source.index("Confirm")
-    assert "Product matching has not run yet" in source
+    assert "Personalize what goes in your cart" in source
+    assert source.index("From the list") < source.index("For your cart")
+    assert source.index("For your cart") < source.index("Choose")
+    assert "Products and prices come next" in source
+    assert "Confirm the readings" not in source
     assert "Notes from the teacher" in source
     assert "Already provided by school" in source
 

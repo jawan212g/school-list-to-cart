@@ -204,8 +204,8 @@ SCREEN_ORDER = (
 JOURNEY_STAGES = (
     "Your students",
     "Their lists",
-    "Check our work",
-    "Your plan",
+    "Personalize",
+    "Your shopping plan",
 )
 SCREEN_PHASES: Mapping[str, tuple[str, str]] = {
     "intake": ("1", JOURNEY_STAGES[0]),
@@ -421,7 +421,7 @@ class CopySet:
 WARM_COPY = CopySet(
     register="warm",
     tagline=APP_TAGLINE,
-    summary_heading="Your school plan is ready",
+    summary_heading="Your shopping plan is ready",
     headline_heading="The plan at a glance",
     complete_status="Required items covered",
     attention_clear="Nothing needs your attention.",
@@ -2805,6 +2805,9 @@ def _initialize_state(st: Any) -> None:
         "demo_mode": False,
         "child_count": 1,
         "intake_step": 1,
+        "student_validation_attempted": False,
+        "budget_validation_attempted": False,
+        "preferences_validation_attempted": False,
         "budget_mode_label": "One combined budget",
         "combined_budget_text": DEFAULT_BUDGET_TEXT,
         "shopping_preference_label": next(iter(SHOPPING_MODES)),
@@ -2865,26 +2868,25 @@ def _persistent_notice(st: Any) -> None:
         expanded=False,
     ):
         st.write(
-            "Ready, Set, School reads each supply list and proposes a shopping "
-            "plan for you to check."
+            "Ready, Set, School turns a school supply list into a shopping "
+            "plan you control."
         )
+        st.markdown("**How it works**")
         st.write(
-            "The four stops are simple: add your students, add their lists, "
-            "check how the lists were understood, and review your plan."
+            "Add your students, upload their lists, personalize what goes in "
+            "the cart, and get a plan with prices, stores, and totals."
         )
+        st.markdown("**What's real and what isn't**")
         st.write(
-            "A language model interprets the list. Deterministic code then "
-            "calculates quantities, package choices, prices, fees, tax, and "
-            "totals from the interpretation you confirm."
+            "A language model reads the list. Everything after that — "
+            "quantities, package sizes, prices, tax, totals — is calculated, "
+            "not guessed. The catalog, stores, prices, and distances are "
+            "simulated for this demonstration."
         )
+        st.markdown("**Your privacy**")
         st.write(
-            "The catalog, stores, prices, stock, fees, and distances are "
-            "simulated for this demonstration. Distance uses a notional home "
-            "location, and a pickup radius never limits delivery."
-        )
-        st.write(
-            "We don't store anything about your kids — close the tab and it's "
-            "gone. Checkout is a no-payment simulation."
+            "We don't store anything about your kids. Close the tab and it's "
+            "gone. Checkout is simulated and never asks for payment."
         )
 
 
@@ -3012,7 +3014,10 @@ def _intake_students_from_state(
         entity_label = str(
             state.get(f"entity_type_{index}", "One student")
         )
-        is_classroom = entity_label == "A classroom group"
+        is_classroom = entity_label in {
+            "A classroom group",
+            "Classroom",
+        }
         students.append(
             {
                 "child_id": f"child-{index + 1}",
@@ -3061,11 +3066,8 @@ def _render_intake_step_progress(st: Any, step: int) -> None:
 
 
 def _render_student_step(st: Any) -> None:
-    """Render guided FR-01/FR-05 student intake with immediate validation."""
+    """Render type-first FR-01/FR-05 intake with exit validation."""
 
-    st.caption(
-        "Add each student whose list should be included in this shopping plan."
-    )
     student_count = int(
         st.number_input(
             "How many students or classroom groups?",
@@ -3079,16 +3081,34 @@ def _render_student_step(st: Any) -> None:
             ),
         )
     )
-    immediate_errors: list[str] = []
+    validation_attempted = bool(
+        st.session_state.get("student_validation_attempted", False)
+    )
+    validation_errors: list[str] = []
     for index in range(student_count):
         name_key = f"child_label_{index}"
+        student_name_key = f"student_name_{index}"
+        teacher_name_key = f"teacher_name_{index}"
         grade_key = f"child_grade_{index}"
         entity_key = f"entity_type_{index}"
         st.session_state.setdefault(name_key, "")
-        st.session_state.setdefault(entity_key, "One student")
+        st.session_state.setdefault(entity_key, None)
+        stored_entity_type = str(st.session_state.get(entity_key) or "")
+        st.session_state[entity_key] = (
+            "Classroom"
+            if stored_entity_type in {
+                "Classroom",
+                "A classroom group",
+            }
+            else (
+                "Student"
+                if stored_entity_type in {"Student", "One student"}
+                else None
+            )
+        )
         existing_grade = st.session_state.get(grade_key)
         if existing_grade == "Classroom group":
-            st.session_state[entity_key] = "A classroom group"
+            st.session_state[entity_key] = "Classroom"
             st.session_state[grade_key] = None
             existing_grade = None
         if existing_grade not in (None, *GRADE_OPTIONS):
@@ -3101,28 +3121,84 @@ def _render_student_step(st: Any) -> None:
                 st.session_state[grade_key] = f"Grade {int(normalized)}"
             else:
                 st.session_state[grade_key] = None
-        current_name = str(st.session_state.get(name_key, "")).strip()
+        current_type = st.session_state.get(entity_key)
+        if current_type == "Classroom":
+            st.session_state.setdefault(
+                teacher_name_key,
+                str(st.session_state.get(name_key, "")),
+            )
+            current_name = str(
+                st.session_state.get(teacher_name_key, "")
+            ).strip()
+        elif current_type == "Student":
+            st.session_state.setdefault(
+                student_name_key,
+                str(st.session_state.get(name_key, "")),
+            )
+            current_name = str(
+                st.session_state.get(student_name_key, "")
+            ).strip()
+        else:
+            current_name = ""
+        default_heading = (
+            f"Classroom {index + 1}"
+            if current_type == "Classroom"
+            else (
+                f"Student {index + 1}"
+                if current_type == "Student"
+                else f"Student or classroom {index + 1}"
+            )
+        )
         with st.container(border=True):
             st.markdown(
                 "**"
                 + escape_streamlit_dollars(
-                    current_name or f"Student {index + 1}"
+                    current_name or default_heading
                 )
                 + "**"
             )
-            entity_type = str(st.session_state.get(entity_key, "One student"))
-            field_widths = (
-                [2.2, 1.2, 1.35, 1.15]
-                if entity_type == "A classroom group"
-                else [2.2, 1.2, 1.35]
+            entity_type = st.radio(
+                "Who are you adding?",
+                ("Student", "Classroom"),
+                horizontal=True,
+                index=None,
+                key=entity_key,
             )
-            field_columns = st.columns(field_widths)
-            name_column, grade_column, entity_column = field_columns[:3]
+            if entity_type is None:
+                type_error = "Choose Student or Classroom."
+                validation_errors.append(
+                    f"{default_heading}: {type_error}"
+                )
+                if validation_attempted:
+                    st.error(type_error)
+                continue
+            is_classroom = entity_type == "Classroom"
+            field_columns = st.columns(
+                [2, 1.2, 1.2] if is_classroom else [2, 1.2]
+            )
+            name_column, grade_column = field_columns[:2]
+            name_label = (
+                "Teacher name"
+                if is_classroom
+                else "Student name or nickname"
+            )
+            name_placeholder = (
+                "Ms. Rivera"
+                if is_classroom
+                else "Maya, or just 'Grade 2'"
+            )
+            active_name_key = (
+                teacher_name_key
+                if is_classroom
+                else student_name_key
+            )
+            st.session_state.setdefault(active_name_key, "")
             name = name_column.text_input(
-                "Student name or nickname",
-                key=name_key,
-                placeholder="Maya, or just 'Grade 2'",
+                name_label,
+                key=active_name_key,
+                placeholder=name_placeholder,
             )
+            st.session_state[name_key] = name
             grade = grade_column.selectbox(
                 "Grade",
                 GRADE_OPTIONS,
@@ -3130,44 +3206,61 @@ def _render_student_step(st: Any) -> None:
                 key=grade_key,
                 placeholder="Select a grade",
             )
-            entity_type = entity_column.selectbox(
-                "Who this covers",
-                ("One student", "A classroom group"),
-                key=entity_key,
-            )
             grade_text = "" if grade is None else str(grade)
-            errors = student_input_errors(name, grade_text)
             if not name.strip():
-                name_column.error(errors[0])
+                name_error = (
+                    "Enter the teacher name."
+                    if is_classroom
+                    else "Enter a student name or nickname."
+                )
+                validation_errors.append(
+                    f"{default_heading}: {name_error}"
+                )
+                if validation_attempted:
+                    name_column.error(name_error)
             if not grade_text:
-                grade_column.error("Enter the student's grade.")
-            immediate_errors.extend(
-                f"{name.strip() or f'Student {index + 1}'}: {error}"
-                for error in errors
-            )
-            if entity_type == "A classroom group":
+                grade_error = (
+                    "Choose the classroom grade."
+                    if is_classroom
+                    else "Choose the student's grade."
+                )
+                validation_errors.append(
+                    f"{default_heading}: {grade_error}"
+                )
+                if validation_attempted:
+                    grade_column.error(grade_error)
+            if is_classroom:
                 count_key = f"student_count_{index}"
                 st.session_state.setdefault(count_key, 20)
-                field_columns[3].number_input(
-                    "Students in group",
+                field_columns[2].number_input(
+                    "Number of students",
                     min_value=1,
                     max_value=MAX_CLASSROOM_STUDENTS,
                     step=1,
                     key=count_key,
                 )
-    st.session_state["ui_error_active"] = bool(immediate_errors)
-    if st.button(
+    st.session_state["ui_error_active"] = (
+        validation_attempted and bool(validation_errors)
+    )
+    continue_clicked = st.button(
         "Continue to budget",
         type="primary",
-        disabled=bool(immediate_errors),
-    ):
+    )
+    if not continue_clicked:
+        return
+    if validation_errors:
+        st.session_state["student_validation_attempted"] = True
+        st.session_state["ui_error_active"] = True
+        st.rerun()
+    else:
+        st.session_state["student_validation_attempted"] = False
         st.session_state["ui_error_active"] = False
         st.session_state["intake_step"] = 2
         st.rerun()
 
 
 def _render_budget_step(st: Any) -> None:
-    """Render guided FR-03 budget entry with immediate E-37 validation."""
+    """Render FR-03 budget entry with E-37 validation on exit."""
 
     students = _intake_students_from_state(
         st.session_state,
@@ -3183,6 +3276,9 @@ def _render_budget_step(st: Any) -> None:
         horizontal=True,
         key="budget_mode_label",
     )
+    validation_attempted = bool(
+        st.session_state.get("budget_validation_attempted", False)
+    )
     budget_errors: list[str] = []
     if budget_mode_label == "One combined budget":
         combined_budget = st.text_input(
@@ -3195,7 +3291,8 @@ def _render_budget_step(st: Any) -> None:
         error = budget_entry_error(combined_budget)
         if error is not None:
             budget_errors.append(error)
-            st.error(escape_streamlit_dollars(error))
+            if validation_attempted:
+                st.error(escape_streamlit_dollars(error))
     else:
         columns = st.columns(2)
         for index, student in enumerate(students):
@@ -3212,18 +3309,29 @@ def _render_budget_step(st: Any) -> None:
             if error is not None:
                 message = f"{student['label']}: {error}"
                 budget_errors.append(message)
-                column.error(escape_streamlit_dollars(message))
-    st.session_state["ui_error_active"] = bool(budget_errors)
+                if validation_attempted:
+                    column.error(escape_streamlit_dollars(message))
+    st.session_state["ui_error_active"] = (
+        validation_attempted and bool(budget_errors)
+    )
     back, forward = st.columns([1, 2])
     if back.button("Back to students"):
         st.session_state["intake_step"] = 1
+        st.session_state["budget_validation_attempted"] = False
         st.session_state["ui_error_active"] = False
         st.rerun()
-    if forward.button(
+    continue_clicked = forward.button(
         "Continue to shopping preferences",
         type="primary",
-        disabled=bool(budget_errors),
-    ):
+    )
+    if not continue_clicked:
+        return
+    if budget_errors:
+        st.session_state["budget_validation_attempted"] = True
+        st.session_state["ui_error_active"] = True
+        st.rerun()
+    else:
+        st.session_state["budget_validation_attempted"] = False
         st.session_state["intake_step"] = 3
         st.session_state["ui_error_active"] = False
         st.rerun()
@@ -3267,6 +3375,9 @@ def _render_preferences_step(st: Any) -> None:
         key="shopping_preference_label",
     )
     shopping_mode = SHOPPING_MODES[mode_label]
+    validation_attempted = bool(
+        st.session_state.get("preferences_validation_attempted", False)
+    )
     stores = tuple(load_stores())
     allowed_stores: frozenset[str] | None = None
     max_stores: int | None = None
@@ -3282,7 +3393,8 @@ def _render_preferences_step(st: Any) -> None:
         if not selected_names:
             message = "Choose at least one store to build a custom plan."
             preference_errors.append(message)
-            st.error(message)
+            if validation_attempted:
+                st.error(message)
         store_ids_by_name = {
             store.name: store.store_id for store in stores
         }
@@ -3358,7 +3470,8 @@ def _render_preferences_step(st: Any) -> None:
             tax_percent_to_basis_points(tax_rate_text)
         except ValueError as error:
             preference_errors.append(str(error))
-            st.error(escape_streamlit_dollars(str(error)))
+            if validation_attempted:
+                st.error(escape_streamlit_dollars(str(error)))
         st.caption(
             "State-level defaults are dated January 1, 2026. City and county "
             "rates, state-specific school-supply exemptions, and "
@@ -3381,17 +3494,25 @@ def _render_preferences_step(st: Any) -> None:
         preference_errors.append(str(error))
         budget_mode, budget_total, budget_allocations = "combined", 0, {}
     preference_errors.extend(student_errors)
-    st.session_state["ui_error_active"] = bool(preference_errors)
+    st.session_state["ui_error_active"] = (
+        validation_attempted and bool(preference_errors)
+    )
     back, forward = st.columns([1, 2])
     if back.button("Back to budget"):
         st.session_state["intake_step"] = 2
+        st.session_state["preferences_validation_attempted"] = False
         st.session_state["ui_error_active"] = False
         st.rerun()
-    if not forward.button(
+    continue_clicked = forward.button(
         "Continue to the lists",
         type="primary",
-        disabled=bool(preference_errors),
-    ):
+    )
+    if not continue_clicked:
+        return
+    if preference_errors:
+        st.session_state["preferences_validation_attempted"] = True
+        st.session_state["ui_error_active"] = True
+        st.rerun()
         return
 
     tax_basis_points = tax_percent_to_basis_points(
@@ -3417,6 +3538,7 @@ def _render_preferences_step(st: Any) -> None:
     st.session_state["resolved_interrupts"] = {}
     st.session_state["parent_decisions"] = ()
     st.session_state["checkout_confirmation"] = None
+    st.session_state["preferences_validation_attempted"] = False
     st.session_state["ui_error_active"] = False
     st.session_state["progress_substep"] = "adding the lists"
     st.session_state["screen"] = "lists"
@@ -4511,7 +4633,7 @@ def review_child_framing(
     envelope: ExtractionEnvelope,
     items: Sequence[SupplyItemReview],
 ) -> str:
-    """State what was read and how many item readings need attention."""
+    """Frame extracted items as choices about what enters the cart."""
 
     child_items = tuple(
         item
@@ -4537,14 +4659,16 @@ def review_child_framing(
         else f"{child_label}'s list"
     )
     if needs_check:
-        clear_verb = "looks" if clear_count == 1 else "look"
         return (
-            f"We read {section_text} and found {len(child_items)} items. "
-            f"{clear_count} {clear_verb} clear. Please check {needs_check}."
+            f"{section_text}: {clear_count} "
+            f"{'item is' if clear_count == 1 else 'items are'} ready for the "
+            f"cart. Choose how to handle {needs_check} "
+            f"{'item' if needs_check == 1 else 'items'} before moving on."
         )
     return (
-        f"We read {section_text} and found {len(child_items)} items. "
-        "These readings look clear, but you can still edit them."
+        f"{section_text}: {len(child_items)} "
+        f"{'item is' if len(child_items) == 1 else 'items are'} ready for the "
+        "cart. You can edit, remove, or mark anything you already have."
     )
 
 
@@ -4818,12 +4942,12 @@ def _render_compact_review_row(
                 )
             )
             st.caption(
-                f"Reading: {confidence_band(representative.confidence)}"
+                f"List detail: {confidence_band(representative.confidence)}"
             )
         with confirm_column:
             if flag_messages:
                 confirmed = st.checkbox(
-                    "I checked this",
+                    "Use this in the cart",
                     value=all(
                         member.review_status == "confirmed"
                         for member in members
@@ -4831,7 +4955,7 @@ def _render_compact_review_row(
                     key=f"{key_prefix}:confirmed",
                 )
             else:
-                st.caption("Accepted by default")
+                st.caption("Included by default")
                 confirmed = True
         edited_representative = _render_review_detail_controls(
             st,
@@ -5123,7 +5247,7 @@ def _render_review(st: Any) -> None:
         flag_anchor_by_group[group.group_id] = anchor
         flag_groups_by_child.setdefault(anchor, []).append(group)
 
-    st.header("Check our work")
+    st.header("Personalize what goes in your cart")
     for child in children:
         child_id = str(child["child_id"])
         envelope = extractions.get(child_id)
@@ -5173,7 +5297,8 @@ def _render_review(st: Any) -> None:
             )
         )
     st.caption(
-        "This is the list-reading check. Product matching has not run yet."
+        "Products and prices come next, after you choose what belongs in the "
+        "cart."
     )
 
     condition_answers: dict[str, str | None] = {}
@@ -5224,9 +5349,9 @@ def _render_review(st: Any) -> None:
             heading_source, heading_understood, heading_confirm = (
                 st.columns([5, 4, 2])
             )
-            heading_source.caption("What the list said")
-            heading_understood.caption("What we understood")
-            heading_confirm.caption("Confirm")
+            heading_source.caption("From the list")
+            heading_understood.caption("For your cart")
+            heading_confirm.caption("Choose")
 
             rendered_any = False
             for group in flag_groups_by_child.get(child_id, ()):
@@ -5275,7 +5400,9 @@ def _render_review(st: Any) -> None:
                 edited_by_id.update(edited)
                 rendered_any = True
             if not rendered_any:
-                st.caption("No purchase items were read for this student.")
+                st.caption(
+                    "No items are currently selected for this student."
+                )
 
             added = _new_review_item_from_controls(
                 st,
@@ -5308,9 +5435,9 @@ def _render_review(st: Any) -> None:
                     )
                     st.caption(
                         escape_streamlit_dollars(
-                            "Understood as: "
+                            "Provided by school: "
                             + review_understanding_text(item)
-                            + " — excluded from the cart"
+                            + " — not added to the cart"
                         )
                     )
 
@@ -5332,7 +5459,7 @@ def _render_review(st: Any) -> None:
                     )
 
         submitted = st.form_submit_button(
-            "Confirm the readings and build my plan",
+            "Use these choices and build my shopping plan",
             type="primary",
             use_container_width=True,
         )
@@ -5622,7 +5749,7 @@ def _render_working(st: Any) -> None:
         st.rerun()
         return
 
-    st.header("Building your plan")
+    st.header("Building your shopping plan")
     with st.status(
         "Combining the lists before shopping",
         expanded=True,
@@ -5678,7 +5805,7 @@ def _render_working(st: Any) -> None:
         st.session_state["ui_error_active"] = bool(
             result.extraction_failures
         )
-        status.update(label="Your plan is ready", state="complete")
+        status.update(label="Your shopping plan is ready", state="complete")
     _route_pipeline_result(st, result, child_labels)
 
 
@@ -7618,12 +7745,12 @@ def _render_list_interpretation(
 ) -> None:
     """Separate model reading evidence from deterministic cart arithmetic."""
 
-    st.subheader("Check how the list was read")
+    st.subheader("How your list became the cart")
     st.write(
-        "A language model read and interpreted the supply list. Check the "
-        "exact source lines below. Quantities, package choices, prices, tax, "
-        "fees, and totals are then calculated by deterministic code from the "
-        "confirmed items and simulated catalog."
+        "A language model read the supply list. Below are the original lines "
+        "and the choices you confirmed. Quantities, package choices, prices, "
+        "tax, fees, and totals are calculated by deterministic code from "
+        "those choices and the simulated catalog."
     )
     scopes = document_scope_rows(result, child_labels)
     if scopes:
@@ -7669,6 +7796,16 @@ def _render_summary_headline(
         st.error(
             "Required items are missing because one or more are not in the "
             "cart."
+        )
+    if is_complete and variance >= 0 and copy.register == "warm":
+        st.markdown(
+            (
+                '<div class="rss-plan-ready" role="status">'
+                '<span class="rss-plan-ready__check" aria-hidden="true">✓</span>'
+                "<span>All set — your shopping plan is ready.</span>"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
         )
 
     st.header(copy.summary_heading)
@@ -8182,6 +8319,7 @@ def _apply_custom_css(st: Any) -> None:
         [data-testid="stHorizontalBlock"] {
             align-items: flex-start;
             gap: 1rem;
+            animation: rss-fields-in 160ms ease-out both;
         }
         h1, h2, h3 {
             color: var(--rss-ink);
@@ -8258,10 +8396,15 @@ def _apply_custom_css(st: Any) -> None:
             font-weight: 700;
             line-height: 1.2;
             text-align: center;
+            transition:
+                background-color 160ms ease,
+                color 160ms ease,
+                transform 160ms ease;
         }
         .rss-stepper__item--current {
             background-color: var(--rss-notebook);
             color: #ffffff;
+            animation: rss-step-in 220ms ease-out both;
         }
         .rss-intake-sections {
             display: flex;
@@ -8293,6 +8436,7 @@ def _apply_custom_css(st: Any) -> None:
             border: 2px solid var(--rss-line) !important;
             border-radius: 0.9rem !important;
             background-color: var(--rss-card) !important;
+            animation: rss-card-in 180ms ease-out both;
         }
         [data-testid="stVerticalBlockBorderWrapper"] > div {
             padding: 0.85rem 1.1rem;
@@ -8312,6 +8456,7 @@ def _apply_custom_css(st: Any) -> None:
             border-color: #6e8d9e !important;
         }
         [data-testid="stTextInput"] [data-baseweb="input"],
+        [data-testid="stTextInput"] div:has(> input),
         [data-testid="stNumberInput"] [data-baseweb="input"],
         [data-testid="stSelectbox"] [data-baseweb="select"] > div,
         [data-testid="stMultiSelect"] [data-baseweb="select"] > div,
@@ -8320,9 +8465,27 @@ def _apply_custom_css(st: Any) -> None:
             border: 1.5px solid #6e8d9e !important;
             border-radius: 0.7rem !important;
             background-color: #ffffff !important;
-            box-shadow: none !important;
+            box-shadow: inset 0 0 0 1px rgba(110, 141, 158, 0.24) !important;
+            transition:
+                border-color 130ms ease,
+                box-shadow 130ms ease,
+                transform 130ms ease;
+        }
+        [data-testid="stTextInput"] input {
+            border: 0 !important;
+            outline: 0 !important;
+            background-color: transparent !important;
+        }
+        [data-testid="stTextInput"] [data-baseweb="input"]:hover,
+        [data-testid="stTextInput"] div:has(> input):hover,
+        [data-testid="stNumberInput"] [data-baseweb="input"]:hover,
+        [data-testid="stSelectbox"] [data-baseweb="select"] > div:hover,
+        [data-testid="stMultiSelect"] [data-baseweb="select"] > div:hover,
+        [data-testid="stTextArea"] [data-baseweb="base-input"]:hover {
+            border-color: var(--rss-notebook) !important;
         }
         [data-testid="stTextInput"] [data-baseweb="input"]:focus-within,
+        [data-testid="stTextInput"] div:has(> input):focus-within,
         [data-testid="stNumberInput"] [data-baseweb="input"]:focus-within,
         [data-testid="stSelectbox"] [data-baseweb="select"] > div:focus-within,
         [data-testid="stMultiSelect"] [data-baseweb="select"] > div:focus-within,
@@ -8340,13 +8503,26 @@ def _apply_custom_css(st: Any) -> None:
             min-height: 2.85rem;
             padding-inline: 1.25rem;
             font-weight: 750;
-            transition: background-color 120ms ease, color 120ms ease;
+            transition:
+                background-color 120ms ease,
+                border-color 120ms ease,
+                box-shadow 120ms ease,
+                color 120ms ease,
+                transform 120ms ease;
         }
         .stButton > button:hover,
         .stDownloadButton > button:hover,
         [data-testid="stFormSubmitButton"] > button:hover {
             background-color: var(--rss-soft-yellow);
             color: var(--rss-ink);
+            box-shadow: 0 0.3rem 0.7rem rgba(23, 35, 29, 0.14);
+            transform: translateY(-1px);
+        }
+        .stButton > button:active,
+        .stDownloadButton > button:active,
+        [data-testid="stFormSubmitButton"] > button:active {
+            box-shadow: none;
+            transform: translateY(0);
         }
         .stButton > button[kind="primary"],
         [data-testid="stFormSubmitButton"] > button[kind="primary"] {
@@ -8382,6 +8558,101 @@ def _apply_custom_css(st: Any) -> None:
             margin-bottom: 0.8rem;
             padding: 0.65rem 0;
         }
+        .rss-plan-ready {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            overflow: hidden;
+            margin: 0.4rem 0 0.85rem;
+            padding: 0.75rem 1rem;
+            border: 2px solid var(--rss-chalkboard);
+            border-radius: 0.8rem;
+            background-color: #edf9f2;
+            color: var(--rss-ink);
+            font-weight: 750;
+            animation: rss-celebrate-in 320ms ease-out both;
+        }
+        .rss-plan-ready__check {
+            display: grid;
+            flex: 0 0 2rem;
+            width: 2rem;
+            height: 2rem;
+            place-items: center;
+            border-radius: 50%;
+            background-color: var(--rss-chalkboard);
+            color: #ffffff;
+            animation: rss-check-pop 360ms 80ms ease-out both;
+        }
+        .rss-plan-ready::after {
+            position: absolute;
+            top: 0.35rem;
+            right: 1.2rem;
+            width: 0.42rem;
+            height: 0.42rem;
+            border-radius: 50%;
+            background-color: var(--rss-pencil);
+            box-shadow:
+                1.1rem 0.45rem 0 var(--rss-crayon),
+                2rem -0.05rem 0 var(--rss-notebook),
+                2.8rem 0.65rem 0 var(--rss-chalkboard);
+            content: "";
+            animation: rss-confetti 520ms 100ms ease-out both;
+        }
+        @keyframes rss-card-in {
+            from {
+                opacity: 0;
+                transform: translateY(0.35rem);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        @keyframes rss-step-in {
+            from {transform: scale(0.97);}
+            to {transform: scale(1);}
+        }
+        @keyframes rss-fields-in {
+            from {
+                opacity: 0;
+                transform: translateY(0.2rem);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        @keyframes rss-celebrate-in {
+            from {
+                opacity: 0;
+                transform: translateY(0.45rem);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        @keyframes rss-check-pop {
+            from {
+                opacity: 0;
+                transform: scale(0.7) rotate(-8deg);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1) rotate(0);
+            }
+        }
+        @keyframes rss-confetti {
+            from {
+                opacity: 0;
+                transform: translateY(-0.45rem) rotate(-8deg);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) rotate(0);
+            }
+        }
         @media (max-width: 700px) {
             .block-container {
                 margin-top: 0;
@@ -8415,6 +8686,21 @@ def _apply_custom_css(st: Any) -> None:
             }
             [data-testid="stVerticalBlockBorderWrapper"] > div {
                 padding: 0.8rem;
+            }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                scroll-behavior: auto !important;
+                animation-duration: 0.01ms !important;
+                animation-delay: 0ms !important;
+                transition-duration: 0.01ms !important;
+            }
+            .stButton > button:hover,
+            .stDownloadButton > button:hover,
+            [data-testid="stFormSubmitButton"] > button:hover {
+                transform: none !important;
             }
         }
         </style>
