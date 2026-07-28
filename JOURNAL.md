@@ -942,3 +942,68 @@ changing extraction, matching, approval, or calculation behavior.
 Deploy the branch and check the Students, Budget, and Shopping preferences sections
 at both widths, including one Classroom group selection and one full journey through
 the final plan.
+
+## 2026-07-28 — Compact the intake and repair classroom grade capture
+
+### Objective
+
+Move the first student form above the fold, remove repeated navigation and explanation
+content, and ensure classroom groups retain the grade needed for district-list section
+selection.
+
+### Work completed
+
+- Replaced the progress bar, stage caption, and large journey overview with one compact
+  horizontal stepper used on every screen.
+- Renamed the journey to Your students, Their lists, Check our work, and Your plan.
+- Combined purpose, workflow, simulated-data details, calculation transparency, and
+  privacy information into one collapsed “How Ready, Set, School works” expander.
+- Reframed privacy as a benefit and moved name guidance into the field placeholder.
+- Separated “Who this covers” from Grade. A classroom group now records both its
+  actual grade and its student count.
+- Added a regression test proving a Grade 3 classroom preselects the Grade 3 section
+  of a district-wide document.
+- Removed repeated Students, Budget, and Shopping preferences headings beneath the
+  intake section labels.
+- Removed the intake-section progress bar, tightened page and card spacing, used wider
+  multi-column field layouts, and added explicit borders and focus styles to every
+  text, number, select, multiselect, and text-area control.
+- Kept the four-stage stepper horizontal at phone width while allowing form field
+  columns to stack for readability.
+
+### Decisions made
+
+- Kept the three intake section names as a compact local orientation row, without
+  numbering or another progress bar.
+- Migrated a hot-reloaded legacy Classroom group grade value into the classroom type
+  control and requires the parent to choose the real grade.
+- Kept the full simulation explanation accessible on every screen, but collapsed by
+  default so it does not block the task.
+
+### Problems or limitations
+
+- Streamlit is unavailable on this Windows ARM64 machine, so above-the-fold placement
+  and the input border could not be inspected in a live browser. The reduction in
+  rendered elements, responsive CSS, state conversion, and HTML output were verified
+  through automated tests and Python compilation.
+
+### Files created or changed
+
+- Updated `app.py`, `tests/test_app.py`, and `JOURNAL.md`.
+
+### Testing performed
+
+- Focused application suite: 39 passed.
+- Complete automated suite: 221 passed in 5.21 seconds.
+- Python compilation completed without errors.
+
+### Remaining work
+
+- Confirm the compact stepper, first student row, and control borders in the deployed
+  Streamlit application at laptop and phone widths.
+
+### Recommended next step
+
+Deploy the branch and verify that the first student fields are visible without
+scrolling on a normal laptop, then select a Grade 3 classroom group and confirm its
+district-list section is preselected.

@@ -202,10 +202,10 @@ SCREEN_ORDER = (
     "summary",
 )
 JOURNEY_STAGES = (
-    "Set up students and budget",
-    "Add supply lists",
-    "Review what we read",
-    "Approve decisions and get your plan",
+    "Your students",
+    "Their lists",
+    "Check our work",
+    "Your plan",
 )
 SCREEN_PHASES: Mapping[str, tuple[str, str]] = {
     "intake": ("1", JOURNEY_STAGES[0]),
@@ -220,7 +220,6 @@ GRADE_OPTIONS = (
     "Pre-K",
     "Kindergarten",
     *(f"Grade {grade}" for grade in range(1, 13)),
-    "Classroom group",
 )
 SHOPPING_MODES: Mapping[str, str] = {
     "Lowest landed cost": "budget",
@@ -447,8 +446,7 @@ def screen_phase_label(screen: str, substep: str | None = None) -> str:
     """Return the canonical four-stage journey label for one screen."""
 
     del substep
-    stage, default_substep = SCREEN_PHASES[screen]
-    return f"Stage {stage} of 4 · {default_substep}"
+    return SCREEN_PHASES[screen][1]
 
 
 def progress_narration(
@@ -2807,7 +2805,6 @@ def _initialize_state(st: Any) -> None:
         "demo_mode": False,
         "child_count": 1,
         "intake_step": 1,
-        "walkthrough_dismissed": False,
         "budget_mode_label": "One combined budget",
         "combined_budget_text": DEFAULT_BUDGET_TEXT,
         "shopping_preference_label": next(iter(SHOPPING_MODES)),
@@ -2863,24 +2860,31 @@ def clear_session_data(st: Any) -> None:
 
 
 def _persistent_notice(st: Any) -> None:
-    st.caption(
-        "Simulated catalog and fictional stores · Checkout collects no payment."
-    )
-    with st.expander("How this works and what is simulated"):
+    with st.expander(
+        "How Ready, Set, School works",
+        expanded=False,
+    ):
         st.write(
-            "A language model reads and interprets the supply list. "
-            "Deterministic code calculates quantities, package choices, "
-            "prices, fees, tax, and totals from the confirmed interpretation."
+            "Ready, Set, School reads each supply list and proposes a shopping "
+            "plan for you to check."
         )
         st.write(
-            "Catalog products, prices, stock, fees, and stores are simulated. "
-            "Store distances use a notional home location; no address is "
-            "collected and no geocoding occurs. The radius applies to pickup "
-            "trips only, never delivery."
+            "The four stops are simple: add your students, add their lists, "
+            "check how the lists were understood, and review your plan."
         )
         st.write(
-            "Checkout is simulated, no payment information is collected, and "
-            "nothing is saved after the session ends."
+            "A language model interprets the list. Deterministic code then "
+            "calculates quantities, package choices, prices, fees, tax, and "
+            "totals from the interpretation you confirm."
+        )
+        st.write(
+            "The catalog, stores, prices, stock, fees, and distances are "
+            "simulated for this demonstration. Distance uses a notional home "
+            "location, and a pickup radius never limits delivery."
+        )
+        st.write(
+            "We don't store anything about your kids — close the tab and it's "
+            "gone. Checkout is a no-payment simulation."
         )
 
 
@@ -2889,13 +2893,30 @@ def _screen_progress(
     screen: str,
     substep: str | None = None,
 ) -> None:
-    """Show the four required parent-facing workflow stages."""
+    """Show one compact four-stage parent journey on every screen."""
 
-    phase, label = SCREEN_PHASES[screen]
-    st.progress(int(phase) / 4)
-    st.caption(f"Stage {phase} of 4 · {label}")
-    if substep and substep != label:
-        st.caption(substep.capitalize())
+    del substep
+    current_stage = int(SCREEN_PHASES[screen][0])
+    stages = "".join(
+        (
+            (
+                '<span class="rss-stepper__item rss-stepper__item--current" '
+                'aria-current="step">'
+            )
+            if index == current_stage
+            else '<span class="rss-stepper__item">'
+        )
+        + label
+        + "</span>"
+        for index, label in enumerate(JOURNEY_STAGES, start=1)
+    )
+    st.markdown(
+        (
+            '<nav class="rss-stepper" aria-label="Shopping plan progress">'
+            f"{stages}</nav>"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def _render_development_diagnostic(st: Any) -> None:
@@ -2991,10 +3012,7 @@ def _intake_students_from_state(
         entity_label = str(
             state.get(f"entity_type_{index}", "One student")
         )
-        is_classroom = (
-            grade == "Classroom group"
-            or entity_label == "A classroom group"
-        )
+        is_classroom = entity_label == "A classroom group"
         students.append(
             {
                 "child_id": f"child-{index + 1}",
@@ -3017,35 +3035,6 @@ def _intake_students_from_state(
     return tuple(students)
 
 
-def _render_intake_walkthrough(st: Any) -> None:
-    """Show the single dismissible introduction and canonical journey."""
-
-    if st.session_state.get("walkthrough_dismissed"):
-        return
-    with st.container(border=True):
-        st.write(
-            "Read a school-supply list, check what was understood, and get a "
-            "shopping plan ready for your approval."
-        )
-        journey = "".join(
-            (
-                '<ol class="rss-journey" aria-label="How it works">',
-                *(
-                    f"<li><strong>{index}</strong><span>{label}</span></li>"
-                    for index, label in enumerate(JOURNEY_STAGES, start=1)
-                ),
-                "</ol>",
-            )
-        )
-        st.markdown(
-            journey,
-            unsafe_allow_html=True,
-        )
-        if st.button("Hide this overview", key="dismiss_walkthrough"):
-            st.session_state["walkthrough_dismissed"] = True
-            st.rerun()
-
-
 def _render_intake_step_progress(st: Any, step: int) -> None:
     """Keep the parent oriented within the three-part setup."""
 
@@ -3054,25 +3043,28 @@ def _render_intake_step_progress(st: Any, step: int) -> None:
         "Budget",
         "Shopping preferences",
     )
-    st.progress(step / len(labels))
-    columns = st.columns(len(labels))
-    for index, (column, label) in enumerate(zip(columns, labels), start=1):
-        if index == step:
-            column.markdown(f"**{label}**")
-        else:
-            column.caption(label)
+    sections = "".join(
+        (
+            '<span class="rss-intake-sections__item '
+            'rss-intake-sections__item--current">'
+            if index == step
+            else '<span class="rss-intake-sections__item">'
+        )
+        + label
+        + "</span>"
+        for index, label in enumerate(labels, start=1)
+    )
+    st.markdown(
+        f'<div class="rss-intake-sections">{sections}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _render_student_step(st: Any) -> None:
     """Render guided FR-01/FR-05 student intake with immediate validation."""
 
-    st.subheader("Students")
-    st.write(
-        "Add each student whose list should be included in this shopping plan."
-    )
     st.caption(
-        "A first name or nickname is enough. Nothing is saved after this "
-        "session."
+        "Add each student whose list should be included in this shopping plan."
     )
     student_count = int(
         st.number_input(
@@ -3092,9 +3084,13 @@ def _render_student_step(st: Any) -> None:
         name_key = f"child_label_{index}"
         grade_key = f"child_grade_{index}"
         entity_key = f"entity_type_{index}"
-        st.session_state.setdefault(name_key, f"Student {index + 1}")
+        st.session_state.setdefault(name_key, "")
         st.session_state.setdefault(entity_key, "One student")
         existing_grade = st.session_state.get(grade_key)
+        if existing_grade == "Classroom group":
+            st.session_state[entity_key] = "A classroom group"
+            st.session_state[grade_key] = None
+            existing_grade = None
         if existing_grade not in (None, *GRADE_OPTIONS):
             normalized = str(existing_grade).strip().casefold()
             if normalized in {"pk", "pre-k", "prekindergarten"}:
@@ -3107,19 +3103,37 @@ def _render_student_step(st: Any) -> None:
                 st.session_state[grade_key] = None
         current_name = str(st.session_state.get(name_key, "")).strip()
         with st.container(border=True):
-            st.subheader(current_name or f"Student {index + 1}")
-            name_column, grade_column = st.columns(2)
+            st.markdown(
+                "**"
+                + escape_streamlit_dollars(
+                    current_name or f"Student {index + 1}"
+                )
+                + "**"
+            )
+            entity_type = str(st.session_state.get(entity_key, "One student"))
+            field_widths = (
+                [2.2, 1.2, 1.35, 1.15]
+                if entity_type == "A classroom group"
+                else [2.2, 1.2, 1.35]
+            )
+            field_columns = st.columns(field_widths)
+            name_column, grade_column, entity_column = field_columns[:3]
             name = name_column.text_input(
                 "Student name or nickname",
                 key=name_key,
-                placeholder="Example: Sam",
+                placeholder="Maya, or just 'Grade 2'",
             )
             grade = grade_column.selectbox(
-                "Grade or group",
+                "Grade",
                 GRADE_OPTIONS,
                 index=None,
                 key=grade_key,
                 placeholder="Select a grade",
+            )
+            entity_type = entity_column.selectbox(
+                "Who this covers",
+                ("One student", "A classroom group"),
+                key=entity_key,
             )
             grade_text = "" if grade is None else str(grade)
             errors = student_input_errors(name, grade_text)
@@ -3131,17 +3145,11 @@ def _render_student_step(st: Any) -> None:
                 f"{name.strip() or f'Student {index + 1}'}: {error}"
                 for error in errors
             )
-            entity_type = (
-                "A classroom group"
-                if grade_text == "Classroom group"
-                else "One student"
-            )
-            st.session_state[entity_key] = entity_type
             if entity_type == "A classroom group":
                 count_key = f"student_count_{index}"
                 st.session_state.setdefault(count_key, 20)
-                st.number_input(
-                    "Students in this classroom",
+                field_columns[3].number_input(
+                    "Students in group",
                     min_value=1,
                     max_value=MAX_CLASSROOM_STUDENTS,
                     step=1,
@@ -3165,8 +3173,7 @@ def _render_budget_step(st: Any) -> None:
         st.session_state,
         int(st.session_state["child_count"]),
     )
-    st.subheader("Budget")
-    st.write(
+    st.caption(
         "Use one amount for the whole plan, or set a separate amount for "
         "each student."
     )
@@ -3250,8 +3257,7 @@ def _render_preferences_step(st: Any) -> None:
         st.session_state,
         int(st.session_state["child_count"]),
     )
-    st.subheader("Shopping preferences")
-    st.write(
+    st.caption(
         "Choose what matters most. The cart can compare total cost, favor "
         "one stop, or use only stores you select."
     )
@@ -5117,7 +5123,7 @@ def _render_review(st: Any) -> None:
         flag_anchor_by_group[group.group_id] = anchor
         flag_groups_by_child.setdefault(anchor, []).append(group)
 
-    st.header("Review what we read")
+    st.header("Check our work")
     for child in children:
         child_id = str(child["child_id"])
         envelope = extractions.get(child_id)
@@ -8161,9 +8167,9 @@ def _apply_custom_css(st: Any) -> None:
         }
         .block-container {
             max-width: 1040px;
-            margin-top: 1.25rem;
+            margin-top: 0.6rem;
             margin-bottom: 3rem;
-            padding: 2rem 2.35rem 4rem;
+            padding: 1.25rem 2rem 3rem;
             border: 3px solid var(--rss-notebook);
             border-top: 0.65rem solid var(--rss-pencil);
             border-radius: 1.25rem;
@@ -8171,11 +8177,11 @@ def _apply_custom_css(st: Any) -> None:
             box-shadow: 0 0.8rem 2rem rgba(23, 35, 29, 0.16);
         }
         [data-testid="stVerticalBlock"] {
-            gap: 1.1rem;
+            gap: 0.75rem;
         }
         [data-testid="stHorizontalBlock"] {
             align-items: flex-start;
-            gap: 1.4rem;
+            gap: 1rem;
         }
         h1, h2, h3 {
             color: var(--rss-ink);
@@ -8204,15 +8210,15 @@ def _apply_custom_css(st: Any) -> None:
         .rss-title__set {color: var(--rss-notebook);}
         .rss-title__school {color: var(--rss-chalkboard);}
         h2 {
-            margin-top: 2.35rem !important;
-            margin-bottom: 1rem !important;
+            margin-top: 1.75rem !important;
+            margin-bottom: 0.8rem !important;
             padding-left: 0.9rem;
             border-left: 0.45rem solid var(--rss-pencil);
         }
         h3 {
             color: var(--rss-notebook);
-            margin-top: 1.5rem !important;
-            margin-bottom: 0.75rem !important;
+            margin-top: 1.1rem !important;
+            margin-bottom: 0.6rem !important;
         }
         p, label, [data-testid="stCaptionContainer"] {
             color: var(--rss-ink);
@@ -8226,48 +8232,53 @@ def _apply_custom_css(st: Any) -> None:
             font-weight: 525;
         }
         [data-testid="stWidgetLabel"] {
-            min-height: 1.8rem;
+            min-height: 1.55rem;
             display: flex;
             align-items: flex-end;
         }
-        .rss-journey {
+        .rss-stepper {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 0.85rem;
-            margin: 1.15rem 0 0.25rem;
-            padding: 0;
-            list-style: none;
-        }
-        .rss-journey li {
-            display: flex;
-            align-items: center;
-            gap: 0.65rem;
-            min-height: 4.2rem;
-            padding: 0.8rem;
+            gap: 0.4rem;
+            margin: 0.4rem 0 0.25rem;
+            padding: 0.35rem;
             border: 2px solid var(--rss-line);
-            border-radius: 0.8rem;
+            border-radius: 0.75rem;
             background-color: var(--rss-card);
-            color: var(--rss-ink);
-            line-height: 1.3;
         }
-        .rss-journey strong {
+        .rss-stepper__item {
             display: grid;
-            flex: 0 0 2rem;
-            width: 2rem;
-            height: 2rem;
-            place-items: center;
-            border-radius: 50%;
+            align-items: center;
+            justify-items: center;
+            min-height: 2.35rem;
+            padding: 0.4rem 0.55rem;
+            border-radius: 0.5rem;
+            color: var(--rss-ink);
+            font-size: 0.88rem;
+            font-weight: 700;
+            line-height: 1.2;
+            text-align: center;
+        }
+        .rss-stepper__item--current {
             background-color: var(--rss-notebook);
             color: #ffffff;
         }
-        .rss-journey li:nth-child(2) strong {
-            background-color: var(--rss-crayon);
+        .rss-intake-sections {
+            display: flex;
+            gap: 1.5rem;
+            align-items: center;
+            margin: 0.45rem 0 0.15rem;
+            border-bottom: 2px solid var(--rss-line);
         }
-        .rss-journey li:nth-child(3) strong {
-            background-color: var(--rss-chalkboard);
+        .rss-intake-sections__item {
+            padding: 0.35rem 0 0.5rem;
+            color: var(--rss-muted);
+            font-weight: 700;
         }
-        .rss-journey li:nth-child(4) strong {
-            background-color: #855000;
+        .rss-intake-sections__item--current {
+            margin-bottom: -2px;
+            border-bottom: 4px solid var(--rss-crayon);
+            color: var(--rss-ink);
         }
         [data-testid="stMetric"] {
             border: 2px solid var(--rss-line);
@@ -8284,7 +8295,7 @@ def _apply_custom_css(st: Any) -> None:
             background-color: var(--rss-card) !important;
         }
         [data-testid="stVerticalBlockBorderWrapper"] > div {
-            padding: 1.25rem 1.4rem;
+            padding: 0.85rem 1.1rem;
         }
         [data-testid="stNotification"] {
             border-radius: 0.8rem;
@@ -8300,10 +8311,24 @@ def _apply_custom_css(st: Any) -> None:
             background-color: #ffffff !important;
             border-color: #6e8d9e !important;
         }
-        [data-testid="stTextInput"] input:focus,
-        [data-testid="stNumberInput"] input:focus {
+        [data-testid="stTextInput"] [data-baseweb="input"],
+        [data-testid="stNumberInput"] [data-baseweb="input"],
+        [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+        [data-testid="stMultiSelect"] [data-baseweb="select"] > div,
+        [data-testid="stTextArea"] [data-baseweb="base-input"] {
+            min-height: 2.85rem;
+            border: 1.5px solid #6e8d9e !important;
+            border-radius: 0.7rem !important;
+            background-color: #ffffff !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stTextInput"] [data-baseweb="input"]:focus-within,
+        [data-testid="stNumberInput"] [data-baseweb="input"]:focus-within,
+        [data-testid="stSelectbox"] [data-baseweb="select"] > div:focus-within,
+        [data-testid="stMultiSelect"] [data-baseweb="select"] > div:focus-within,
+        [data-testid="stTextArea"] [data-baseweb="base-input"]:focus-within {
             border-color: var(--rss-notebook) !important;
-            box-shadow: 0 0 0 0.18rem rgba(47, 111, 159, 0.16) !important;
+            box-shadow: 0 0 0 0.18rem rgba(0, 110, 174, 0.16) !important;
         }
         .stButton > button,
         .stDownloadButton > button,
@@ -8371,18 +8396,25 @@ def _apply_custom_css(st: Any) -> None:
                 gap: 0.16em;
                 font-size: clamp(2rem, 8.4vw, 2.8rem) !important;
             }
-            .rss-journey {
-                grid-template-columns: 1fr;
+            .rss-stepper {
+                gap: 0.2rem;
+                padding: 0.25rem;
             }
-            .rss-journey li {
-                min-height: 0;
-                padding: 0.7rem 0.8rem;
+            .rss-stepper__item {
+                min-height: 2.65rem;
+                padding: 0.35rem 0.2rem;
+                font-size: 0.72rem;
             }
             [data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap;
                 gap: 0.85rem;
             }
+            [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+                flex: 1 1 100% !important;
+                width: 100% !important;
+            }
             [data-testid="stVerticalBlockBorderWrapper"] > div {
-                padding: 1rem;
+                padding: 0.8rem;
             }
         }
         </style>
@@ -8432,8 +8464,6 @@ def main() -> None:
         progress_screen,
         st.session_state.get("progress_substep"),
     )
-    if screen == "intake":
-        _render_intake_walkthrough(st)
     _persistent_notice(st)
     {
         "intake": _render_intake,

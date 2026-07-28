@@ -170,20 +170,38 @@ def test_student_fields_validate_as_the_parent_types() -> None:
         "Grade 10",
         "Grade 11",
         "Grade 12",
-        "Classroom group",
     )
 
     classroom = app._intake_students_from_state(
         {
             "child_label_0": "Ms. Rivera's class",
-            "child_grade_0": "Classroom group",
-            "entity_type_0": "One student",
+            "child_grade_0": "Grade 3",
+            "entity_type_0": "A classroom group",
             "student_count_0": 24,
         },
         1,
     )
     assert classroom[0]["entity_type"] == "classroom"
+    assert classroom[0]["grade"] == "Grade 3"
     assert classroom[0]["student_count"] == 24
+    structure = DocumentStructureEnvelope(
+        sections=(
+            DocumentSection(
+                section_id="grade-3",
+                label="Third Grade",
+                grades=("Grade 3",),
+            ),
+            DocumentSection(
+                section_id="grade-4",
+                label="Fourth Grade",
+                grades=("Grade 4",),
+            ),
+        )
+    )
+    assert app.section_picker_default_ids(
+        structure,
+        classroom[0]["grade"],
+    ) == ("grade-3",)
 
 
 def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
@@ -199,18 +217,21 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert 'st.session_state["demo_mode"] = False' in intake_source
     assert "Use stable offline demo mode" not in intake_source
     assert "Use stable offline demo mode" in diagnostic_source
-    assert 'st.subheader("Students")' in student_source
+    assert 'st.subheader("Students")' not in student_source
     assert "Step 1" not in student_source
     assert "Student name or nickname" in student_source
+    assert "Maya, or just 'Grade 2'" in student_source
     assert "GRADE_OPTIONS" in student_source
     assert "Select a grade" in student_source
+    assert "Who this covers" in student_source
+    assert "Students in group" in student_source
     assert '"Shopping for"' not in student_source
     assert "disabled=bool(immediate_errors)" in student_source
-    assert 'st.subheader("Budget")' in budget_source
+    assert 'st.subheader("Budget")' not in budget_source
     assert "Step 2" not in budget_source
     assert "A budget for each student" in budget_source
     assert "disabled=bool(budget_errors)" in budget_source
-    assert 'st.subheader("Shopping preferences")' in preferences_source
+    assert 'st.subheader("Shopping preferences")' not in preferences_source
     assert "Step 3" not in preferences_source
     assert '"Shopping preferences"' in preferences_source
     assert "Advanced shopping and tax options" in preferences_source
@@ -226,27 +247,34 @@ def test_visual_system_keeps_notebook_pattern_behind_opaque_cards() -> None:
     assert "--rss-chalkboard" in css_source
     assert ".block-container" in css_source
     assert "background-color: var(--rss-card)" in css_source
-    assert "grid-template-columns: 1fr" in css_source
+    assert ".rss-stepper" in css_source
+    assert '.rss-stepper__item--current' in css_source
+    assert '[data-baseweb="input"]' in css_source
+    assert "border: 1.5px solid" in css_source
     assert "@media (max-width: 700px)" in css_source
 
 
-def test_landing_has_one_introduction_and_colored_identity() -> None:
-    """The title, purpose, journey, and limitation copy each have one job."""
+def test_landing_keeps_context_in_one_collapsed_explainer() -> None:
+    """Purpose, process, limitations, and privacy share one compact place."""
 
     title_source = inspect.getsource(app._render_app_title)
-    intro_source = inspect.getsource(app._render_intake_walkthrough)
-    intake_source = inspect.getsource(app._render_intake)
     notice_source = inspect.getsource(app._persistent_notice)
+    main_source = inspect.getsource(app.main)
 
     assert app.APP_TAGLINE == "Sorted before the first bell."
     assert "rss-title__ready" in title_source
     assert "rss-title__set" in title_source
     assert "rss-title__school" in title_source
-    assert "JOURNEY_STAGES" in intro_source
-    assert "Set up your shopping plan" not in intake_source
-    assert "From a school list to a shopping plan" not in intro_source
-    assert "Simulated catalog and fictional stores" in notice_source
-    assert "How this works and what is simulated" in notice_source
+    assert "How Ready, Set, School works" in notice_source
+    assert "expanded=False" in notice_source
+    assert "The four stops are simple" in notice_source
+    assert "A language model interprets the list" in notice_source
+    assert "The catalog, stores, prices, stock, fees, and distances are" in (
+        notice_source
+    )
+    assert "We don't store anything about your kids" in notice_source
+    assert "_render_intake_walkthrough" not in main_source
+    assert not hasattr(app, "_render_intake_walkthrough")
     assert "tax holidays" not in notice_source.casefold()
     assert "state-specific" not in notice_source.casefold()
 
@@ -327,28 +355,45 @@ def test_shortfall_state_renders_the_plain_summary_headings() -> None:
 def test_visible_navigation_uses_four_required_stages() -> None:
     """Every internal screen maps to one of the four required stages."""
 
-    assert app.screen_phase_label("intake") == (
-        "Stage 1 of 4 · Set up students and budget"
+    intake_sections_source = inspect.getsource(
+        app._render_intake_step_progress
     )
-    assert app.screen_phase_label("lists") == (
-        "Stage 2 of 4 · Add supply lists"
+    assert app.JOURNEY_STAGES == (
+        "Your students",
+        "Their lists",
+        "Check our work",
+        "Your plan",
     )
+    assert app.screen_phase_label("intake") == "Your students"
+    assert app.screen_phase_label("lists") == "Their lists"
     assert (
         app.screen_phase_label("working", "reading the lists")
-        == "Stage 4 of 4 · Approve decisions and get your plan"
+        == "Your plan"
     )
-    assert app.screen_phase_label("sections") == (
-        "Stage 2 of 4 · Add supply lists"
-    )
-    assert app.screen_phase_label("review") == (
-        "Stage 3 of 4 · Review what we read"
-    )
-    assert app.screen_phase_label("approval") == (
-        "Stage 4 of 4 · Approve decisions and get your plan"
-    )
-    assert app.screen_phase_label("summary") == (
-        "Stage 4 of 4 · Approve decisions and get your plan"
-    )
+    assert app.screen_phase_label("sections") == "Their lists"
+    assert app.screen_phase_label("review") == "Check our work"
+    assert app.screen_phase_label("approval") == "Your plan"
+    assert app.screen_phase_label("summary") == "Your plan"
+    assert "st.progress" not in intake_sections_source
+    assert "rss-intake-sections" in intake_sections_source
+
+    rendered: list[tuple[str, bool]] = []
+
+    class StepperStreamlit:
+        @staticmethod
+        def markdown(value: str, unsafe_allow_html: bool) -> None:
+            rendered.append((value, unsafe_allow_html))
+
+    app._screen_progress(StepperStreamlit(), "review")
+
+    assert len(rendered) == 1
+    assert rendered[0][1] is True
+    assert "rss-stepper" in rendered[0][0]
+    assert rendered[0][0].count('aria-current="step"') == 1
+    assert (
+        'rss-stepper__item rss-stepper__item--current" '
+        'aria-current="step">Check our work'
+    ) in rendered[0][0]
 
 
 def test_resolved_assumptions_do_not_create_a_needs_attention_heading() -> None:
