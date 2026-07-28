@@ -708,3 +708,91 @@ grade already entered at intake.
 Open each real district PDF in the deployed app and verify that Machias and New
 School show a simple grade choice while Milford shows only the multilingual context
 needed to explain its hidden translated copies.
+
+## 2026-07-28 — Rebuild the extracted-item review
+
+### Objective
+
+Replace the wide technical extraction grid with a parent-facing comparison of exact
+source text and plain-language interpretation while preserving mandatory review,
+secondary editing, real-PDF evidence, and multi-child behavior.
+
+### Work completed
+
+- Replaced the primary `data_editor` review path with compact rows ordered as
+  “What the list said,” “What we understood,” and “Confirm.”
+- Kept the exact original source line at the front of every purchase row.
+- Added plain interpretations such as “24 Ticonderoga pencils, brand required.”
+- Moved item, quantity, unit, package size, brand, equivalent-brand permission,
+  attributes, optional status, individual/shared scope, already-owned, parent note,
+  and delete controls into a collapsed per-row “More detail” expander.
+- Removed internal identifiers and raw confidence decimals from the visible review.
+- Added `clear`, `worth checking`, and `uncertain` confidence bands while retaining
+  numeric confidence internally for BR-11.
+- Accepted clear rows through the single page submit action; only ambiguous or
+  low-confidence rows require an explicit checkbox.
+- Added concrete uncertainty explanations for quantity ranges, missing package
+  counts, missing quantities, and low-confidence readings.
+- Deduplicated identical uncertainty confirmations across children and labelled the
+  shared row with every affected child label.
+- Deduplicated identical conditional questions across children and expanded one
+  parent answer back to every affected source requirement.
+- Grouped purchase rows by the parent-entered child label with flagged rows first.
+- Moved non-purchasable directions into one collapsed “Notes from the teacher”
+  section, deduplicated across children.
+- Moved district-provided supplies into a separate collapsed section and kept them
+  excluded from cart scope.
+- Preserved selected and ignored document sections, uninterpreted content, skipped
+  content, conditional choices, exact source evidence, and individual/shared scope.
+- Added an “Add a missing item” secondary form for each child.
+- Added a shared district-document intake option. One upload now creates a separate
+  child-scoped list input for each entry, with one section choice per child.
+- Reused document structure detection for identical shared uploads so the same PDF
+  is inspected once rather than once per child.
+- Preserved quantity-range metadata through the editable review boundary.
+
+### Decisions made
+
+- Keep conditional questions above purchase rows because they determine which
+  mutually exclusive rows can enter cart scope.
+- Anchor a cross-child ambiguity once under the first affected child and mark every
+  affected label rather than asking the same question twice.
+- State explicitly that product matching has not run on the extraction-review
+  screen; unmatched products are named later when matching exists.
+- Require per-ambiguity confirmation rather than retaining the former global
+  unresolved-item bypass.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 machine, so the final visual
+  layout could not be opened locally. The UI path was verified through pure
+  presentation helpers, source-structure tests, compilation, and pytest.
+- Shared-document intake currently applies one document to all entries in the
+  session. Selecting an arbitrary subset of children for one shared document remains
+  a possible refinement.
+
+### Files created or changed
+
+- Updated `agent/schema.py`, `agent/review.py`, `agent/rules.py`, and `app.py`.
+- Updated `tests/test_review.py` and `tests/test_app.py`.
+- Updated `JOURNAL.md`.
+
+### Testing performed
+
+- Focused review and application tests: 48 passed.
+- Complete automated suite: 215 passed in 4.63 seconds.
+- Python compilation completed without errors.
+- Git diff validation reported only Windows line-ending notices.
+
+### Remaining work
+
+- Review the new compact row layout in the deployed Streamlit application at desktop
+  and narrow presentation widths.
+- Run one two-child district-PDF session to confirm the upload-once and per-child
+  section-selection wording with live model output.
+
+### Recommended next step
+
+Deploy this branch, open the shared Machias document for Grade 2 and Grade 5, and
+verify that one upload produces two grade choices, one deduplicated bag question when
+applicable, and compact source-versus-understanding rows without horizontal scrolling.

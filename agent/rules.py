@@ -57,6 +57,7 @@ BUDGET_ALTERNATIVE_PLAN_COUNT = 2  # At most two whole-plan alternatives.
 BUDGET_PLAN_CANDIDATE_LIMIT = 50  # Bound deterministic bundle validation work.
 
 CONFIDENCE_FLOOR = Decimal("0.7")  # BR-11: extraction/match review threshold.
+CLEAR_EXTRACTION_CONFIDENCE = Decimal("0.9")  # Parent-facing confidence-band boundary.
 CORRECTED_EXTRACTION_CONFIDENCE = Decimal("0.69")  # BR-11: source-proven extraction repairs route to review.
 MAXIMUM_MATCH_CONFIDENCE = Decimal("1.0")  # FR-18: exact structured match.
 MINIMUM_MATCH_CONFIDENCE = Decimal("0.0")  # FR-18: missing judgment is blocked.

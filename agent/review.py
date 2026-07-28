@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from agent.rules import CONFIDENCE_FLOOR
+from agent.rules import (
+    CLEAR_EXTRACTION_CONFIDENCE,
+    CONFIDENCE_FLOOR,
+    STANDARD_CONTAINER_CONTENT_COUNTS,
+    STANDARD_PACK_COUNTS,
+)
 from agent.schema import (
     ExtractionEnvelope,
     Requirement,
@@ -31,6 +36,257 @@ class ConditionalReviewQuestion:
     prompt: str
     options: tuple[ConditionalReviewOption, ...]
     selected_value: str | None
+
+
+@dataclass(frozen=True)
+class DeduplicatedConditionalQuestion:
+    """One repeated conditional decision shared across child lists."""
+
+    group_id: str
+    prompt: str
+    child_ids: tuple[str, ...]
+    option_labels: tuple[str, ...]
+    questions: tuple[ConditionalReviewQuestion, ...]
+    selected_label: str | None
+
+
+@dataclass(frozen=True)
+class ReviewFlagGroup:
+    """One plain-language uncertainty confirmation shared by matching rows."""
+
+    group_id: str
+    child_ids: tuple[str, ...]
+    row_ids: tuple[str, ...]
+    representative_id: str
+    messages: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TeacherNoteGroup:
+    """One non-purchasable source note and every child it affects."""
+
+    source_text: str
+    child_ids: tuple[str, ...]
+
+
+def confidence_band(confidence: float) -> str:
+    """Replace model-score false precision with a parent-facing band."""
+
+    if confidence < float(CONFIDENCE_FLOOR):
+        return "uncertain"
+    if confidence < float(CLEAR_EXTRACTION_CONFIDENCE):
+        return "worth checking"
+    return "clear"
+
+
+def _quantity_phrase(quantity: int | None, unit: str) -> str:
+    """Return a concise quantity-and-unit phrase for an explanation."""
+
+    if quantity is None:
+        return "a usable quantity"
+    unit_label = {
+        "each": "item",
+        "pack": "pack",
+        "box": "box",
+        "ream": "ream",
+    }.get(unit, unit)
+    if quantity != 1:
+        unit_label += "es" if unit_label.endswith("x") else "s"
+    return f"{quantity} {unit_label}"
+
+
+def _range_phrase(lower: int, upper: int, unit: str) -> str:
+    """Return a compact range such as `2–3 boxes`."""
+
+    upper_phrase = _quantity_phrase(upper, unit)
+    upper_unit = upper_phrase.split(" ", 1)[1]
+    return f"{lower}–{upper} {upper_unit}"
+
+
+def _assumed_package_unit(item_name: str) -> str:
+    """Name the units parents expect inside an inferred package."""
+
+    return {
+        "notebook_paper": "sheets",
+        "cardstock": "sheets",
+        "tissues": "tissues",
+        "pencils": "pencils",
+        "colored_pencils": "colored pencils",
+        "crayons": "crayons",
+        "markers": "markers",
+        "dry_erase_markers": "markers",
+        "permanent_markers": "markers",
+        "pens": "pens",
+        "highlighters": "highlighters",
+        "erasers": "erasers",
+        "glue_sticks": "glue sticks",
+        "sticky_notes": "pads",
+    }.get(item_name, "items")
+
+
+def review_issue_explanations(
+    row: SupplyItemReview,
+) -> tuple[str, ...]:
+    """Translate review flags into concrete parent-facing explanations."""
+
+    messages: list[str] = []
+    for issue in row.issue_codes:
+        if issue == "conditional_item":
+            continue
+        if issue == "missing_quantity":
+            messages.append(
+                "The list did not give a usable quantity."
+            )
+        elif issue == "low_confidence":
+            messages.append(
+                "This reading is uncertain. Compare it with the original line."
+            )
+        elif issue == "quantity_range":
+            if (
+                row.required_quantity is not None
+                and row.quantity_max is not None
+            ):
+                messages.append(
+                    "The list gave a range of "
+                    f"{_range_phrase(row.required_quantity, row.quantity_max, row.unit)}. "
+                    f"We chose {row.required_quantity}."
+                )
+            else:
+                messages.append(
+                    "The list gave a quantity range. We used its lower end."
+                )
+        elif issue == "ambiguous_package_size":
+            assumed_count = (
+                STANDARD_PACK_COUNTS.get(row.item_name)
+                or STANDARD_CONTAINER_CONTENT_COUNTS.get(row.item_name)
+            )
+            if assumed_count is None:
+                messages.append(
+                    "The list did not say how many items were in the package."
+                )
+            else:
+                messages.append(
+                    "The list did not say how many "
+                    f"{_assumed_package_unit(row.item_name)} were in the "
+                    f"package. We assumed {assumed_count}."
+                )
+        elif issue == "ambiguous_item":
+            messages.append(
+                "The item name could not be interpreted clearly."
+            )
+        else:
+            messages.append(
+                issue.replace("_", " ").capitalize() + "."
+            )
+    return tuple(dict.fromkeys(messages))
+
+
+def review_flag_groups(
+    rows: Iterable[SupplyItemReview],
+) -> tuple[ReviewFlagGroup, ...]:
+    """Deduplicate identical uncertainty questions across child lists."""
+
+    grouped: dict[tuple[object, ...], list[SupplyItemReview]] = {}
+    for row in rows:
+        messages = review_issue_explanations(row)
+        if (
+            not messages
+            or not row.is_purchasable
+            or row.provided_by_school
+            or row.review_status == "deleted"
+        ):
+            continue
+        signature: tuple[object, ...] = (
+            row.item_name,
+            row.required_quantity,
+            row.unit,
+            row.package_size,
+            row.brand,
+            row.brand_required,
+            row.size,
+            row.color,
+            row.optional,
+            row.supply_scope,
+            messages,
+        )
+        grouped.setdefault(signature, []).append(row)
+
+    groups: list[ReviewFlagGroup] = []
+    for index, members in enumerate(grouped.values(), start=1):
+        groups.append(
+            ReviewFlagGroup(
+                group_id=f"review-flag-{index}",
+                child_ids=tuple(
+                    dict.fromkeys(row.child_id for row in members)
+                ),
+                row_ids=tuple(row.review_id for row in members),
+                representative_id=members[0].review_id,
+                messages=review_issue_explanations(members[0]),
+            )
+        )
+    return tuple(groups)
+
+
+def teacher_note_groups(
+    rows: Iterable[SupplyItemReview],
+) -> tuple[TeacherNoteGroup, ...]:
+    """Deduplicate non-purchasable teacher directions across children."""
+
+    grouped: dict[str, list[SupplyItemReview]] = {}
+    original_text: dict[str, str] = {}
+    for row in rows:
+        if (
+            row.is_purchasable
+            or row.provided_by_school
+            or row.condition is not None
+            or row.review_status == "deleted"
+        ):
+            continue
+        signature = " ".join(row.source_text.casefold().split())
+        grouped.setdefault(signature, []).append(row)
+        original_text.setdefault(signature, row.source_text)
+    return tuple(
+        TeacherNoteGroup(
+            source_text=original_text[signature],
+            child_ids=tuple(
+                dict.fromkeys(row.child_id for row in members)
+            ),
+        )
+        for signature, members in grouped.items()
+    )
+
+
+def apply_review_confirmations(
+    rows: Iterable[SupplyItemReview],
+    flag_groups: Iterable[ReviewFlagGroup],
+    confirmed_group_ids: Iterable[str],
+) -> tuple[SupplyItemReview, ...]:
+    """Accept clear rows by default and require confirmation only for flags."""
+
+    confirmed_ids = frozenset(confirmed_group_ids)
+    group_by_row_id = {
+        row_id: group
+        for group in flag_groups
+        for row_id in group.row_ids
+    }
+    updated: list[SupplyItemReview] = []
+    for row in rows:
+        if row.review_status == "deleted":
+            updated.append(row)
+            continue
+        group = group_by_row_id.get(row.review_id)
+        if group is None:
+            review_status = "confirmed"
+        else:
+            review_status = (
+                "confirmed"
+                if group.group_id in confirmed_ids
+                else "pending"
+            )
+        updated.append(
+            row.model_copy(update={"review_status": review_status})
+        )
+    return tuple(updated)
 
 
 def _review_issues(requirement: Requirement) -> tuple[str, ...]:
@@ -70,6 +326,8 @@ def organize_extractions(
             required_quantity=(
                 requirement.quantity if requirement.quantity > 0 else None
             ),
+            quantity_is_range=requirement.quantity_is_range,
+            quantity_max=requirement.quantity_max,
             unit=requirement.unit_type,
             package_size=requirement.attributes.count,
             brand=requirement.brand_lock,
@@ -208,6 +466,83 @@ def conditional_review_questions(
             ),
         )
     )
+
+
+def deduplicate_conditional_questions(
+    questions: Iterable[ConditionalReviewQuestion],
+) -> tuple[DeduplicatedConditionalQuestion, ...]:
+    """Ask identical conditional questions once across child lists."""
+
+    grouped: dict[
+        tuple[str, tuple[str, ...]],
+        list[ConditionalReviewQuestion],
+    ] = {}
+    for question in questions:
+        signature = (
+            question.prompt.casefold(),
+            tuple(
+                option.label.casefold()
+                for option in question.options
+            ),
+        )
+        grouped.setdefault(signature, []).append(question)
+
+    deduplicated: list[DeduplicatedConditionalQuestion] = []
+    for index, members in enumerate(grouped.values(), start=1):
+        selected_labels: list[str] = []
+        for question in members:
+            selected = next(
+                (
+                    option.label
+                    for option in question.options
+                    if option.value == question.selected_value
+                ),
+                None,
+            )
+            if selected is not None:
+                selected_labels.append(selected)
+        selected_label = (
+            selected_labels[0]
+            if selected_labels
+            and len(set(selected_labels)) == 1
+            else None
+        )
+        deduplicated.append(
+            DeduplicatedConditionalQuestion(
+                group_id=f"conditional-review-{index}",
+                prompt=members[0].prompt,
+                child_ids=tuple(
+                    dict.fromkeys(
+                        question.child_id for question in members
+                    )
+                ),
+                option_labels=tuple(
+                    option.label for option in members[0].options
+                ),
+                questions=tuple(members),
+                selected_label=selected_label,
+            )
+        )
+    return tuple(deduplicated)
+
+
+def conditional_answers_for_selection(
+    group: DeduplicatedConditionalQuestion,
+    selected_label: str | None,
+) -> dict[str, str | None]:
+    """Expand one shared parent answer back to every source-list question."""
+
+    answers: dict[str, str | None] = {}
+    for question in group.questions:
+        answers[question.question_id] = next(
+            (
+                option.value
+                for option in question.options
+                if option.label == selected_label
+            ),
+            None,
+        )
+    return answers
 
 
 def apply_conditional_answers(
@@ -365,6 +700,8 @@ def confirmed_requirements(
                 raw_text=row.source_text,
                 canonical_item=row.item_name,
                 quantity=quantity,
+                quantity_is_range=row.quantity_is_range,
+                quantity_max=row.quantity_max,
                 unit_type=row.unit,
                 brand_lock=(
                     row.brand if row.brand_required else None

@@ -497,6 +497,8 @@ class SupplyItemReview(BaseModel):
     child_id: str = Field(min_length=1)
     item_name: str = Field(min_length=1)
     required_quantity: int | None = Field(default=None, ge=1)
+    quantity_is_range: bool = False
+    quantity_max: int | None = Field(default=None, ge=1)
     unit: UnitType = "each"
     package_size: int | None = Field(default=None, ge=1)
     brand: str | None = None

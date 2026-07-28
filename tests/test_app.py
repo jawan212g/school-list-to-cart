@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sys
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -760,6 +761,174 @@ def test_review_editor_preserves_scope_provided_and_condition_fields() -> None:
     assert parsed[0].source_section == "Shared supplies"
     assert parsed[0].source_page == 2
     assert parsed[0].source_text == "Ziploc bags — Last Name A-G"
+
+
+def test_review_understanding_leads_with_plain_item_and_quantity() -> None:
+    """The comparison row says what was understood without internal fields."""
+
+    item = SupplyItemReview(
+        review_id="child-1:pencils",
+        req_id="pencils",
+        child_id="child-1",
+        item_name="pencils",
+        required_quantity=24,
+        brand="Ticonderoga",
+        brand_required=True,
+        source_text="48 Ticonderoga sharpened pencils - #2 | 2nd: 24",
+        confidence=1.0,
+    )
+
+    assert app.review_understanding_text(item) == (
+        "24 Ticonderoga pencils, brand required"
+    )
+
+
+def test_review_framing_names_section_counts_and_uncertainty() -> None:
+    """The screen opens with an honest per-child reading statement."""
+
+    envelope = ExtractionEnvelope(
+        document_selection=DocumentSelection(
+            selected_section_ids=("grade-2",),
+            selected_section_labels=("2nd Grade list",),
+        )
+    )
+    items = (
+        SupplyItemReview(
+            review_id="child-1:pencils",
+            req_id="pencils",
+            child_id="child-1",
+            item_name="pencils",
+            required_quantity=24,
+            source_text="24 pencils",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="child-1:paper",
+            req_id="paper",
+            child_id="child-1",
+            item_name="notebook_paper",
+            required_quantity=1,
+            unit="pack",
+            source_text="1 pack paper",
+            confidence=0.6,
+            issue_codes=("low_confidence",),
+        ),
+        SupplyItemReview(
+            review_id="child-1:note",
+            req_id="note",
+            child_id="child-1",
+            item_name="non_purchasable",
+            required_quantity=1,
+            is_purchasable=False,
+            source_text="Label everything",
+            confidence=1.0,
+        ),
+    )
+
+    assert app.review_child_framing(
+        "child-1",
+        "Grade 2",
+        envelope,
+        items,
+    ) == (
+        "We read 2nd Grade list and found 2 items. "
+        "1 looks clear. Please check 1."
+    )
+
+
+def test_review_screen_no_longer_uses_the_wide_internal_editor() -> None:
+    """The primary review path is compact source, understanding, confirmation."""
+
+    source = inspect.getsource(app._render_review)
+
+    assert "data_editor" not in source
+    assert source.index("What the list said") < source.index(
+        "What we understood"
+    )
+    assert source.index("What we understood") < source.index("Confirm")
+    assert "Product matching has not run yet" in source
+    assert "Notes from the teacher" in source
+    assert "Already provided by school" in source
+
+
+def test_one_uploaded_document_builds_inputs_for_every_child() -> None:
+    """A district-wide upload is supplied once and scoped per child later."""
+
+    class Upload:
+        name = "district-list.txt"
+
+        @staticmethod
+        def getvalue() -> bytes:
+            return b"Grade 2: pencils\\nGrade 5: binders"
+
+    st = SimpleNamespace(
+        session_state={
+            "shared_list_for_all": True,
+            "shared_list_mode": "Upload a file",
+            "shared_list_upload": Upload(),
+        }
+    )
+    children = (
+        {"child_id": "child-1", "label": "Grade 2", "grade": "2"},
+        {"child_id": "child-2", "label": "Grade 5", "grade": "5"},
+    )
+
+    inputs = app._build_list_inputs(st, children)
+
+    assert tuple(item.child_id for item in inputs) == (
+        "child-1",
+        "child-2",
+    )
+    assert inputs[0].source == inputs[1].source
+    assert inputs[0].mime_type == inputs[1].mime_type == "text/plain"
+
+
+def test_shared_document_structure_is_inspected_only_once() -> None:
+    """One upload reuses structure while each child keeps a separate choice."""
+
+    source = b"%PDF-shared-fixture"
+    inputs = (
+        ListInput("child-1", source, "application/pdf"),
+        ListInput("child-2", source, "application/pdf"),
+    )
+    children = (
+        {"child_id": "child-1", "label": "Grade 2", "grade": "2"},
+        {"child_id": "child-2", "label": "Grade 5", "grade": "5"},
+    )
+    calls: list[bytes] = []
+
+    def inspector(
+        document: bytes,
+        *,
+        mime_type: str | None,
+    ) -> DocumentStructureEnvelope:
+        assert mime_type == "application/pdf"
+        calls.append(document)
+        return DocumentStructureEnvelope(
+            sections=(
+                DocumentSection(
+                    section_id="grade-2",
+                    label="Grade 2",
+                    grades=("Grade 2",),
+                ),
+                DocumentSection(
+                    section_id="grade-5",
+                    label="Grade 5",
+                    grades=("Grade 5",),
+                ),
+            )
+        )
+
+    structures, errors = app._inspect_list_inputs(
+        inputs,
+        children,
+        inspector=inspector,
+    )
+
+    assert errors == {}
+    assert calls == [source]
+    assert tuple(structures) == ("child-1", "child-2")
+    assert structures["child-1"] is structures["child-2"]
 
 
 def test_grade_section_defaults_and_selection_reach_real_extractor_contract() -> None:

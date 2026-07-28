@@ -66,9 +66,16 @@ from agent.pipeline import (
 )
 from agent.review import (
     apply_conditional_answers,
+    apply_review_confirmations,
     conditional_review_questions,
+    conditional_answers_for_selection,
+    confidence_band,
+    deduplicate_conditional_questions,
     organize_extractions,
+    review_flag_groups,
+    review_issue_explanations,
     reviewed_envelopes,
+    teacher_note_groups,
     unresolved_required_items,
 )
 from agent.provider import (
@@ -3092,6 +3099,43 @@ def _build_list_inputs(
     st: Any,
     children: Sequence[Mapping[str, Any]],
 ) -> tuple[ListInput, ...]:
+    if bool(st.session_state.get("shared_list_for_all")):
+        mode = st.session_state.get(
+            "shared_list_mode",
+            "Upload a file",
+        )
+        if mode == "Upload a file":
+            upload = st.session_state.get("shared_list_upload")
+            if upload is None:
+                raise ValueError("Choose the shared district file.")
+            data = upload.getvalue()
+            mime_type = validate_uploaded_document(upload.name, data)
+            return tuple(
+                ListInput(
+                    child_id=str(child["child_id"]),
+                    source=data,
+                    mime_type=mime_type,
+                )
+                for child in children
+            )
+        pasted = str(
+            st.session_state.get("shared_list_paste", "")
+        ).strip()
+        if not pasted:
+            raise ValueError("Paste the shared district list.")
+        if len(pasted.encode("utf-8")) > MAX_UPLOAD_BYTES:
+            raise ValueError(
+                "The shared pasted list exceeds the size limit."
+            )
+        return tuple(
+            ListInput(
+                child_id=str(child["child_id"]),
+                source=pasted,
+                mime_type="text/plain",
+            )
+            for child in children
+        )
+
     inputs: list[ListInput] = []
     errors: list[str] = []
     for index, child in enumerate(children):
@@ -3146,8 +3190,9 @@ def _render_lists(st: Any) -> None:
     children = intake["children"]
     st.header("Add the lists")
     st.write(
-        "Paste one list for each entry, or upload a DOCX, PDF, JPG, PNG, or TXT "
-        "file. Every file is checked before it is read."
+        "Paste or upload the list for each entry. If one district document "
+        "contains several grades, upload it once and choose a section for "
+        "each child. Every file is checked before it is read."
     )
     saved_inputs = tuple(st.session_state["list_inputs"])
     expected_child_ids = tuple(
@@ -3171,38 +3216,94 @@ def _render_lists(st: Any) -> None:
             st.session_state["progress_substep"] = "reading the lists"
             st.session_state["screen"] = "working"
             st.rerun()
-    for index, child in enumerate(children):
+    shared_list_for_all = False
+    if len(children) > 1:
+        shared_list_for_all = st.checkbox(
+            "One district document contains sections for all entries",
+            value=bool(
+                st.session_state.get("shared_list_for_all", False)
+            ),
+            key="shared_list_for_all",
+        )
+    source_entries: Sequence[tuple[int, Mapping[str, Any]]]
+    if shared_list_for_all:
+        source_entries = (
+            (
+                -1,
+                {
+                    "label": "Shared district document",
+                    "grade": "multiple grades",
+                },
+            ),
+        )
+    else:
+        source_entries = tuple(enumerate(children))
+
+    for index, child in source_entries:
+        shared_source = index == -1
+        mode_key = (
+            "shared_list_mode"
+            if shared_source
+            else f"list_mode_{index}"
+        )
+        upload_key = (
+            "shared_list_upload"
+            if shared_source
+            else f"list_upload_{index}"
+        )
+        paste_key = (
+            "shared_list_paste"
+            if shared_source
+            else f"list_paste_{index}"
+        )
         with st.container(border=True):
             st.subheader(
                 escape_streamlit_dollars(
-                    f"{child['label']} · Grade {child['grade']}"
+                    (
+                        "Shared district document"
+                        if shared_source
+                        else f"{child['label']} · Grade {child['grade']}"
+                    )
                 )
             )
+            if shared_source:
+                st.caption(
+                    "Upload it once. You will choose a separate grade or "
+                    "teacher section for each entry next."
+                )
             st.radio(
                 "List source",
                 ("Paste text", "Upload a file"),
                 horizontal=True,
-                key=f"list_mode_{index}",
+                key=mode_key,
             )
-            if st.session_state[f"list_mode_{index}"] == "Upload a file":
+            if st.session_state[mode_key] == "Upload a file":
                 st.file_uploader(
-                    "Supply list",
+                    (
+                        "District supply-list document"
+                        if shared_source
+                        else "Supply list"
+                    ),
                     type=("docx", "pdf", "jpg", "jpeg", "png", "txt"),
-                    key=f"list_upload_{index}",
+                    key=upload_key,
                 )
                 st.caption(
                     f"Maximum size: {MAX_UPLOAD_BYTES // 1_000_000} MB."
                 )
             else:
                 st.text_area(
-                    "Paste the complete list",
+                    (
+                        "Paste the complete district list"
+                        if shared_source
+                        else "Paste the complete list"
+                    ),
                     value=(
                         DEMO_LIST_TEXT
                         if bool(intake.get("demo_mode"))
                         else ""
                     ),
                     height=220,
-                    key=f"list_paste_{index}",
+                    key=paste_key,
                     placeholder="Paste required items and optional sections…",
                 )
     left, right = st.columns([1, 2])
@@ -3321,18 +3422,35 @@ def _inspect_list_inputs(
             mime_type=list_input.mime_type,
         )
 
+    grouped_inputs: list[tuple[ListInput, ...]]
+    if demo_mode:
+        grouped_inputs = [(list_input,) for list_input in list_inputs]
+    else:
+        by_source: dict[
+            tuple[str | None, object],
+            list[ListInput],
+        ] = {}
+        for list_input in list_inputs:
+            by_source.setdefault(
+                (list_input.mime_type, list_input.source),
+                [],
+            ).append(list_input)
+        grouped_inputs = [
+            tuple(group) for group in by_source.values()
+        ]
+
     with ThreadPoolExecutor(
-        max_workers=min(max(len(list_inputs), 1), MODEL_MAX_CONCURRENCY)
+        max_workers=min(max(len(grouped_inputs), 1), MODEL_MAX_CONCURRENCY)
     ) as executor:
         futures = {
-            executor.submit(inspect_one, list_input): list_input
-            for list_input in list_inputs
+            executor.submit(inspect_one, group[0]): group
+            for group in grouped_inputs
         }
         done_count = 0
         completed: dict[str, DocumentStructureEnvelope] = {}
         for future in as_completed(futures):
-            list_input = futures[future]
-            done_count += 1
+            group = futures[future]
+            done_count += len(group)
             if progress_callback is not None:
                 progress_callback(
                     "structure",
@@ -3344,9 +3462,12 @@ def _inspect_list_inputs(
                     ),
                 )
             try:
-                completed[list_input.child_id] = future.result()
+                structure = future.result()
+                for list_input in group:
+                    completed[list_input.child_id] = structure
             except Exception as error:
-                errors[list_input.child_id] = error
+                for list_input in group:
+                    errors[list_input.child_id] = error
         for list_input in list_inputs:
             structure = completed.get(list_input.child_id)
             if structure is not None:
@@ -3877,6 +3998,14 @@ def _review_items_from_editor(
                 child_id=child_id,
                 item_name=item_name,
                 required_quantity=quantity,
+                quantity_is_range=(
+                    prior.quantity_is_range
+                    if prior is not None
+                    else False
+                ),
+                quantity_max=(
+                    prior.quantity_max if prior is not None else None
+                ),
                 unit=str(record.get("Unit") or "each"),  # type: ignore[arg-type]
                 package_size=package_size,
                 brand=str(record.get("Brand") or "").strip() or None,
@@ -3943,6 +4072,506 @@ def _review_items_from_editor(
             )
         )
     return tuple(parsed)
+
+
+REVIEW_SINGULAR_ITEM_NAMES: Mapping[str, str] = {
+    "backpacks": "backpack",
+    "baby_wipes": "container of baby wipes",
+    "binders": "binder",
+    "colored_pencils": "pack of colored pencils",
+    "composition_notebooks": "composition notebook",
+    "crayons": "crayon",
+    "dividers": "set of dividers",
+    "dry_erase_markers": "dry-erase marker",
+    "erasers": "eraser",
+    "folders": "folder",
+    "glue_sticks": "glue stick",
+    "headphones": "pair of headphones",
+    "highlighters": "highlighter",
+    "index_cards": "pack of index cards",
+    "markers": "marker",
+    "notebook_paper": "pack of notebook paper",
+    "pencil_boxes": "pencil box",
+    "pencil_pouches": "pencil pouch",
+    "pencil_sharpeners": "pencil sharpener",
+    "pencils": "pencil",
+    "pens": "pen",
+    "permanent_markers": "permanent marker",
+    "rulers": "ruler",
+    "scissors": "pair of scissors",
+    "spiral_notebooks": "spiral notebook",
+    "sticky_notes": "pack of sticky notes",
+    "tissues": "box of tissues",
+    "water_bottles": "water bottle",
+}
+
+
+def review_understanding_text(item: SupplyItemReview) -> str:
+    """Describe one extracted purchase in plain parent-facing language."""
+
+    quantity = item.required_quantity
+    display_name = _item_display_name(item.item_name).casefold()
+    singular_name = REVIEW_SINGULAR_ITEM_NAMES.get(
+        item.item_name,
+        display_name,
+    )
+    branded_name = (
+        f"{item.brand} {display_name}"
+        if item.brand
+        else display_name
+    )
+    if quantity is None:
+        text = f"Quantity needed for {branded_name}"
+    elif item.unit == "each":
+        name = singular_name if quantity == 1 else branded_name
+        if item.brand and quantity == 1:
+            name = f"{item.brand} {singular_name}"
+        text = f"{quantity} {name}"
+    else:
+        container = {
+            "pack": "pack",
+            "box": "box",
+            "ream": "ream",
+        }.get(item.unit, item.unit)
+        if quantity != 1:
+            container += "es" if container.endswith("x") else "s"
+        count_text = (
+            f" of {item.package_size} {display_name}"
+            if item.package_size is not None
+            else f" of {branded_name}"
+        )
+        text = f"{quantity} {container}{count_text}"
+
+    details: list[str] = []
+    if item.brand_required:
+        details.append("brand required")
+    if item.size:
+        details.append(item.size)
+    if item.color:
+        details.append(" or ".join(item.color))
+    if item.supply_scope == "individual":
+        details.append("individual supply")
+    elif item.supply_scope == "shared":
+        details.append("shared supply")
+    if item.optional:
+        details.append("optional")
+    if item.condition:
+        details.append(f"only if {item.condition}")
+    return ", ".join((text, *details))
+
+
+def review_child_framing(
+    child_id: str,
+    child_label: str,
+    envelope: ExtractionEnvelope,
+    items: Sequence[SupplyItemReview],
+) -> str:
+    """State what was read and how many item readings need attention."""
+
+    child_items = tuple(
+        item
+        for item in items
+        if item.child_id == child_id
+        and item.is_purchasable
+        and not item.provided_by_school
+        and item.review_status != "deleted"
+    )
+    needs_check = sum(
+        bool(review_issue_explanations(item))
+        or (
+            item.condition is not None
+            and item.condition_applies is None
+        )
+        for item in child_items
+    )
+    clear_count = len(child_items) - needs_check
+    selection = envelope.document_selection
+    section_text = (
+        _join_names(selection.selected_section_labels)
+        if selection is not None
+        else f"{child_label}'s list"
+    )
+    if needs_check:
+        clear_verb = "looks" if clear_count == 1 else "look"
+        return (
+            f"We read {section_text} and found {len(child_items)} items. "
+            f"{clear_count} {clear_verb} clear. Please check {needs_check}."
+        )
+    return (
+        f"We read {section_text} and found {len(child_items)} items. "
+        "These readings look clear, but you can still edit them."
+    )
+
+
+def _review_control_update(
+    item: SupplyItemReview,
+    *,
+    item_name: str,
+    quantity: int,
+    unit: str,
+    package_size: int | None,
+    brand: str,
+    brand_required: bool,
+    size: str,
+    material: str,
+    colors: str,
+    required_details: str,
+    optional: bool,
+    supply_scope: str,
+    allow_equivalents: bool,
+    already_owned: bool,
+    notes: str,
+    delete: bool,
+) -> SupplyItemReview:
+    """Apply secondary form controls without changing source evidence."""
+
+    required_attributes = dict(item.required_attributes)
+    if required_details.strip():
+        required_attributes["other_details"] = required_details.strip()
+    else:
+        required_attributes.pop("other_details", None)
+    return item.model_copy(
+        update={
+            "item_name": item_name,
+            "required_quantity": quantity,
+            "unit": unit,
+            "package_size": package_size,
+            "brand": brand.strip() or None,
+            "brand_required": brand_required,
+            "size": size.strip() or None,
+            "material": material.strip() or None,
+            "color": tuple(
+                value.strip()
+                for value in colors.split(",")
+                if value.strip()
+            ),
+            "required_attributes": required_attributes,
+            "optional": optional,
+            "supply_scope": supply_scope,
+            "already_owned": already_owned,
+            "allow_equivalents": (
+                allow_equivalents and not brand_required
+            ),
+            "notes": notes.strip() or None,
+            "review_status": (
+                "deleted" if delete else item.review_status
+            ),
+        }
+    )
+
+
+def _render_review_detail_controls(
+    st: Any,
+    item: SupplyItemReview,
+    *,
+    key_prefix: str,
+) -> SupplyItemReview:
+    """Render secondary item editing controls inside a collapsed expander."""
+
+    with st.expander("More detail"):
+        first, second = st.columns(2)
+        item_name = first.selectbox(
+            "Item",
+            options=tuple(sorted(ALLOWED_CATEGORIES)),
+            index=tuple(sorted(ALLOWED_CATEGORIES)).index(item.item_name),
+            key=f"{key_prefix}:item",
+        )
+        quantity = int(
+            second.number_input(
+                "Quantity",
+                min_value=1,
+                value=item.required_quantity or 1,
+                step=1,
+                key=f"{key_prefix}:quantity",
+            )
+        )
+        unit = first.selectbox(
+            "Unit",
+            options=("each", "pack", "box", "ream"),
+            index=("each", "pack", "box", "ream").index(item.unit),
+            key=f"{key_prefix}:unit",
+        )
+        package_size_value = second.number_input(
+            "Units in one package",
+            min_value=1,
+            value=item.package_size,
+            step=1,
+            key=f"{key_prefix}:package",
+        )
+        brand = first.text_input(
+            "Brand",
+            value=item.brand or "",
+            key=f"{key_prefix}:brand",
+        )
+        size = second.text_input(
+            "Size or dimensions",
+            value=item.size or "",
+            key=f"{key_prefix}:size",
+        )
+        colors = first.text_input(
+            "Acceptable colors",
+            value=", ".join(item.color),
+            key=f"{key_prefix}:colors",
+        )
+        material = second.text_input(
+            "Material",
+            value=item.material or "",
+            key=f"{key_prefix}:material",
+        )
+        required_details = st.text_input(
+            "Other required details",
+            value=str(
+                item.required_attributes.get("other_details") or ""
+            ),
+            key=f"{key_prefix}:required-details",
+        )
+        supply_scope = second.selectbox(
+            "Supply use",
+            options=("individual", "shared", "unspecified"),
+            index=("individual", "shared", "unspecified").index(
+                item.supply_scope
+            ),
+            key=f"{key_prefix}:scope",
+        )
+        brand_required = first.checkbox(
+            "Exact brand required",
+            value=item.brand_required,
+            key=f"{key_prefix}:brand-required",
+        )
+        allow_equivalents = first.checkbox(
+            "Allow equivalent brands",
+            value=item.allow_equivalents,
+            key=f"{key_prefix}:equivalents",
+            disabled=brand_required,
+        )
+        optional = second.checkbox(
+            "Optional item",
+            value=item.optional,
+            key=f"{key_prefix}:optional",
+        )
+        already_owned = first.checkbox(
+            "We already own this",
+            value=item.already_owned,
+            key=f"{key_prefix}:owned",
+        )
+        delete = second.checkbox(
+            "Remove this incorrect item",
+            value=item.review_status == "deleted",
+            key=f"{key_prefix}:delete",
+        )
+        notes = st.text_input(
+            "Parent note",
+            value=item.notes or "",
+            key=f"{key_prefix}:notes",
+        )
+    return _review_control_update(
+        item,
+        item_name=item_name,
+        quantity=quantity,
+        unit=unit,
+        package_size=(
+            int(package_size_value)
+            if package_size_value is not None
+            else None
+        ),
+        brand=brand,
+        brand_required=brand_required,
+        size=size,
+        material=material,
+        colors=colors,
+        required_details=required_details,
+        optional=optional,
+        supply_scope=supply_scope,
+        allow_equivalents=allow_equivalents,
+        already_owned=already_owned,
+        notes=notes,
+        delete=delete,
+    )
+
+
+def _copy_shared_review_edits(
+    source: SupplyItemReview,
+    target: SupplyItemReview,
+) -> SupplyItemReview:
+    """Apply one deduplicated ambiguity edit to every affected child row."""
+
+    return target.model_copy(
+        update={
+            "item_name": source.item_name,
+            "required_quantity": source.required_quantity,
+            "quantity_is_range": source.quantity_is_range,
+            "quantity_max": source.quantity_max,
+            "unit": source.unit,
+            "package_size": source.package_size,
+            "brand": source.brand,
+            "brand_required": source.brand_required,
+            "size": source.size,
+            "color": source.color,
+            "material": source.material,
+            "required_attributes": source.required_attributes,
+            "optional": source.optional,
+            "supply_scope": source.supply_scope,
+            "notes": source.notes,
+            "already_owned": source.already_owned,
+            "allow_equivalents": source.allow_equivalents,
+            "review_status": source.review_status,
+        }
+    )
+
+
+def _render_compact_review_row(
+    st: Any,
+    members: Sequence[SupplyItemReview],
+    child_labels: Mapping[str, str],
+    *,
+    key_prefix: str,
+    flag_messages: Sequence[str] = (),
+) -> tuple[dict[str, SupplyItemReview], bool]:
+    """Render source, interpretation, and only the needed confirmation."""
+
+    representative = members[0]
+    with st.container(border=True):
+        if flag_messages:
+            st.warning(
+                escape_streamlit_dollars(
+                    " ".join(flag_messages)
+                )
+            )
+        affected_labels = tuple(
+            dict.fromkeys(
+                child_labels.get(member.child_id, member.child_id)
+                for member in members
+            )
+        )
+        if len(affected_labels) > 1:
+            st.caption(
+                escape_streamlit_dollars(
+                    "Affects " + _join_names(affected_labels)
+                )
+            )
+        source_column, understanding_column, confirm_column = st.columns(
+            [5, 4, 2]
+        )
+        with source_column:
+            for member in members:
+                if len(members) > 1:
+                    st.caption(
+                        escape_streamlit_dollars(
+                            child_labels.get(
+                                member.child_id,
+                                member.child_id,
+                            )
+                        )
+                    )
+                st.write(
+                    escape_streamlit_dollars(member.source_text)
+                )
+        with understanding_column:
+            st.write(
+                escape_streamlit_dollars(
+                    review_understanding_text(representative)
+                )
+            )
+            st.caption(
+                f"Reading: {confidence_band(representative.confidence)}"
+            )
+        with confirm_column:
+            if flag_messages:
+                confirmed = st.checkbox(
+                    "I checked this",
+                    value=all(
+                        member.review_status == "confirmed"
+                        for member in members
+                    ),
+                    key=f"{key_prefix}:confirmed",
+                )
+            else:
+                st.caption("Accepted by default")
+                confirmed = True
+        edited_representative = _render_review_detail_controls(
+            st,
+            representative,
+            key_prefix=key_prefix,
+        )
+    edited = {
+        member.review_id: (
+            edited_representative
+            if member.review_id == representative.review_id
+            else _copy_shared_review_edits(
+                edited_representative,
+                member,
+            )
+        )
+        for member in members
+    }
+    return edited, confirmed
+
+
+def _new_review_item_from_controls(
+    st: Any,
+    child_id: str,
+    *,
+    key_prefix: str,
+) -> SupplyItemReview | None:
+    """Offer one secondary form for adding a missing item."""
+
+    with st.expander("Add a missing item"):
+        add_item = st.checkbox(
+            "Add this item to the list",
+            key=f"{key_prefix}:add",
+        )
+        first, second = st.columns(2)
+        item_name = first.selectbox(
+            "Item",
+            options=tuple(sorted(ALLOWED_CATEGORIES)),
+            key=f"{key_prefix}:item",
+        )
+        quantity = int(
+            second.number_input(
+                "Quantity",
+                min_value=1,
+                value=1,
+                step=1,
+                key=f"{key_prefix}:quantity",
+            )
+        )
+        unit = first.selectbox(
+            "Unit",
+            options=("each", "pack", "box", "ream"),
+            key=f"{key_prefix}:unit",
+        )
+        scope = second.selectbox(
+            "Supply use",
+            options=("individual", "shared", "unspecified"),
+            index=2,
+            key=f"{key_prefix}:scope",
+        )
+        optional = first.checkbox(
+            "Optional item",
+            key=f"{key_prefix}:optional",
+        )
+        source_text = st.text_input(
+            "What the list says",
+            value="Added by parent during review",
+            key=f"{key_prefix}:source",
+        )
+    if not add_item:
+        return None
+    identifier = str(uuid4())
+    return SupplyItemReview(
+        review_id=f"parent:{child_id}:{identifier}",
+        req_id=f"parent-{identifier}",
+        child_id=child_id,
+        item_name=item_name,
+        required_quantity=quantity,
+        unit=unit,  # type: ignore[arg-type]
+        optional=optional,
+        supply_scope=scope,  # type: ignore[arg-type]
+        source_text=source_text.strip() or "Added by parent during review",
+        confidence=1.0,
+        review_status="confirmed",
+        allow_equivalents=True,
+    )
 
 
 def _render_sections(st: Any) -> None:
@@ -4115,202 +4744,301 @@ def _render_sections(st: Any) -> None:
 
 
 def _render_review(st: Any) -> None:
-    """Render the mandatory editable extraction review stage (FR-12)."""
+    """Render a compact source-versus-interpretation review (FR-12)."""
 
     intake = st.session_state["intake"]
-    extractions = st.session_state["extracted_lists"]
+    extractions: Mapping[str, ExtractionEnvelope] = (
+        st.session_state["extracted_lists"]
+    )
     if intake is None or not extractions:
         st.session_state["screen"] = "lists"
         st.rerun()
-    children = intake["children"]
+    children = tuple(intake["children"])
     child_labels = {
         str(child["child_id"]): str(child["label"])
         for child in children
     }
+    child_order = {
+        str(child["child_id"]): index
+        for index, child in enumerate(children)
+    }
     items = tuple(st.session_state["review_items"])
-    st.header("Review extracted items")
-    st.write(
-        "Check every item before shopping. Edit values, add missing rows, "
-        "mark items already owned, or remove incorrect rows."
+    item_by_id = {item.review_id: item for item in items}
+    flag_groups = review_flag_groups(items)
+    flagged_row_ids = frozenset(
+        row_id for group in flag_groups for row_id in group.row_ids
     )
-    for child_id, envelope in extractions.items():
-        selection = envelope.document_selection
-        if selection is None:
+    flag_groups_by_child: dict[str, list[Any]] = {}
+    flag_anchor_by_group: dict[str, str] = {}
+    for group in flag_groups:
+        anchor = min(
+            group.child_ids,
+            key=lambda child_id: child_order.get(child_id, 10_000),
+        )
+        flag_anchor_by_group[group.group_id] = anchor
+        flag_groups_by_child.setdefault(anchor, []).append(group)
+
+    st.header("Review what we read")
+    for child in children:
+        child_id = str(child["child_id"])
+        envelope = extractions.get(child_id)
+        if envelope is None:
             continue
-        st.info(
+        st.write(
             escape_streamlit_dollars(
-                f"{child_labels.get(child_id, child_id)} — read: "
-                f"{_join_names(selection.selected_section_labels)}"
+                review_child_framing(
+                    child_id,
+                    child_labels[child_id],
+                    envelope,
+                    items,
+                )
             )
         )
-        if selection.ignored_section_labels:
+        selection = envelope.document_selection
+        if selection is not None:
             st.caption(
                 escape_streamlit_dollars(
-                    "Not read: "
-                    + _join_names(selection.ignored_section_labels)
+                    "Read: "
+                    + _join_names(selection.selected_section_labels)
                 )
             )
-        if envelope.uninterpreted_lines:
+            if selection.ignored_section_labels:
+                st.caption(
+                    escape_streamlit_dollars(
+                        "Not read: "
+                        + _join_names(selection.ignored_section_labels)
+                    )
+                )
+        for line in envelope.uninterpreted_lines:
             st.warning(
                 escape_streamlit_dollars(
-                    "Could not interpret: "
-                    + _join_names(envelope.uninterpreted_lines)
+                    f"Could not interpret: {line}"
                 )
             )
-        if envelope.skipped_lines:
+        for line in envelope.skipped_lines:
             st.info(
                 escape_streamlit_dollars(
-                    "Deliberately skipped: "
-                    + _join_names(envelope.skipped_lines)
+                    f"Skipped from the cart: {line}"
                 )
             )
-    if st.session_state["extraction_errors"]:
-        for child_id, error in st.session_state["extraction_errors"].items():
-            st.warning(
-                escape_streamlit_dollars(
-                    f"{child_labels.get(child_id, child_id)}: {error}"
-                )
-            )
-    attention_count = len(
-        {
-            item.condition_group_id or item.review_id
-            for item in items
-            if item.issue_codes
-        }
-    )
-    if attention_count:
+    for child_id, error in st.session_state["extraction_errors"].items():
         st.warning(
-            f"{attention_count} item(s) contain ambiguity or low-confidence "
-            "details. Review and explicitly confirm them."
+            escape_streamlit_dollars(
+                f"{child_labels.get(child_id, child_id)}: {error}"
+            )
         )
+    st.caption(
+        "This is the list-reading check. Product matching has not run yet."
+    )
+
     condition_answers: dict[str, str | None] = {}
-    questions = conditional_review_questions(items)
-    if questions:
-        st.subheader("Questions from the list")
-        for question in questions:
-            st.caption(
+    confirmed_flag_group_ids: list[str] = []
+    edited_by_id: dict[str, SupplyItemReview] = {}
+    added_items: list[SupplyItemReview] = []
+
+    with st.form("compact_extraction_review"):
+        condition_groups = deduplicate_conditional_questions(
+            conditional_review_questions(items)
+        )
+        if condition_groups:
+            st.subheader("Questions from the list")
+            for group in condition_groups:
+                affected = tuple(
+                    child_labels.get(child_id, child_id)
+                    for child_id in group.child_ids
+                )
+                st.caption(
+                    escape_streamlit_dollars(
+                        "Affects " + _join_names(affected)
+                    )
+                )
+                selected = st.radio(
+                    group.prompt,
+                    options=group.option_labels,
+                    index=(
+                        group.option_labels.index(group.selected_label)
+                        if group.selected_label in group.option_labels
+                        else None
+                    ),
+                    key=f"condition-group:{group.group_id}",
+                )
+                condition_answers.update(
+                    conditional_answers_for_selection(
+                        group,
+                        selected,
+                    )
+                )
+
+        for child in children:
+            child_id = str(child["child_id"])
+            st.subheader(
                 escape_streamlit_dollars(
-                    f"For {child_labels.get(question.child_id, question.child_id)}"
+                    f"{child_labels[child_id]} — Items to buy"
                 )
             )
-            option_labels = {
-                option.value: option.label for option in question.options
-            }
-            option_values = tuple(option_labels)
-            selected_index = (
-                option_values.index(question.selected_value)
-                if question.selected_value in option_values
-                else None
+            heading_source, heading_understood, heading_confirm = (
+                st.columns([5, 4, 2])
             )
-            condition_answers[question.question_id] = st.radio(
-                question.prompt,
-                options=option_values,
-                index=selected_index,
-                format_func=option_labels.__getitem__,
-                key=f"condition-question:{question.question_id}",
+            heading_source.caption("What the list said")
+            heading_understood.caption("What we understood")
+            heading_confirm.caption("Confirm")
+
+            rendered_any = False
+            for group in flag_groups_by_child.get(child_id, ()):
+                members = tuple(
+                    item_by_id[row_id] for row_id in group.row_ids
+                )
+                edited, confirmed = _render_compact_review_row(
+                    st,
+                    members,
+                    child_labels,
+                    key_prefix=group.group_id,
+                    flag_messages=group.messages,
+                )
+                edited_by_id.update(edited)
+                if confirmed:
+                    confirmed_flag_group_ids.append(group.group_id)
+                rendered_any = True
+
+            shared_checks_elsewhere = tuple(
+                group
+                for group in flag_groups
+                if child_id in group.child_ids
+                and flag_anchor_by_group[group.group_id] != child_id
             )
-            st.write("")
-    editor_value = st.data_editor(
-        _review_editor_rows(items, child_labels),
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        disabled=(
-            "review_id",
-            "req_id",
-            "child_id",
-            "Source text",
-            "Source section",
-            "Source page",
-            "Source language",
-            "Confidence",
-            "Needs attention",
-            "Condition applies",
-        ),
-        column_config={
-            "For": st.column_config.SelectboxColumn(
-                "For",
-                options=tuple(child_labels.values()),
-                required=True,
-            ),
-            "Item": st.column_config.SelectboxColumn(
-                "Item",
-                options=tuple(sorted(ALLOWED_CATEGORIES)),
-                required=True,
-            ),
-            "Quantity": st.column_config.NumberColumn(
-                "Quantity",
-                min_value=1,
-                step=1,
-            ),
-            "Unit": st.column_config.SelectboxColumn(
-                "Unit",
-                options=("each", "pack", "box", "ream"),
-                required=True,
-            ),
-            "Confidence": st.column_config.NumberColumn(
-                "Confidence",
-                format="%.2f",
-            ),
-            "Supply use": st.column_config.SelectboxColumn(
-                "Supply use",
-                options=("Individual", "Shared", "Unspecified"),
-                required=True,
-            ),
-        },
-        key="organized_list_editor",
-    )
-    allow_unresolved = st.checkbox(
-        "Proceed with unresolved required items after my explicit approval",
-        value=bool(st.session_state["allow_unresolved_items"]),
-        help=(
-            "Use only when you have reviewed the flagged rows and accept the "
-            "remaining uncertainty."
-        ),
-    )
-    left, right = st.columns([1, 2])
-    if left.button("Back to lists"):
+            if shared_checks_elsewhere:
+                st.caption(
+                    "A check shared with another entry appears above and "
+                    f"also covers {child_labels[child_id]}."
+                )
+
+            for item in items:
+                if (
+                    item.child_id != child_id
+                    or item.review_id in flagged_row_ids
+                    or not item.is_purchasable
+                    or item.provided_by_school
+                    or item.review_status == "deleted"
+                ):
+                    continue
+                edited, _ = _render_compact_review_row(
+                    st,
+                    (item,),
+                    child_labels,
+                    key_prefix=f"clear:{item.review_id}",
+                )
+                edited_by_id.update(edited)
+                rendered_any = True
+            if not rendered_any:
+                st.caption("No purchase items were read for this entry.")
+
+            added = _new_review_item_from_controls(
+                st,
+                child_id,
+                key_prefix=f"add:{child_id}",
+            )
+            if added is not None:
+                added_items.append(added)
+
+        provided_items = tuple(
+            item
+            for item in items
+            if item.provided_by_school
+            and item.review_status != "deleted"
+        )
+        if provided_items:
+            with st.expander("Already provided by school"):
+                for item in provided_items:
+                    st.caption(
+                        escape_streamlit_dollars(
+                            "For "
+                            + child_labels.get(
+                                item.child_id,
+                                item.child_id,
+                            )
+                        )
+                    )
+                    st.write(
+                        escape_streamlit_dollars(item.source_text)
+                    )
+                    st.caption(
+                        escape_streamlit_dollars(
+                            "Understood as: "
+                            + review_understanding_text(item)
+                            + " — excluded from the cart"
+                        )
+                    )
+
+        note_groups = teacher_note_groups(items)
+        if note_groups:
+            with st.expander("Notes from the teacher"):
+                for note in note_groups:
+                    affected = tuple(
+                        child_labels.get(child_id, child_id)
+                        for child_id in note.child_ids
+                    )
+                    st.caption(
+                        escape_streamlit_dollars(
+                            "Affects " + _join_names(affected)
+                        )
+                    )
+                    st.write(
+                        escape_streamlit_dollars(note.source_text)
+                    )
+
+        submitted = st.form_submit_button(
+            "Confirm the readings and build my plan",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if st.button("Back to lists"):
         st.session_state["screen"] = "lists"
         st.rerun()
-    if right.button(
-        "Confirm list and build my plan",
-        type="primary",
-        use_container_width=True,
-    ):
-        try:
-            reviewed = _review_items_from_editor(
-                editor_value,
-                items,
-                children,
-            )
-            reviewed = apply_conditional_answers(
-                reviewed,
-                condition_answers,
-            )
-            unresolved = unresolved_required_items(reviewed)
-            if unresolved and not allow_unresolved:
-                names = ", ".join(item.item_name for item in unresolved)
-                raise ValueError(
-                    "Confirm every required item and provide its quantity "
-                    f"before continuing. Unresolved: {names}"
+    if not submitted:
+        return
+    try:
+        reviewed = tuple(
+            edited_by_id.get(item.review_id, item)
+            for item in items
+        ) + tuple(added_items)
+        reviewed = apply_conditional_answers(
+            reviewed,
+            condition_answers,
+        )
+        reviewed = apply_review_confirmations(
+            reviewed,
+            flag_groups,
+            confirmed_flag_group_ids,
+        )
+        unresolved = unresolved_required_items(reviewed)
+        if unresolved:
+            names = _join_names(
+                tuple(
+                    _item_display_name(item.item_name)
+                    for item in unresolved
                 )
-            confirmed = reviewed_envelopes(
-                dict(extractions),
-                reviewed,
-                allow_unresolved=allow_unresolved,
             )
-        except (TypeError, ValueError) as error:
-            st.session_state["ui_error_active"] = True
-            st.error(escape_streamlit_dollars(str(error)))
-            return
-        st.session_state["review_items"] = reviewed
-        st.session_state["extracted_lists"] = confirmed
-        st.session_state["organized_list_confirmed"] = True
-        st.session_state["allow_unresolved_items"] = allow_unresolved
-        st.session_state["result"] = None
-        st.session_state["progress_substep"] = "Build my shopping plan"
-        st.session_state["screen"] = "working"
-        st.rerun()
+            raise ValueError(
+                "Check and confirm the flagged readings before continuing: "
+                + names
+            )
+        confirmed = reviewed_envelopes(
+            dict(extractions),
+            reviewed,
+        )
+    except (TypeError, ValueError) as error:
+        st.session_state["ui_error_active"] = True
+        st.error(escape_streamlit_dollars(str(error)))
+        return
+    st.session_state["review_items"] = reviewed
+    st.session_state["extracted_lists"] = confirmed
+    st.session_state["organized_list_confirmed"] = True
+    st.session_state["allow_unresolved_items"] = False
+    st.session_state["result"] = None
+    st.session_state["progress_substep"] = "Build my shopping plan"
+    st.session_state["screen"] = "working"
+    st.rerun()
 
 
 def _route_pipeline_result(

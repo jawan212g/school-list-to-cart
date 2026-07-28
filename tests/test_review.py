@@ -4,13 +4,22 @@ import pytest
 
 from agent.review import (
     apply_conditional_answers,
+    apply_review_confirmations,
+    ConditionalReviewOption,
+    ConditionalReviewQuestion,
     conditional_review_questions,
+    conditional_answers_for_selection,
+    confidence_band,
     confirmed_requirements,
+    deduplicate_conditional_questions,
     organize_extractions,
+    review_flag_groups,
+    review_issue_explanations,
     reviewed_envelopes,
+    teacher_note_groups,
     unresolved_required_items,
 )
-from agent.schema import ExtractionEnvelope, Requirement
+from agent.schema import ExtractionEnvelope, Requirement, SupplyItemReview
 
 
 def _requirement(
@@ -308,3 +317,212 @@ def test_mutually_exclusive_branches_cannot_bypass_parent_choice() -> None:
         match="This list assigns bags by last name",
     ):
         confirmed_requirements(rows, allow_unresolved=True)
+
+
+def test_confidence_is_presented_as_plain_bands() -> None:
+    """Raw model confidence remains internal to BR-11."""
+
+    assert confidence_band(0.95) == "clear"
+    assert confidence_band(0.75) == "worth checking"
+    assert confidence_band(0.69) == "uncertain"
+
+
+def test_review_flags_explain_range_and_package_assumptions_plainly() -> None:
+    """Review copy explains the choice instead of exposing issue codes."""
+
+    ranged = SupplyItemReview(
+        review_id="child-1:tissues",
+        req_id="tissues",
+        child_id="child-1",
+        item_name="tissues",
+        required_quantity=2,
+        quantity_is_range=True,
+        quantity_max=3,
+        unit="box",
+        source_text="2-3 boxes of tissues",
+        confidence=0.9,
+        issue_codes=("quantity_range",),
+    )
+    paper = SupplyItemReview(
+        review_id="child-1:paper",
+        req_id="paper",
+        child_id="child-1",
+        item_name="notebook_paper",
+        required_quantity=1,
+        unit="pack",
+        source_text="1 pack notebook paper",
+        confidence=0.9,
+        issue_codes=("ambiguous_package_size",),
+    )
+
+    assert review_issue_explanations(ranged) == (
+        "The list gave a range of 2–3 boxes. We chose 2.",
+    )
+    assert review_issue_explanations(paper) == (
+        "The list did not say how many sheets were in the package. "
+        "We assumed 150.",
+    )
+
+
+def test_quantity_range_survives_the_editable_review_boundary() -> None:
+    """Secondary editing does not erase the source range used by FR-11."""
+
+    requirement = Requirement(
+        req_id="tissues",
+        child_id="child-1",
+        raw_text="2-3 boxes of tissues",
+        canonical_item="tissues",
+        quantity=2,
+        quantity_is_range=True,
+        quantity_max=3,
+        unit_type="box",
+        extraction_confidence=1.0,
+    )
+    row = organize_extractions(
+        {
+            "child-1": ExtractionEnvelope(
+                requirements=(requirement,)
+            )
+        }
+    )[0].model_copy(update={"review_status": "confirmed"})
+
+    reviewed = confirmed_requirements((row,))
+
+    assert reviewed[0].quantity == 2
+    assert reviewed[0].quantity_is_range is True
+    assert reviewed[0].quantity_max == 3
+
+
+def test_identical_flags_confirm_once_across_children() -> None:
+    """One shared confirmation resolves the same ambiguity on both lists."""
+
+    rows = tuple(
+        SupplyItemReview(
+            review_id=f"{child_id}:paper",
+            req_id=f"{child_id}-paper",
+            child_id=child_id,
+            item_name="notebook_paper",
+            required_quantity=1,
+            unit="pack",
+            source_text="1 pack notebook paper",
+            confidence=0.9,
+            issue_codes=("ambiguous_package_size",),
+        )
+        for child_id in ("child-1", "child-2")
+    )
+
+    groups = review_flag_groups(rows)
+
+    assert len(groups) == 1
+    assert groups[0].child_ids == ("child-1", "child-2")
+    assert groups[0].row_ids == (
+        "child-1:paper",
+        "child-2:paper",
+    )
+    confirmed = apply_review_confirmations(
+        rows,
+        groups,
+        (groups[0].group_id,),
+    )
+    assert all(row.review_status == "confirmed" for row in confirmed)
+
+
+def test_clear_items_are_accepted_without_individual_confirmation() -> None:
+    """The one submit action accepts clear rows while flags stay pending."""
+
+    clear = SupplyItemReview(
+        review_id="child-1:pencils",
+        req_id="pencils",
+        child_id="child-1",
+        item_name="pencils",
+        required_quantity=24,
+        source_text="24 pencils",
+        confidence=1.0,
+    )
+    flagged = SupplyItemReview(
+        review_id="child-1:paper",
+        req_id="paper",
+        child_id="child-1",
+        item_name="notebook_paper",
+        required_quantity=1,
+        unit="pack",
+        source_text="1 pack paper",
+        confidence=0.9,
+        issue_codes=("ambiguous_package_size",),
+    )
+    groups = review_flag_groups((clear, flagged))
+
+    reviewed = apply_review_confirmations(
+        (clear, flagged),
+        groups,
+        (),
+    )
+
+    assert reviewed[0].review_status == "confirmed"
+    assert reviewed[1].review_status == "pending"
+
+
+def test_teacher_notes_are_deduplicated_and_never_require_confirmation() -> None:
+    """Repeated non-purchase directions appear once with both child labels."""
+
+    rows = tuple(
+        SupplyItemReview(
+            review_id=f"{child_id}:note",
+            req_id=f"{child_id}-note",
+            child_id=child_id,
+            item_name="non_purchasable",
+            required_quantity=1,
+            is_purchasable=False,
+            optional=True,
+            source_text="Please label all supplies with your child's name.",
+            confidence=1.0,
+        )
+        for child_id in ("child-1", "child-2")
+    )
+
+    notes = teacher_note_groups(rows)
+
+    assert len(notes) == 1
+    assert notes[0].child_ids == ("child-1", "child-2")
+    assert notes[0].source_text.startswith("Please label")
+    assert review_flag_groups(rows) == ()
+
+
+def test_identical_conditional_questions_are_asked_once() -> None:
+    """One last-name choice expands back to both children's branch groups."""
+
+    questions = (
+        ConditionalReviewQuestion(
+            question_id="bags-child-1",
+            child_id="child-1",
+            prompt="Which bag assignment applies?",
+            options=(
+                ConditionalReviewOption("c1-a", "Gallon — A-G"),
+                ConditionalReviewOption("c1-b", "Quart — H-P"),
+            ),
+            selected_value=None,
+        ),
+        ConditionalReviewQuestion(
+            question_id="bags-child-2",
+            child_id="child-2",
+            prompt="Which bag assignment applies?",
+            options=(
+                ConditionalReviewOption("c2-a", "Gallon — A-G"),
+                ConditionalReviewOption("c2-b", "Quart — H-P"),
+            ),
+            selected_value=None,
+        ),
+    )
+
+    groups = deduplicate_conditional_questions(questions)
+    answers = conditional_answers_for_selection(
+        groups[0],
+        "Quart — H-P",
+    )
+
+    assert len(groups) == 1
+    assert groups[0].child_ids == ("child-1", "child-2")
+    assert answers == {
+        "bags-child-1": "c1-b",
+        "bags-child-2": "c2-b",
+    }
