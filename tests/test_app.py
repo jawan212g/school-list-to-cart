@@ -127,6 +127,85 @@ def test_money_and_tax_inputs_convert_at_the_interface_boundary() -> None:
     ) == r"Adds \$3.00 and \$0.20"
 
 
+def test_state_selection_prefills_general_rate_without_overwriting_override() -> None:
+    """BR-02: state defaults are editable and exclude local-rate guessing."""
+
+    state: dict[str, object] = {}
+
+    app.initialize_state_tax_prefill(state, "California")
+    assert state == {
+        "tax_rate_text": "7.25",
+        "tax_prefill_state": "California",
+    }
+
+    state["tax_rate_text"] = "8.75"
+    app.initialize_state_tax_prefill(state, "California")
+    assert state["tax_rate_text"] == "8.75"
+
+    app.initialize_state_tax_prefill(state, "Indiana")
+    assert state["tax_rate_text"] == "7.0"
+    assert app.state_tax_rate_percent("Oregon") == "0.0"
+
+
+def test_student_fields_validate_as_the_parent_types() -> None:
+    """FR-01/FR-05: missing intake fields have immediate plain messages."""
+
+    assert app.student_input_errors("", "") == (
+        "Enter a student name or nickname.",
+        "Enter the student's grade.",
+    )
+    assert app.student_input_errors("Sam", "2") == ()
+
+
+def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
+    """The parent intake hides development controls and internal vocabulary."""
+
+    intake_source = inspect.getsource(app._render_intake)
+    diagnostic_source = inspect.getsource(app._render_development_diagnostic)
+    student_source = inspect.getsource(app._render_student_step)
+    budget_source = inspect.getsource(app._render_budget_step)
+    preferences_source = inspect.getsource(app._render_preferences_step)
+
+    assert "if debug_enabled" in intake_source
+    assert 'st.session_state["demo_mode"] = False' in intake_source
+    assert "Use stable offline demo mode" not in intake_source
+    assert "Use stable offline demo mode" in diagnostic_source
+    assert "Step 1 — Who are you shopping for?" in student_source
+    assert "Student name or nickname" in student_source
+    assert "disabled=bool(immediate_errors)" in student_source
+    assert "Step 2 — What is your budget?" in budget_source
+    assert "A budget for each student" in budget_source
+    assert "disabled=bool(budget_errors)" in budget_source
+    assert "Step 3 — How do you want to shop?" in preferences_source
+    assert '"Shopping preferences"' in preferences_source
+    assert "Advanced shopping and tax options" in preferences_source
+    assert "Shopping mode" not in preferences_source
+
+
+def test_visual_system_has_no_gradients_behind_text() -> None:
+    """Every screen uses the same high-contrast plain background system."""
+
+    css_source = inspect.getsource(app._apply_custom_css).casefold()
+
+    assert "gradient" not in css_source
+    assert "--rss-chalkboard" in css_source
+    assert "background-color: var(--rss-paper)" in css_source
+
+
+def test_decision_log_copy_uses_student_terminology() -> None:
+    """Decision explanations shown or exported never expose Child/Entry copy."""
+
+    visible = app._humanize_internal_text(
+        "Children share this child entry.",
+        (),
+        (),
+    )
+
+    assert visible == "students share this student."
+    assert "child" not in visible.casefold()
+    assert "entry" not in visible.casefold()
+
+
 def test_shortfall_state_renders_the_plain_summary_headings() -> None:
     """A budget shortfall switches the whole summary to the plain register."""
 
@@ -1199,13 +1278,13 @@ def test_summary_names_read_ignored_and_uninterpreted_source() -> None:
     )
 
 
-def test_child_display_uses_parent_label_not_internal_id() -> None:
-    """Parent-facing tables never fall back to raw child identifiers."""
+def test_student_display_uses_parent_name_not_internal_id() -> None:
+    """Parent-facing tables never fall back to raw internal identifiers."""
 
     labels = {"child-1": "Grade 2"}
 
     assert app._child_display_label("child-1", labels) == "Grade 2"
-    assert app._child_display_label("child-2", labels) == "Unknown entry"
+    assert app._child_display_label("child-2", labels) == "Unknown student"
 
 
 def test_working_screen_reuses_cached_pipeline_result(

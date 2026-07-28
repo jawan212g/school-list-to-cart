@@ -796,3 +796,78 @@ secondary editing, real-PDF evidence, and multi-child behavior.
 Deploy this branch, open the shared Machias document for Grade 2 and Grade 5, and
 verify that one upload produces two grade choices, one deduplicated bag question when
 applicable, and compact source-versus-understanding rows without horizontal scrolling.
+
+## 2026-07-28 — Redesign the parent intake
+
+### Objective
+
+Make the first screen readable and self-explanatory for a parent while preserving
+the existing extraction, matching, approval, and deterministic calculation paths.
+
+### Work completed
+
+- Replaced the single long intake form with three guided setup steps: students,
+  budget, and shopping preferences.
+- Added a short, dismissible first-arrival walkthrough explaining the four stages
+  from setup through the final shopping plan.
+- Replaced parent-facing “Child,” “Entry,” “Label,” and “Shopping mode” wording with
+  student-centered plain language across intake, list organization, document-section
+  selection, item review, summary attribution, text export, and displayed decision
+  rationales.
+- Added immediate name, grade, budget, store-selection, and tax-rate validation beside
+  the relevant field. Step navigation remains unavailable while the visible step has
+  an error.
+- Moved the stable offline demo control into the existing development-only area. The
+  control is available only through `?debug=1` or the development environment flag;
+  normal intake explicitly disables demo mode.
+- Added a state dropdown with state-level general tax-rate defaults and an editable
+  override. The existing 7.0% BR-02 default remains when no state is selected.
+- Kept pickup radius, pickup-or-delivery preference, the simulated store-distance
+  table, state selection, and tax override in one advanced-options expander.
+- Replaced the low-contrast illustrated background and gradients with a plain
+  near-white background, dark text, white content cards, and solid notebook blue,
+  pencil yellow, chalkboard green, and crayon red accents.
+- Updated the Streamlit theme and README terminology to match the parent interface.
+
+### Decisions made
+
+- Used state-level general rates dated January 1, 2026 and stated the date in the
+  interface. City and county rates remain deliberately unmodeled.
+- Preserved all internal `child_id` and `children` field names so the UI redesign
+  does not alter pipeline contracts or calculations.
+- Kept the walkthrough non-blocking: parents can begin the form without dismissing
+  it and can hide it for the rest of the in-memory session.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 machine, so the redesign could
+  not be opened locally. Structure, copy, import safety, and state helpers were
+  verified through pytest and Python compilation.
+- State defaults do not include local rates or determine whether a particular school
+  supply is exempt. The interface states this next to the tax controls.
+
+### Files created or changed
+
+- Updated `app.py`, `.streamlit/config.toml`, `README.md`, and
+  `tests/test_app.py`.
+- Updated `JOURNAL.md`.
+
+### Testing performed
+
+- Focused application tests: 38 passed.
+- Complete automated suite: 220 passed in 5.52 seconds.
+- Python compilation completed without errors.
+- Git diff validation reported only Windows line-ending notices.
+
+### Remaining work
+
+- Visually confirm the three-step intake, advanced-options expander, and narrow-screen
+  spacing in the deployed Streamlit application.
+- Recheck the state-rate defaults before a future school year because state tax rates
+  can change.
+
+### Recommended next step
+
+Deploy the branch and walk through one single-student and one two-student setup at
+desktop and phone widths, paying particular attention to the immediate validation
+placement and the state-to-tax-rate prefill.

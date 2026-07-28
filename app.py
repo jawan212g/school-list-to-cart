@@ -121,8 +121,66 @@ MAX_STORE_RADIUS_MILES = 25.0
 MAX_CLASSROOM_STUDENTS = 100
 DEFAULT_BUDGET_TEXT = "150.00"
 DEFAULT_RADIUS_MILES = 10.0
+DEFAULT_TAX_STATE_OPTION = "Choose a state — use the 7.0% default"
 DEVELOPMENT_DEBUG_ENV = "SCHOOL_CART_DEBUG"
 DEBUG_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
+STATE_GENERAL_SALES_TAX_PERCENT: Mapping[str, str] = {
+    # State-level general rates as of January 1, 2026. City and county rates
+    # are deliberately excluded. Source: Tax Foundation, Facts & Figures 2026,
+    # Table 18, which includes mandatory statewide local add-ons in CA, UT, VA.
+    DEFAULT_TAX_STATE_OPTION: "7.0",
+    "Alabama": "4.0",
+    "Alaska": "0.0",
+    "Arizona": "5.6",
+    "Arkansas": "6.5",
+    "California": "7.25",
+    "Colorado": "2.9",
+    "Connecticut": "6.35",
+    "Delaware": "0.0",
+    "District of Columbia": "6.0",
+    "Florida": "6.0",
+    "Georgia": "4.0",
+    "Hawaii": "4.0",
+    "Idaho": "6.0",
+    "Illinois": "6.25",
+    "Indiana": "7.0",
+    "Iowa": "6.0",
+    "Kansas": "6.5",
+    "Kentucky": "6.0",
+    "Louisiana": "5.0",
+    "Maine": "5.5",
+    "Maryland": "6.0",
+    "Massachusetts": "6.25",
+    "Michigan": "6.0",
+    "Minnesota": "6.875",
+    "Mississippi": "7.0",
+    "Missouri": "4.225",
+    "Montana": "0.0",
+    "Nebraska": "5.5",
+    "Nevada": "6.85",
+    "New Hampshire": "0.0",
+    "New Jersey": "6.625",
+    "New Mexico": "4.875",
+    "New York": "4.0",
+    "North Carolina": "4.75",
+    "North Dakota": "5.0",
+    "Ohio": "5.75",
+    "Oklahoma": "4.5",
+    "Oregon": "0.0",
+    "Pennsylvania": "6.0",
+    "Rhode Island": "7.0",
+    "South Carolina": "6.0",
+    "South Dakota": "4.2",
+    "Tennessee": "7.0",
+    "Texas": "6.25",
+    "Utah": "6.1",
+    "Vermont": "6.0",
+    "Virginia": "5.3",
+    "Washington": "6.5",
+    "West Virginia": "6.0",
+    "Wisconsin": "5.0",
+    "Wyoming": "4.0",
+}
 SUPPORTED_UPLOADS: Mapping[str, str] = {
     ".docx": (
         "application/vnd.openxmlformats-officedocument."
@@ -455,6 +513,41 @@ def tax_percent_to_basis_points(value: str) -> int:
             rounding=ROUND_HALF_UP,
         )
     )
+
+
+def state_tax_rate_percent(state_name: str) -> str:
+    """Return the state-level general rate used to prefill BR-02 intake."""
+
+    try:
+        return STATE_GENERAL_SALES_TAX_PERCENT[state_name]
+    except KeyError as error:
+        raise ValueError(f"Unknown state selection: {state_name}") from error
+
+
+def initialize_state_tax_prefill(
+    state: MutableMapping[str, Any],
+    state_name: str,
+) -> None:
+    """Prefill tax when the state changes without overwriting later edits."""
+
+    if state.get("tax_prefill_state") == state_name:
+        return
+    state["tax_rate_text"] = state_tax_rate_percent(state_name)
+    state["tax_prefill_state"] = state_name
+
+
+def student_input_errors(
+    student_name: str,
+    grade: str,
+) -> tuple[str, ...]:
+    """Return immediate FR-01/FR-05 intake messages for one student."""
+
+    errors: list[str] = []
+    if not student_name.strip():
+        errors.append("Enter a student name or nickname.")
+    if not grade.strip():
+        errors.append("Enter the student's grade.")
+    return tuple(errors)
 
 
 def format_money(cents: int) -> str:
@@ -978,11 +1071,21 @@ def _humanize_internal_text(
             label.lower(),
             visible,
         )
-    return re.sub(
+    visible = re.sub(
         r"(-?\d+) cents\b",
         lambda match: format_money(int(match.group(1))),
         visible,
     )
+    visible = re.sub(
+        r"\bchild\s+entry\b",
+        "student",
+        visible,
+        flags=re.I,
+    )
+    visible = re.sub(r"\bchildren\b", "students", visible, flags=re.I)
+    visible = re.sub(r"\bchild\b", "student", visible, flags=re.I)
+    visible = re.sub(r"\bentries\b", "students", visible, flags=re.I)
+    return re.sub(r"\bentry\b", "student", visible, flags=re.I)
 
 
 def _catalog_product_label(
@@ -1024,7 +1127,7 @@ def _child_display_label(
 ) -> str:
     """Return a parent-entered label without exposing an internal ID."""
 
-    return child_labels.get(child_id, "Unknown entry")
+    return child_labels.get(child_id, "Unknown student")
 
 
 def _affected_children(
@@ -2690,6 +2793,18 @@ def _initialize_state(st: Any) -> None:
         "screen": "intake",
         "demo_mode": False,
         "child_count": 1,
+        "intake_step": 1,
+        "walkthrough_dismissed": False,
+        "budget_mode_label": "One combined budget",
+        "combined_budget_text": DEFAULT_BUDGET_TEXT,
+        "shopping_preference_label": next(iter(SHOPPING_MODES)),
+        "store_radius_miles": DEFAULT_RADIUS_MILES,
+        "fulfillment_label": next(iter(FULFILLMENT_OPTIONS)),
+        "sales_tax_state": DEFAULT_TAX_STATE_OPTION,
+        "tax_rate_text": STATE_GENERAL_SALES_TAX_PERCENT[
+            DEFAULT_TAX_STATE_OPTION
+        ],
+        "tax_prefill_state": DEFAULT_TAX_STATE_OPTION,
         "intake": None,
         "list_inputs": (),
         "document_structures": {},
@@ -2743,8 +2858,9 @@ def _persistent_notice(st: Any) -> None:
         "payment information is collected."
     )
     st.caption(
-        "Tax uses the rate you enter. State-specific tax rules and tax "
-        "holidays are not modeled."
+        "Tax uses the state-level estimate or override you choose. Local "
+        "rates, state-specific school-supply exemptions, and tax holidays "
+        "are not modeled."
     )
 
 
@@ -2762,6 +2878,19 @@ def _screen_progress(
 
 def _render_development_diagnostic(st: Any) -> None:
     with st.expander("Development use: model connection diagnostic"):
+        st.checkbox(
+            "Use stable offline demo mode",
+            key="demo_mode",
+            help=(
+                "Uses the built-in sample list, deterministic document "
+                "organization and extraction, and the seeded fictional "
+                "catalog. It does not process a real uploaded list offline."
+            ),
+        )
+        st.caption(
+            "This is a presentation fallback, not a parent shopping "
+            "preference."
+        )
         diagnostic = get_provider_diagnostic()
         st.write(
             escape_streamlit_dollars(
@@ -2827,158 +2956,279 @@ def _render_development_diagnostic(st: Any) -> None:
                 )
 
 
-def _render_intake(st: Any) -> None:
-    st.header("Let’s get the plan ready")
-    if development_diagnostics_enabled(st):
-        _render_development_diagnostic(st)
-    demo_mode = st.checkbox(
-        "Use stable offline demo mode",
-        value=bool(st.session_state["demo_mode"]),
-        help=(
-            "Uses deterministic sample extraction and the seeded fictional "
-            "catalog. No OpenAI or retailer service is required."
-        ),
+def _intake_students_from_state(
+    state: Mapping[str, Any],
+    student_count: int,
+) -> tuple[dict[str, Any], ...]:
+    """Rebuild FR-01/FR-05 student records from Streamlit widget state."""
+
+    students: list[dict[str, Any]] = []
+    for index in range(student_count):
+        entity_label = str(
+            state.get(f"entity_type_{index}", "One student")
+        )
+        students.append(
+            {
+                "child_id": f"child-{index + 1}",
+                "label": str(
+                    state.get(f"child_label_{index}", f"Student {index + 1}")
+                ).strip(),
+                "grade": str(
+                    state.get(f"child_grade_{index}", "")
+                ).strip(),
+                "student_count": (
+                    int(state.get(f"student_count_{index}", 20))
+                    if entity_label == "A classroom group"
+                    else 1
+                ),
+                "entity_type": (
+                    "classroom"
+                    if entity_label == "A classroom group"
+                    else "student"
+                ),
+            }
+        )
+    return tuple(students)
+
+
+def _render_intake_walkthrough(st: Any) -> None:
+    """Show the short, dismissible first-arrival workflow explanation."""
+
+    if st.session_state.get("walkthrough_dismissed"):
+        return
+    with st.container(border=True):
+        st.subheader("From a school list to a shopping plan")
+        st.write(
+            "Ready, Set, School reads the list, shows you what it understood, "
+            "and proposes a cart for you to check."
+        )
+        st.write(
+            "1. Set up students and budget · 2. Add lists · "
+            "3. Review what we read · 4. Approve decisions and get your plan"
+        )
+        if st.button("Hide this overview", key="dismiss_walkthrough"):
+            st.session_state["walkthrough_dismissed"] = True
+            st.rerun()
+
+
+def _render_intake_step_progress(st: Any, step: int) -> None:
+    """Keep the parent oriented within the three-part setup."""
+
+    labels = (
+        "1 · Students",
+        "2 · Budget",
+        "3 · Shopping preferences",
     )
-    st.session_state["demo_mode"] = demo_mode
+    st.progress(step / len(labels))
+    columns = st.columns(len(labels))
+    for index, (column, label) in enumerate(zip(columns, labels), start=1):
+        if index == step:
+            column.markdown(f"**{label}**")
+        else:
+            column.caption(label)
+
+
+def _render_student_step(st: Any) -> None:
+    """Render guided FR-01/FR-05 student intake with immediate validation."""
+
+    st.subheader("Step 1 — Who are you shopping for?")
     st.write(
-        "Use labels such as “Grade 2” instead of full child names. "
-        "Nothing is saved after this session."
+        "Add each student whose list should be included in this shopping plan."
     )
-    child_count = int(
+    st.caption(
+        "A first name or nickname is enough. Nothing is saved after this "
+        "session."
+    )
+    student_count = int(
         st.number_input(
-            "How many children or classroom groups?",
+            "How many students or classroom groups?",
             min_value=1,
             max_value=MAX_CHILDREN_PER_SESSION,
-            value=int(st.session_state["child_count"]),
             step=1,
+            key="child_count",
             help=(
-                f"Sessions are capped at {MAX_CHILDREN_PER_SESSION} entries "
-                "to keep the live workflow reliable."
+                f"A session can include up to {MAX_CHILDREN_PER_SESSION} "
+                "students or classroom groups."
             ),
         )
     )
-    st.session_state["child_count"] = child_count
-
-    children: list[dict[str, Any]] = []
-    for index in range(child_count):
-        child_id = f"child-{index + 1}"
+    immediate_errors: list[str] = []
+    for index in range(student_count):
+        name_key = f"child_label_{index}"
+        grade_key = f"child_grade_{index}"
+        entity_key = f"entity_type_{index}"
+        st.session_state.setdefault(name_key, f"Student {index + 1}")
+        st.session_state.setdefault(grade_key, "")
+        st.session_state.setdefault(entity_key, "One student")
+        current_name = str(st.session_state.get(name_key, "")).strip()
         with st.container(border=True):
-            st.subheader(
-                escape_streamlit_dollars(f"Entry {index + 1}")
+            st.subheader(current_name or f"Student {index + 1}")
+            name_column, grade_column = st.columns(2)
+            name = name_column.text_input(
+                "Student name or nickname",
+                key=name_key,
+                placeholder="Example: Sam",
             )
-            left, right = st.columns(2)
-            label = left.text_input(
-                "Label",
-                value=f"Child {index + 1}",
-                key=f"child_label_{index}",
-                placeholder="Example: Grade 2",
-            )
-            grade = right.text_input(
+            grade = grade_column.text_input(
                 "Grade",
-                value="",
-                key=f"child_grade_{index}",
+                key=grade_key,
                 placeholder="Example: 2",
             )
+            errors = student_input_errors(name, grade)
+            if not name.strip():
+                name_column.error(errors[0])
+            if not grade.strip():
+                grade_column.error("Enter the student's grade.")
+            immediate_errors.extend(
+                f"{name.strip() or f'Student {index + 1}'}: {error}"
+                for error in errors
+            )
             entity_type = st.radio(
-                "Who is this list for?",
+                "Shopping for",
                 ("One student", "A classroom group"),
                 horizontal=True,
-                key=f"entity_type_{index}",
+                key=entity_key,
             )
-            student_count = 1
             if entity_type == "A classroom group":
-                student_count = int(
-                    st.number_input(
-                        "Students in this classroom",
-                        min_value=1,
-                        max_value=MAX_CLASSROOM_STUDENTS,
-                        value=20,
-                        step=1,
-                        key=f"student_count_{index}",
-                    )
+                count_key = f"student_count_{index}"
+                st.session_state.setdefault(count_key, 20)
+                st.number_input(
+                    "Students in this classroom",
+                    min_value=1,
+                    max_value=MAX_CLASSROOM_STUDENTS,
+                    step=1,
+                    key=count_key,
                 )
-            children.append(
-                {
-                    "child_id": child_id,
-                    "label": label.strip(),
-                    "grade": grade.strip(),
-                    "student_count": student_count,
-                    "entity_type": (
-                        "classroom"
-                        if entity_type == "A classroom group"
-                        else "student"
-                    ),
-                }
-            )
+    st.session_state["ui_error_active"] = bool(immediate_errors)
+    if st.button(
+        "Continue to budget",
+        type="primary",
+        disabled=bool(immediate_errors),
+    ):
+        st.session_state["ui_error_active"] = False
+        st.session_state["intake_step"] = 2
+        st.rerun()
 
-    st.subheader("Budget")
+
+def _render_budget_step(st: Any) -> None:
+    """Render guided FR-03 budget entry with immediate E-37 validation."""
+
+    students = _intake_students_from_state(
+        st.session_state,
+        int(st.session_state["child_count"]),
+    )
+    st.subheader("Step 2 — What is your budget?")
+    st.write(
+        "Use one amount for the whole plan, or set a separate amount for "
+        "each student."
+    )
     budget_mode_label = st.radio(
-        "How should the budget be entered?",
-        ("One combined budget", "A budget for each entry"),
+        "Budget setup",
+        ("One combined budget", "A budget for each student"),
         horizontal=True,
+        key="budget_mode_label",
     )
-    budget_mode = (
-        "combined"
-        if budget_mode_label == "One combined budget"
-        else "per_child"
-    )
-    budget_texts: dict[str, str] = {}
-    budget_entry_errors: list[str] = []
-    if budget_mode == "combined":
+    budget_errors: list[str] = []
+    if budget_mode_label == "One combined budget":
         combined_budget = st.text_input(
             r"Combined budget (\$)",
-            value=DEFAULT_BUDGET_TEXT,
+            key="combined_budget_text",
             help=(
-                "This is a text field so a tight demo budget such as 75 "
-                "can be entered directly."
+                "You can type a tight budget directly, such as 75 or 85.50."
             ),
         )
-        budget_error = budget_entry_error(combined_budget)
-        if budget_error is not None:
-            budget_entry_errors.append(budget_error)
-            st.error(escape_streamlit_dollars(budget_error))
+        error = budget_entry_error(combined_budget)
+        if error is not None:
+            budget_errors.append(error)
+            st.error(escape_streamlit_dollars(error))
     else:
-        combined_budget = ""
         columns = st.columns(2)
-        for index, child in enumerate(children):
-            budget_column = columns[index % 2]
-            budget_text = budget_column.text_input(
+        for index, student in enumerate(students):
+            budget_key = f"budget_{index}"
+            st.session_state.setdefault(budget_key, "75.00")
+            column = columns[index % 2]
+            budget_text = column.text_input(
                 escape_streamlit_dollars(
-                    (
-                        f"{child['label'] or f'Entry {index + 1}'} "
-                        r"budget (\$)"
-                    )
+                    f"{student['label']} budget (\\$)"
                 ),
-                value="75.00",
-                key=f"budget_{index}",
+                key=budget_key,
             )
-            budget_texts[child["child_id"]] = budget_text
-            budget_error = budget_entry_error(budget_text)
-            if budget_error is not None:
-                child_budget_error = (
-                    f"{child['label'] or f'Entry {index + 1}'}: "
-                    f"{budget_error}"
-                )
-                budget_entry_errors.append(child_budget_error)
-                budget_column.error(
-                    escape_streamlit_dollars(child_budget_error)
-                )
+            error = budget_entry_error(budget_text)
+            if error is not None:
+                message = f"{student['label']}: {error}"
+                budget_errors.append(message)
+                column.error(escape_streamlit_dollars(message))
+    st.session_state["ui_error_active"] = bool(budget_errors)
+    back, forward = st.columns([1, 2])
+    if back.button("Back to students"):
+        st.session_state["intake_step"] = 1
+        st.session_state["ui_error_active"] = False
+        st.rerun()
+    if forward.button(
+        "Continue to shopping preferences",
+        type="primary",
+        disabled=bool(budget_errors),
+    ):
+        st.session_state["intake_step"] = 3
+        st.session_state["ui_error_active"] = False
+        st.rerun()
 
-    st.subheader("How you want to shop")
+
+def _budget_from_intake_state(
+    state: Mapping[str, Any],
+    students: Sequence[Mapping[str, Any]],
+) -> tuple[str, int, Mapping[str, int]]:
+    """Convert already-validated FR-03 widget values at the UI boundary."""
+
+    if state.get("budget_mode_label") == "One combined budget":
+        return (
+            "combined",
+            money_to_cents(str(state.get("combined_budget_text", ""))),
+            {},
+        )
+    allocations = {
+        str(student["child_id"]): money_to_cents(
+            str(state.get(f"budget_{index}", ""))
+        )
+        for index, student in enumerate(students)
+    }
+    return "per_child", sum(allocations.values()), allocations
+
+
+def _render_preferences_step(st: Any) -> None:
+    """Render guided FR-04 preferences and advanced BR-02 controls."""
+
+    students = _intake_students_from_state(
+        st.session_state,
+        int(st.session_state["child_count"]),
+    )
+    st.subheader("Step 3 — How do you want to shop?")
+    st.write(
+        "Choose what matters most. The cart can compare total cost, favor "
+        "one stop, or use only stores you select."
+    )
     mode_label = st.selectbox(
-        "Shopping mode",
+        "Shopping preferences",
         tuple(SHOPPING_MODES),
+        key="shopping_preference_label",
     )
     shopping_mode = SHOPPING_MODES[mode_label]
-    stores = load_stores()
+    stores = tuple(load_stores())
     allowed_stores: frozenset[str] | None = None
     max_stores: int | None = None
+    preference_errors: list[str] = []
     if shopping_mode == "custom":
+        store_options = tuple(store.name for store in stores)
         selected_names = st.multiselect(
             "Stores to consider",
-            tuple(store.name for store in stores),
-            default=tuple(store.name for store in stores),
+            store_options,
+            default=store_options,
+            key="selected_store_names",
         )
+        if not selected_names:
+            message = "Choose at least one store to build a custom plan."
+            preference_errors.append(message)
+            st.error(message)
         store_ids_by_name = {
             store.name: store.store_id for store in stores
         }
@@ -2987,112 +3237,154 @@ def _render_intake(st: Any) -> None:
         )
         max_stores = int(
             st.number_input(
-                "Maximum stores",
+                "Maximum number of stores",
                 min_value=1,
                 max_value=len(stores),
                 value=2,
                 step=1,
+                key="maximum_stores",
             )
         )
-    radius = float(
-        st.number_input(
-            "Pickup-trip radius (simulated miles)",
-            min_value=0.0,
-            max_value=MAX_STORE_RADIUS_MILES,
-            value=DEFAULT_RADIUS_MILES,
-            step=0.5,
+
+    with st.expander("Advanced shopping and tax options"):
+        st.caption(
+            "Use these only if distance, pickup or delivery, or a known tax "
+            "rate should shape the plan."
+        )
+        radius = float(
+            st.number_input(
+                "Pickup-trip radius (simulated miles)",
+                min_value=0.0,
+                max_value=MAX_STORE_RADIUS_MILES,
+                step=0.5,
+                key="store_radius_miles",
+                help=(
+                    "This limits trips to pickup locations. It never limits "
+                    "stores that deliver."
+                ),
+            )
+        )
+        fulfillment_label = st.selectbox(
+            "Pickup or delivery preference",
+            tuple(FULFILLMENT_OPTIONS),
+            key="fulfillment_label",
+        )
+        fulfillment_preference = FULFILLMENT_OPTIONS[fulfillment_label]
+        st.caption(
+            "These are simulated distances from a notional home location, "
+            "not distances calculated from an address."
+        )
+        st.dataframe(
+            escape_streamlit_data(
+                store_radius_rows(
+                    stores,
+                    radius,
+                    fulfillment_preference,
+                )
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        state_name = st.selectbox(
+            "State used for the tax estimate",
+            tuple(STATE_GENERAL_SALES_TAX_PERCENT),
+            key="sales_tax_state",
+        )
+        initialize_state_tax_prefill(st.session_state, state_name)
+        tax_rate_text = st.text_input(
+            "Sales tax rate override (%)",
+            key="tax_rate_text",
             help=(
-                "This limits trips to pickup locations. It does not limit "
-                "stores that can deliver."
+                "This starts with the selected state's general rate. Change "
+                "it only if you know the rate you want the estimate to use."
             ),
         )
-    )
-    fulfillment_label = st.selectbox(
-        "Fulfillment preference",
-        tuple(FULFILLMENT_OPTIONS),
-    )
-    fulfillment_preference = FULFILLMENT_OPTIONS[fulfillment_label]
-    st.caption(
-        "These are fixed, simulated distances from a notional home location. "
-        "They are not calculated from an address. Delivery remains available "
-        "outside the pickup-trip radius."
-    )
-    st.dataframe(
-        escape_streamlit_data(
-            store_radius_rows(
-                stores,
-                radius,
-                fulfillment_preference,
-            )
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-    tax_rate_text = st.text_input(
-        "Sales tax rate (%)",
-        value=f"{DEFAULT_TAX_BASIS_POINTS / BASIS_POINTS_PER_PERCENT:.1f}",
-    )
-
-    if st.button("Continue to the lists", type="primary"):
-        errors: list[str] = list(budget_entry_errors)
-        if any(not child["label"] for child in children):
-            errors.append("Every entry needs a short label.")
-        if any(not child["grade"] for child in children):
-            errors.append("Every entry needs a grade.")
-        if budget_entry_errors:
-            budget_total = 0
-            budget_allocations = {}
-        else:
-            try:
-                if budget_mode == "combined":
-                    budget_total = money_to_cents(combined_budget)
-                    budget_allocations = {}
-                else:
-                    budget_allocations = {
-                        child_id: money_to_cents(value)
-                        for child_id, value in budget_texts.items()
-                    }
-                    budget_total = sum(budget_allocations.values())
-            except ValueError as error:
-                errors.append(str(error))
-                budget_total = 0
-                budget_allocations = {}
         try:
-            tax_basis_points = tax_percent_to_basis_points(tax_rate_text)
+            tax_percent_to_basis_points(tax_rate_text)
         except ValueError as error:
-            errors.append(str(error))
-            tax_basis_points = DEFAULT_TAX_BASIS_POINTS
-        if shopping_mode == "custom" and not allowed_stores:
-            errors.append("Choose at least one store in custom mode.")
-        if errors:
-            st.session_state["ui_error_active"] = True
-            for error in errors:
-                st.error(escape_streamlit_dollars(error))
-            return
-        st.session_state["intake"] = {
-            "session_id": str(uuid4()),
-            "children": tuple(children),
-            "budget_total": budget_total,
-            "budget_mode": budget_mode,
-            "budget_allocations": budget_allocations,
-            "shopping_mode": shopping_mode,
-            "store_radius_miles": radius,
-            "allowed_stores": allowed_stores,
-            "max_stores": max_stores,
-            "fulfillment_pref": fulfillment_preference,
-            "tax_basis_points": tax_basis_points,
-            "demo_mode": demo_mode,
-        }
-        st.session_state["result"] = None
-        st.session_state["list_identity_confirmed"] = False
-        st.session_state["approval_outcomes"] = {}
-        st.session_state["resolved_interrupts"] = {}
-        st.session_state["parent_decisions"] = ()
-        st.session_state["checkout_confirmation"] = None
+            preference_errors.append(str(error))
+            st.error(escape_streamlit_dollars(str(error)))
+        st.caption(
+            "State-level defaults are dated January 1, 2026. City and county "
+            "rates, state-specific school-supply exemptions, and "
+            "back-to-school tax holidays are not modeled."
+        )
+
+    student_errors = tuple(
+        error
+        for student in students
+        for error in student_input_errors(
+            str(student["label"]),
+            str(student["grade"]),
+        )
+    )
+    try:
+        budget_mode, budget_total, budget_allocations = (
+            _budget_from_intake_state(st.session_state, students)
+        )
+    except ValueError as error:
+        preference_errors.append(str(error))
+        budget_mode, budget_total, budget_allocations = "combined", 0, {}
+    preference_errors.extend(student_errors)
+    st.session_state["ui_error_active"] = bool(preference_errors)
+    back, forward = st.columns([1, 2])
+    if back.button("Back to budget"):
+        st.session_state["intake_step"] = 2
         st.session_state["ui_error_active"] = False
-        st.session_state["progress_substep"] = "adding the lists"
-        st.session_state["screen"] = "lists"
         st.rerun()
+    if not forward.button(
+        "Continue to the lists",
+        type="primary",
+        disabled=bool(preference_errors),
+    ):
+        return
+
+    tax_basis_points = tax_percent_to_basis_points(
+        str(st.session_state["tax_rate_text"])
+    )
+    st.session_state["intake"] = {
+        "session_id": str(uuid4()),
+        "children": tuple(students),
+        "budget_total": budget_total,
+        "budget_mode": budget_mode,
+        "budget_allocations": budget_allocations,
+        "shopping_mode": shopping_mode,
+        "store_radius_miles": radius,
+        "allowed_stores": allowed_stores,
+        "max_stores": max_stores,
+        "fulfillment_pref": fulfillment_preference,
+        "tax_basis_points": tax_basis_points,
+        "demo_mode": bool(st.session_state["demo_mode"]),
+    }
+    st.session_state["result"] = None
+    st.session_state["list_identity_confirmed"] = False
+    st.session_state["approval_outcomes"] = {}
+    st.session_state["resolved_interrupts"] = {}
+    st.session_state["parent_decisions"] = ()
+    st.session_state["checkout_confirmation"] = None
+    st.session_state["ui_error_active"] = False
+    st.session_state["progress_substep"] = "adding the lists"
+    st.session_state["screen"] = "lists"
+    st.rerun()
+
+
+def _render_intake(st: Any) -> None:
+    st.header("Set up your shopping plan")
+    debug_enabled = development_diagnostics_enabled(st)
+    if debug_enabled:
+        _render_development_diagnostic(st)
+    else:
+        st.session_state["demo_mode"] = False
+    _render_intake_walkthrough(st)
+    step = min(3, max(1, int(st.session_state.get("intake_step", 1))))
+    _render_intake_step_progress(st, step)
+    if step == 1:
+        _render_student_step(st)
+    elif step == 2:
+        _render_budget_step(st)
+    else:
+        _render_preferences_step(st)
 
 
 def _build_list_inputs(
@@ -3190,9 +3482,9 @@ def _render_lists(st: Any) -> None:
     children = intake["children"]
     st.header("Add the lists")
     st.write(
-        "Paste or upload the list for each entry. If one district document "
+        "Paste or upload the list for each student. If one district document "
         "contains several grades, upload it once and choose a section for "
-        "each child. Every file is checked before it is read."
+        "each student. Every file is checked before it is read."
     )
     saved_inputs = tuple(st.session_state["list_inputs"])
     expected_child_ids = tuple(
@@ -3269,7 +3561,7 @@ def _render_lists(st: Any) -> None:
             if shared_source:
                 st.caption(
                     "Upload it once. You will choose a separate grade or "
-                    "teacher section for each entry next."
+                    "teacher section for each student next."
                 )
             st.radio(
                 "List source",
@@ -3370,7 +3662,7 @@ def _demo_document_structure(
     label = (
         f"Grade {grade} supply list"
         if grade
-        else f"{child.get('label', 'Selected entry')} supply list"
+        else f"{child.get('label', 'Selected student')} supply list"
     )
     return DocumentStructureEnvelope(
         document_title="Offline demonstration list",
@@ -4593,7 +4885,7 @@ def _render_sections(st: Any) -> None:
     st.header("Choose the part of each document to read")
     st.write(
         "Some district files contain several grades, teachers, or translated "
-        "copies. Select only the sections that apply to this child. The next "
+        "copies. Select only the sections that apply to each student. The next "
         "screen will show the exact lines read from those sections."
     )
     if st.session_state["structure_errors"]:
@@ -4685,7 +4977,7 @@ def _render_sections(st: Any) -> None:
                 )
                 selected_by_child[child_id] = tuple(
                     st.multiselect(
-                        "Which section is your child's?",
+                        f"Which section applies to {child['label']}?",
                         option_ids,
                         format_func=lambda section_id, labels=labels_by_id: (
                             labels[section_id]
@@ -4908,7 +5200,7 @@ def _render_review(st: Any) -> None:
             )
             if shared_checks_elsewhere:
                 st.caption(
-                    "A check shared with another entry appears above and "
+                    "A check shared with another student appears above and "
                     f"also covers {child_labels[child_id]}."
                 )
 
@@ -4930,7 +5222,7 @@ def _render_review(st: Any) -> None:
                 edited_by_id.update(edited)
                 rendered_any = True
             if not rendered_any:
-                st.caption("No purchase items were read for this entry.")
+                st.caption("No purchase items were read for this student.")
 
             added = _new_review_item_from_controls(
                 st,
@@ -6534,7 +6826,7 @@ def _render_per_child(
     for child in children:
         child_id = child["child_id"]
         row = {
-            "Entry": child["label"],
+            "Student": child["label"],
             "Grade": child["grade"],
             "Item subtotal": format_streamlit_money(
                 item_costs.get(child_id, 0)
@@ -7540,7 +7832,7 @@ def _render_summary(st: Any) -> None:
         )
 
     # 5. Attribution is useful detail, but not part of the quick read.
-    with st.expander("Cost by child or classroom"):
+    with st.expander("Cost by student or classroom"):
         _render_per_child(
             st,
             optimization,
@@ -7775,157 +8067,142 @@ def _render_summary(st: Any) -> None:
 
 
 def _apply_custom_css(st: Any) -> None:
-    """Apply a cheerful, accessible back-to-school visual system."""
+    """Apply a high-contrast, school-inspired visual system."""
 
     st.markdown(
         """
         <style>
         :root {
-            --rss-ink: #24324a;
-            --rss-muted: #5f6b7a;
-            --rss-paper: #fffdf7;
+            --rss-ink: #1f2a24;
+            --rss-muted: #4f5f56;
+            --rss-paper: #f7f8f4;
             --rss-card: #ffffff;
-            --rss-line: #b9d9ec;
-            --rss-pencil: #f05252;
-            --rss-notebook: #1479bd;
-            --rss-sunshine: #ffc928;
-            --rss-mint: #39bf91;
-            --rss-purple: #8464df;
-            --rss-sky: #ccefff;
-            --rss-coral: #ff8066;
-            --rss-pink: #ff9fc7;
+            --rss-line: #cbd7cf;
+            --rss-pencil: #f4c542;
+            --rss-notebook: #2f6f9f;
+            --rss-chalkboard: #245740;
+            --rss-crayon: #bf3f4a;
+            --rss-soft-blue: #edf4f8;
+            --rss-soft-yellow: #fff8dc;
         }
         .stApp {
             color: var(--rss-ink);
-            background:
-                radial-gradient(circle at 7% 12%, rgba(255, 201, 40, 0.32) 0 5rem, transparent 5.1rem),
-                radial-gradient(circle at 94% 18%, rgba(255, 159, 199, 0.25) 0 7rem, transparent 7.1rem),
-                radial-gradient(circle at 88% 88%, rgba(57, 191, 145, 0.22) 0 8rem, transparent 8.1rem),
-                linear-gradient(90deg, transparent 3.15rem, rgba(240, 82, 82, 0.22) 3.15rem, rgba(240, 82, 82, 0.22) 3.25rem, transparent 3.25rem),
-                repeating-linear-gradient(180deg, transparent 0, transparent 2.35rem, rgba(20, 121, 189, 0.09) 2.35rem, rgba(20, 121, 189, 0.09) 2.42rem),
-                linear-gradient(135deg, #fffaf0 0%, #edfaff 42%, #fff3f8 72%, #f0fff8 100%);
+            background-color: var(--rss-paper);
+            font-family: "Segoe UI", Arial, sans-serif;
         }
         .block-container {
-            max-width: 1080px;
-            padding-top: 1.6rem;
-            padding-bottom: 4rem;
+            max-width: 1040px;
+            padding-top: 1.75rem;
+            padding-bottom: 4.5rem;
         }
         h1, h2, h3 {
             color: var(--rss-ink);
             font-family: "Trebuchet MS", "Segoe UI", sans-serif;
             letter-spacing: -0.02em;
-            line-height: 1.15;
+            line-height: 1.2;
         }
         h1 {
-            width: fit-content;
-            margin-bottom: 0.15rem !important;
-            font-size: clamp(2.35rem, 5vw, 3.65rem) !important;
-            font-weight: 850 !important;
-            background: linear-gradient(90deg, var(--rss-notebook), var(--rss-purple), var(--rss-pencil));
-            -webkit-background-clip: text;
-            background-clip: text;
-            color: transparent;
-            text-shadow: 0 3px 0 rgba(255, 211, 90, 0.22);
-        }
-        h1::after {
-            content: " ✏️";
-            -webkit-text-fill-color: initial;
-            font-size: 0.65em;
+            color: var(--rss-chalkboard);
+            margin-bottom: 0.25rem !important;
+            font-size: clamp(2.25rem, 5vw, 3.4rem) !important;
+            font-weight: 800 !important;
         }
         h2 {
-            margin-top: 1.7rem !important;
-            padding-left: 0.8rem;
-            border-left: 0.5rem solid var(--rss-sunshine);
-            background: linear-gradient(90deg, rgba(255, 201, 40, 0.18), transparent 72%);
-            border-radius: 0 0.8rem 0.8rem 0;
-            padding-block: 0.28rem;
+            margin-top: 2rem !important;
+            padding-left: 0.9rem;
+            border-left: 0.45rem solid var(--rss-pencil);
         }
         h3 {
-            color: #315e88;
+            color: var(--rss-notebook);
+            margin-top: 1.35rem !important;
         }
         p, label, [data-testid="stCaptionContainer"] {
+            color: var(--rss-ink);
             line-height: 1.55;
+        }
+        label {
+            font-weight: 650 !important;
         }
         [data-testid="stCaptionContainer"] {
             color: var(--rss-muted);
-            font-weight: 500;
+            font-weight: 525;
         }
         [data-testid="stMetric"] {
-            border: 2px solid var(--rss-line);
-            border-radius: 1.15rem;
+            border: 1px solid var(--rss-line);
+            border-top: 0.3rem solid var(--rss-notebook);
+            border-radius: 0.85rem;
             padding: 1rem 1.1rem;
-            background: linear-gradient(145deg, #ffffff, #f1fbff);
-            box-shadow: 0 7px 0 rgba(20, 121, 189, 0.13);
+            background-color: var(--rss-card);
         }
         [data-testid="stExpander"],
         [data-testid="stForm"],
         [data-testid="stVerticalBlockBorderWrapper"] {
-            border: 2px solid var(--rss-line) !important;
-            border-radius: 1.15rem !important;
-            background: linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(248, 244, 255, 0.94));
-            box-shadow: 0 7px 0 rgba(132, 100, 223, 0.12);
+            border: 1px solid var(--rss-line) !important;
+            border-radius: 0.9rem !important;
+            background-color: var(--rss-card) !important;
         }
         [data-testid="stNotification"] {
-            border-radius: 1rem;
-            border-width: 2px;
+            border-radius: 0.8rem;
+            border-width: 1px;
         }
         [data-testid="stTextInput"] input,
         [data-testid="stNumberInput"] input,
         [data-testid="stSelectbox"] > div > div {
-            border-radius: 0.8rem !important;
-            background-color: #f5fbff !important;
-            border-color: #9ecde8 !important;
+            color: var(--rss-ink) !important;
+            border-radius: 0.65rem !important;
+            background-color: #ffffff !important;
+            border-color: #8da298 !important;
         }
         [data-testid="stTextInput"] input:focus,
         [data-testid="stNumberInput"] input:focus {
             border-color: var(--rss-notebook) !important;
-            box-shadow: 0 0 0 0.2rem rgba(40, 120, 181, 0.13) !important;
+            box-shadow: 0 0 0 0.18rem rgba(47, 111, 159, 0.16) !important;
         }
         .stButton > button,
         .stDownloadButton > button,
         [data-testid="stFormSubmitButton"] > button {
-            border: 2px solid var(--rss-notebook);
-            background: linear-gradient(135deg, #ffffff, var(--rss-sky));
+            border: 2px solid var(--rss-chalkboard);
+            background-color: #ffffff;
             color: var(--rss-ink);
-            border-radius: 999px;
+            border-radius: 0.65rem;
             min-height: 2.85rem;
             padding-inline: 1.25rem;
             font-weight: 750;
-            transition: transform 120ms ease, box-shadow 120ms ease;
+            transition: background-color 120ms ease, color 120ms ease;
         }
         .stButton > button:hover,
         .stDownloadButton > button:hover,
         [data-testid="stFormSubmitButton"] > button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 0 rgba(40, 120, 181, 0.18);
+            background-color: var(--rss-soft-yellow);
+            color: var(--rss-ink);
         }
         .stButton > button[kind="primary"],
         [data-testid="stFormSubmitButton"] > button[kind="primary"] {
-            background: linear-gradient(90deg, var(--rss-notebook), var(--rss-purple), var(--rss-pencil));
-            border-color: var(--rss-purple);
+            background-color: var(--rss-chalkboard);
+            border-color: var(--rss-chalkboard);
             color: white;
-            box-shadow: 0 5px 0 rgba(132, 100, 223, 0.2);
         }
         [data-testid="stProgress"] > div > div > div > div {
-            background: linear-gradient(90deg, var(--rss-mint), var(--rss-notebook), var(--rss-purple), var(--rss-pencil));
+            background-color: var(--rss-notebook);
             border-radius: 999px;
         }
         [data-testid="stProgress"] > div > div {
-            background-color: #e7eef5;
+            background-color: #dce6e0;
             border-radius: 999px;
             overflow: hidden;
         }
         [data-testid="stDataFrame"],
         [data-testid="stTable"] {
-            border: 2px solid var(--rss-line);
-            border-radius: 1rem;
+            border: 1px solid var(--rss-line);
+            border-radius: 0.75rem;
+            background-color: #ffffff;
             overflow: hidden;
         }
         [role="radiogroup"] {
-            gap: 0.35rem;
+            gap: 0.5rem;
         }
         [role="radiogroup"] label {
-            border-radius: 0.8rem;
+            border-radius: 0.65rem;
         }
         hr {display: none !important;}
         [data-testid="stForm"] [role="radiogroup"] > label {
@@ -7933,82 +8210,13 @@ def _apply_custom_css(st: Any) -> None:
             margin-bottom: 0.8rem;
             padding: 0.65rem 0;
         }
-        .school-buddy {
-            position: fixed;
-            z-index: 0;
-            top: 36vh;
-            width: 6.4rem;
-            pointer-events: none;
-            user-select: none;
-            text-align: center;
-            filter: drop-shadow(0 7px 5px rgba(36, 50, 74, 0.16));
-        }
-        .school-buddy__kid {
-            display: block;
-            font-size: 3.5rem;
-            line-height: 1;
-            transform-origin: 50% 90%;
-            animation: rss-buddy-bounce 3.2s ease-in-out infinite;
-        }
-        .school-buddy__supply {
-            display: block;
-            margin-top: -0.25rem;
-            font-size: 2rem;
-            line-height: 1;
-            animation: rss-supply-wave 2.4s ease-in-out infinite;
-        }
-        .school-buddy--left {
-            left: 1rem;
-        }
-        .school-buddy--right {
-            right: 1rem;
-            top: 58vh;
-        }
-        .school-buddy--right .school-buddy__kid {
-            animation-delay: -1.4s;
-        }
-        .school-buddy--right .school-buddy__supply {
-            animation-delay: -0.9s;
-        }
-        @keyframes rss-buddy-bounce {
-            0%, 100% {transform: translateY(0) rotate(-2deg);}
-            45% {transform: translateY(-0.7rem) rotate(3deg);}
-            55% {transform: translateY(-0.7rem) rotate(1deg);}
-        }
-        @keyframes rss-supply-wave {
-            0%, 100% {transform: rotate(-7deg) scale(1);}
-            50% {transform: rotate(8deg) scale(1.08);}
-        }
-        @media (max-width: 1240px) {
-            .school-buddy {
-                display: none;
-            }
-        }
-        @media (prefers-reduced-motion: reduce) {
-            .school-buddy__kid,
-            .school-buddy__supply {
-                animation: none;
-            }
-        }
         @media (max-width: 700px) {
-            .stApp {
-                background:
-                    repeating-linear-gradient(180deg, transparent 0, transparent 2.35rem, rgba(40, 120, 181, 0.06) 2.35rem, rgba(40, 120, 181, 0.06) 2.42rem),
-                    linear-gradient(135deg, #fffdf7 0%, #f7fcff 100%);
-            }
             .block-container {
                 padding-top: 1rem;
+                padding-inline: 1rem;
             }
         }
         </style>
-        <div class="school-buddy school-buddy--left" aria-hidden="true">
-            <span class="school-buddy__kid">👧🏽</span>
-            <span class="school-buddy__supply">📚</span>
-        </div>
-        <div class="school-buddy school-buddy--right" aria-hidden="true">
-            <span class="school-buddy__kid">🧒🏻</span>
-            <span class="school-buddy__supply">🎒</span>
-        </div>
         """,
         unsafe_allow_html=True,
     )

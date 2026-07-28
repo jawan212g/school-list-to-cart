@@ -10,7 +10,7 @@ Ian Demroff · Sarah Fritschy · Jawan Goodspeed · Marwa Gujarathi · Abhishek 
 
 ## What Ready, Set, School does
 
-Upload or paste one supply list per child. Set a budget and a shopping mode. PDF pages
+Upload or paste one supply list per student. Set a budget and shopping preferences. PDF pages
 are rendered as images so the reading step can preserve tables and multi-column
 layouts. For district-wide documents, the parent first chooses the grade, teacher, or
 named section to read. The app then proposes a cart from a simulated four-store
