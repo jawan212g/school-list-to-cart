@@ -823,6 +823,129 @@ def test_grade_section_defaults_and_selection_reach_real_extractor_contract() ->
     assert received[0].ignored_section_labels == ("Fifth Grade",)
 
 
+def test_section_picker_uses_only_section_choices_when_details_add_nothing() -> None:
+    """A simple grade picker does not render a redundant evidence table."""
+
+    structure = DocumentStructureEnvelope(
+        languages=("English",),
+        sections=(
+            DocumentSection(
+                section_id="grade-2",
+                label="2nd Grade",
+                grades=("2nd Grade",),
+                page_numbers=(1,),
+                language="English",
+            ),
+            DocumentSection(
+                section_id="grade-5",
+                label="5th Grade",
+                grades=("5th Grade",),
+                page_numbers=(1,),
+                language="English",
+            ),
+        ),
+    )
+
+    rows = app.document_section_rows(structure)
+
+    assert rows == (
+        {"Section": "2nd Grade"},
+        {"Section": "5th Grade"},
+    )
+    assert app.document_sections_need_table(rows) is False
+    assert app._join_names(()) == ""
+
+
+def test_section_table_is_sparse_and_explains_translated_duplicates() -> None:
+    """Only meaningful varying metadata appears in a multilingual table."""
+
+    structure = DocumentStructureEnvelope(
+        languages=("English", "Spanish"),
+        sections=(
+            DocumentSection(
+                section_id="grade-2-en",
+                label="Grade 2",
+                grades=("Grade 2",),
+                named_sections=("Individual", "Shared"),
+                page_numbers=(1,),
+                language="English",
+            ),
+            DocumentSection(
+                section_id="grade-5-en",
+                label="Grade 5",
+                grades=("Grade 5",),
+                page_numbers=(2,),
+                language="English",
+            ),
+            DocumentSection(
+                section_id="grade-2-es",
+                label="Grade 2",
+                grades=("Grade 2",),
+                page_numbers=(1,),
+                language="Spanish",
+                duplicate_of_section_id="grade-2-en",
+            ),
+        ),
+    )
+
+    rows = app.document_section_rows(structure)
+
+    assert app.document_sections_need_table(rows) is True
+    assert tuple(rows[0]) == ("Section", "Includes", "Page", "Language")
+    assert rows[0] == {
+        "Section": "Grade 2",
+        "Includes": "Individual and Shared",
+        "Page": "1",
+        "Language": "English",
+    }
+    assert rows[1]["Includes"] == ""
+    assert rows[2]["Language"] == (
+        "Spanish — translated copy of Grade 2"
+    )
+    assert all("Teacher" not in row for row in rows)
+    assert all("Status" not in row for row in rows)
+    assert all(
+        "the selected entries" not in value
+        for row in rows
+        for value in row.values()
+    )
+
+
+def test_grade_preselection_handles_ordinals_and_preserves_parent_changes() -> None:
+    """The keyed widget starts at the entered grade but remains changeable."""
+
+    structure = DocumentStructureEnvelope(
+        sections=(
+            DocumentSection(
+                section_id="grade-2",
+                label="Second Grade",
+            ),
+            DocumentSection(
+                section_id="grade-5",
+                label="5th Grade",
+            ),
+        ),
+    )
+    state: dict[str, object] = {}
+    defaults = app.section_picker_default_ids(structure, "grade 2")
+
+    assert defaults == ("grade-2",)
+    assert app.initialize_section_picker_state(
+        state,
+        "document_sections_child-1",
+        defaults,
+    )
+    assert state["document_sections_child-1"] == ["grade-2"]
+
+    state["document_sections_child-1"] = ["grade-5"]
+    assert not app.initialize_section_picker_state(
+        state,
+        "document_sections_child-1",
+        defaults,
+    )
+    assert state["document_sections_child-1"] == ["grade-5"]
+
+
 def test_summary_names_read_ignored_and_uninterpreted_source() -> None:
     """Summary evidence states what was read, ignored, and not interpreted."""
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -1003,7 +1003,7 @@ def _catalog_product_label(
 
 def _join_names(names: Sequence[str]) -> str:
     if not names:
-        return "the selected entries"
+        return ""
     if len(names) == 1:
         return names[0]
     if len(names) == 2:
@@ -3357,29 +3357,118 @@ def _inspect_list_inputs(
 def document_section_rows(
     structure: DocumentStructureEnvelope,
 ) -> tuple[dict[str, str], ...]:
-    """Return parent-facing evidence for every detected section."""
+    """Return only document-section columns that help a parent choose."""
 
-    return tuple(
-        {
-            "Section": section.label,
-            "Grades": _join_names(section.grades) or "Not stated",
-            "Teachers": _join_names(section.teachers) or "Not stated",
-            "Named parts": (
-                _join_names(section.named_sections) or "Not stated"
-            ),
-            "Pages": (
-                ", ".join(str(page) for page in section.page_numbers)
-                or "Not stated"
-            ),
-            "Language": section.language or "Not stated",
-            "Status": (
-                "Repeated translation"
-                if section.duplicate_of_section_id is not None
-                else "Available to select"
-            ),
-        }
-        for section in structure.sections
+    sections = structure.sections
+    labels_by_id = {
+        section.section_id: section.label for section in sections
+    }
+    grade_values = tuple(_join_names(section.grades) for section in sections)
+    teacher_values = tuple(
+        _join_names(section.teachers) for section in sections
     )
+    named_part_values = tuple(
+        _join_names(section.named_sections) for section in sections
+    )
+    page_values = tuple(
+        ", ".join(str(page) for page in section.page_numbers)
+        for section in sections
+    )
+    document_languages = {
+        language.casefold()
+        for language in structure.languages
+        if language.strip()
+    } | {
+        section.language.casefold()
+        for section in sections
+        if section.language is not None and section.language.strip()
+    }
+    show_grades = any(
+        grade
+        and re.sub(r"[^a-z0-9]+", "", grade.casefold())
+        != re.sub(r"[^a-z0-9]+", "", section.label.casefold())
+        for section, grade in zip(sections, grade_values, strict=True)
+    )
+    show_teachers = (
+        any(teacher_values) and len(set(teacher_values)) > 1
+    )
+    show_named_parts = (
+        any(named_part_values) and len(set(named_part_values)) > 1
+    )
+    show_pages = (
+        any(page_values)
+        and len(set(page_values)) > 1
+    )
+    show_language = len(document_languages) > 1
+
+    rows: list[dict[str, str]] = []
+    for index, section in enumerate(sections):
+        row = {"Section": section.label}
+        if show_grades:
+            row["Grade"] = grade_values[index]
+        if show_teachers:
+            row["Teacher"] = teacher_values[index]
+        if show_named_parts:
+            row["Includes"] = named_part_values[index]
+        if show_pages:
+            row["Page"] = page_values[index]
+        if show_language:
+            language = section.language or ""
+            if section.duplicate_of_section_id is not None:
+                original_label = labels_by_id.get(
+                    section.duplicate_of_section_id,
+                    "the original section",
+                )
+                language = (
+                    f"{language} — translated copy of {original_label}"
+                    if language
+                    else f"Translated copy of {original_label}"
+                )
+            row["Language"] = language
+        rows.append(row)
+    return tuple(rows)
+
+
+def document_sections_need_table(
+    rows: Sequence[Mapping[str, str]],
+) -> bool:
+    """Use a table only when it conveys more than the section choices."""
+
+    return any(set(row) != {"Section"} for row in rows)
+
+
+GRADE_WORD_VALUES = {
+    "kindergarten": "k",
+    "kindergarden": "k",
+    "kinder": "k",
+    "first": "1",
+    "second": "2",
+    "third": "3",
+    "fourth": "4",
+    "fifth": "5",
+    "sixth": "6",
+    "seventh": "7",
+    "eighth": "8",
+    "ninth": "9",
+    "tenth": "10",
+    "eleventh": "11",
+    "twelfth": "12",
+}
+
+
+def _grade_identifier(value: str) -> str:
+    """Normalize entered and detected grade labels for picker preselection."""
+
+    normalized = re.sub(r"[^a-z0-9]+", "", value.casefold())
+    if not normalized:
+        return ""
+    if normalized in {"k", "gradek"}:
+        return "k"
+    for word, identifier in GRADE_WORD_VALUES.items():
+        if word in normalized:
+            return identifier
+    numbers = re.findall(r"\d+", normalized)
+    return numbers[0] if numbers else normalized
 
 
 def section_picker_default_ids(
@@ -3388,26 +3477,34 @@ def section_picker_default_ids(
 ) -> tuple[str, ...]:
     """Suggest matching grade sections without deciding for the parent."""
 
-    grade_key = re.sub(r"[^a-z0-9]+", "", entered_grade.casefold())
-    entered_numbers = tuple(re.findall(r"\d+", grade_key))
+    grade_key = _grade_identifier(entered_grade)
     matches = tuple(
         section.section_id
         for section in selectable_document_sections(structure)
         if grade_key
         and any(
-            grade_key
-            in re.sub(r"[^a-z0-9]+", "", grade.casefold())
-            or re.sub(r"[^a-z0-9]+", "", grade.casefold())
-            in grade_key
-            or (
-                entered_numbers
-                and entered_numbers
-                == tuple(re.findall(r"\d+", grade.casefold()))
+            _grade_identifier(candidate) == grade_key
+            for candidate in (
+                *section.grades,
+                section.label,
+                section.column_label or "",
             )
-            for grade in section.grades
         )
     )
     return matches
+
+
+def initialize_section_picker_state(
+    state: MutableMapping[str, Any],
+    key: str,
+    section_ids: Sequence[str],
+) -> bool:
+    """Seed Streamlit's keyed widget once so its grade default is honored."""
+
+    if key in state:
+        return False
+    state[key] = list(section_ids)
+    return bool(section_ids)
 
 
 def _extract_list_inputs(
@@ -3883,12 +3980,6 @@ def _render_sections(st: Any) -> None:
                 )
             )
 
-    pending_ids = tuple(
-        child_id
-        for child_id, structure in structures.items()
-        if automatic_document_selection(structure) is None
-        and child_id not in selections
-    )
     selected_by_child: dict[str, tuple[str, ...]] = {}
     with st.form("document_section_selection"):
         for child_id, structure in structures.items():
@@ -3905,11 +3996,6 @@ def _render_sections(st: Any) -> None:
                             f"Document: {structure.document_title}"
                         )
                     )
-                st.table(
-                    escape_streamlit_data(
-                        document_section_rows(structure)
-                    )
-                )
                 automatic = automatic_document_selection(structure)
                 if automatic is not None:
                     selections[child_id] = automatic
@@ -3932,6 +4018,19 @@ def _render_sections(st: Any) -> None:
                         )
                     continue
                 primary = selectable_document_sections(structure)
+                section_rows = document_section_rows(structure)
+                if document_sections_need_table(section_rows):
+                    st.table(
+                        escape_streamlit_data(section_rows)
+                    )
+                    if any(
+                        section.duplicate_of_section_id is not None
+                        for section in structure.sections
+                    ):
+                        st.caption(
+                            "Translated copies are shown for context and are "
+                            "not separate choices."
+                        )
                 option_ids = tuple(
                     section.section_id for section in primary
                 )
@@ -3940,25 +4039,50 @@ def _render_sections(st: Any) -> None:
                     for section in primary
                 }
                 current = selections.get(child_id)
-                default_ids = (
+                grade_default_ids = section_picker_default_ids(
+                    structure,
+                    str(child["grade"]),
+                )
+                initial_ids = (
                     tuple(current.selected_section_ids)
                     if current is not None
-                    else section_picker_default_ids(
-                        structure,
-                        str(child["grade"]),
-                    )
+                    else grade_default_ids
+                )
+                widget_key = f"document_sections_{child_id}"
+                initialize_section_picker_state(
+                    st.session_state,
+                    widget_key,
+                    initial_ids,
                 )
                 selected_by_child[child_id] = tuple(
                     st.multiselect(
-                        "Sections that apply",
+                        "Which section is your child's?",
                         option_ids,
-                        default=default_ids,
                         format_func=lambda section_id, labels=labels_by_id: (
                             labels[section_id]
                         ),
-                        key=f"document_sections_{child_id}",
+                        key=widget_key,
                     )
                 )
+                if (
+                    current is None
+                    and grade_default_ids
+                    and tuple(st.session_state[widget_key])
+                    == grade_default_ids
+                ):
+                    st.info(
+                        escape_streamlit_dollars(
+                            "Preselected "
+                            + _join_names(
+                                tuple(
+                                    labels_by_id[section_id]
+                                    for section_id in grade_default_ids
+                                )
+                            )
+                            + f" because {child['label']} was entered as "
+                            f"grade {child['grade']}. You can change it."
+                        )
+                    )
                 st.caption(
                     "All unselected sections, including translated repeats, "
                     "will be named as ignored in the review and summary."
@@ -3970,7 +4094,7 @@ def _render_sections(st: Any) -> None:
         )
     if submitted:
         try:
-            for child_id in pending_ids:
+            for child_id in selected_by_child:
                 selected_ids = selected_by_child.get(child_id, ())
                 selections[child_id] = build_document_selection(
                     structures[child_id],

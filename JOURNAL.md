@@ -642,3 +642,69 @@ choice rather than multiple cart requirements.
 Run the Machias Grade 4 flow in the deployed app, select each last-name option once,
 and confirm that the summary always shows one purchased bag branch and two
 condition-not-applicable source lines.
+
+## 2026-07-27 — Simplify the document section picker
+
+### Objective
+
+Reduce the document-section screen to the least information a parent needs to choose
+the applicable grade or teacher, and reliably preselect the section matching the
+grade already entered at intake.
+
+### Work completed
+
+- Removed the section-table Status column.
+- Removed placeholder text from empty section metadata; blank values now remain
+  blank.
+- Made section metadata columns conditional. Teacher, named-part, page, and grade
+  columns appear only when populated and useful for distinguishing choices.
+- Suppressed the table entirely when it would contain only section names; the
+  section multiselect becomes the simple list of choices.
+- Limited the Language column to documents with more than one detected language.
+- Marked translated duplicates in the Language column with the primary section they
+  repeat and kept those duplicates out of the selectable choices.
+- Expanded grade matching to recognize numeric, ordinal, and word forms such as
+  `2`, `2nd Grade`, and `Second Grade`.
+- Seeded the keyed Streamlit multiselect in session state so Streamlit cannot ignore
+  the grade-matched default after a rerun.
+- Added a visible explanation naming the preselected section, the entered grade that
+  caused the choice, and that the parent may change it.
+- Preserved parent changes instead of reapplying the default on later reruns.
+
+### Decisions made
+
+- Use no evidence table when section names alone answer the question.
+- Keep a compact table only when teacher, named-part, differing page, grade, or
+  multilingual context materially helps distinguish sections.
+- Keep translated copies visible as context but non-selectable so quantities cannot
+  be duplicated.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 machine, so the visual layout was
+  verified through pure display helpers, import/compile checks, and pytest rather
+  than a local browser launch.
+
+### Files created or changed
+
+- Updated `app.py`.
+- Updated `tests/test_app.py`.
+- Updated `JOURNAL.md`.
+
+### Testing performed
+
+- Focused application tests: 28 passed.
+- Complete suite: 203 passed in 2.65 seconds.
+- Python compilation completed without errors.
+- Git diff validation reported only the existing Windows line-ending notice.
+
+### Remaining work
+
+- Confirm the compact table and grade-preselection message at presentation width in
+  the deployed Streamlit application.
+
+### Recommended next step
+
+Open each real district PDF in the deployed app and verify that Machias and New
+School show a simple grade choice while Milford shows only the multilingual context
+needed to explain its hidden translated copies.
