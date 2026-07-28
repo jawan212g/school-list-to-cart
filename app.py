@@ -121,9 +121,53 @@ MAX_STORE_RADIUS_MILES = 25.0
 MAX_CLASSROOM_STUDENTS = 100
 DEFAULT_BUDGET_TEXT = "150.00"
 DEFAULT_RADIUS_MILES = 10.0
+NO_SET_BUDGET_LABEL = "No set budget"
 DEFAULT_TAX_STATE_OPTION = "Choose a state — use the 7.0% default"
 DEVELOPMENT_DEBUG_ENV = "SCHOOL_CART_DEBUG"
 DEBUG_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
+INTAKE_ENTRY_VALUE_PREFIXES = (
+    "child_label",
+    "student_name",
+    "teacher_name",
+    "child_grade",
+    "student_count",
+    "budget",
+    "list_mode",
+    "list_upload",
+    "list_upload_draft",
+    "list_paste",
+)
+INTAKE_ENTRY_TYPE_TRACKER_PREFIX = "intake_previous_entity_type"
+NAVIGATION_STATE_PREFIX = "navigation_saved::"
+NAVIGATION_WIDGET_KEYS = frozenset(
+    {
+        "child_count",
+        "demo_mode",
+        "budget_mode_label",
+        "combined_budget_text",
+        "shopping_preference_label",
+        "selected_store_names",
+        "maximum_stores",
+        "store_radius_miles",
+        "fulfillment_label",
+        "sales_tax_state",
+        "tax_rate_text",
+        "shared_list_for_all",
+        "shared_list_mode",
+        "shared_list_paste",
+    }
+)
+NAVIGATION_WIDGET_PREFIXES = (
+    "entity_type_",
+    "student_name_",
+    "teacher_name_",
+    "child_grade_",
+    "student_count_",
+    "budget_",
+    "list_mode_",
+    "list_paste_",
+    "document_sections_",
+)
 STATE_GENERAL_SALES_TAX_PERCENT: Mapping[str, str] = {
     # State-level general rates as of January 1, 2026. City and county rates
     # are deliberately excluded. Source: Tax Foundation, Facts & Figures 2026,
@@ -3024,7 +3068,7 @@ def _intake_students_from_state(
             {
                 "child_id": f"child-{index + 1}",
                 "label": str(
-                    state.get(f"child_label_{index}", f"Student {index + 1}")
+                    state.get(f"child_label_{index}", "")
                 ).strip(),
                 "grade": grade,
                 "student_count": (
@@ -3040,6 +3084,122 @@ def _intake_students_from_state(
             }
         )
     return tuple(students)
+
+
+@dataclass(frozen=True)
+class ListUploadDraft:
+    """One uploaded list retained while the parent navigates (FR-06)."""
+
+    name: str
+    data: bytes
+
+
+def _is_navigation_widget_key(key: str) -> bool:
+    """Return whether a widget value should survive screen navigation."""
+
+    if key.startswith(NAVIGATION_STATE_PREFIX):
+        return False
+    return (
+        key in NAVIGATION_WIDGET_KEYS
+        or key.startswith(NAVIGATION_WIDGET_PREFIXES)
+        or ":" in key
+    )
+
+
+def preserve_navigation_state(state: MutableMapping[str, Any]) -> None:
+    """Snapshot and restore reversible form navigation state (FR-01–FR-06)."""
+
+    widget_keys: set[str] = set()
+    for key in tuple(state):
+        if key.startswith(NAVIGATION_STATE_PREFIX):
+            widget_keys.add(key.removeprefix(NAVIGATION_STATE_PREFIX))
+        elif _is_navigation_widget_key(key):
+            widget_keys.add(key)
+    for key in widget_keys:
+        saved_key = NAVIGATION_STATE_PREFIX + key
+        if key in state:
+            state[saved_key] = state[key]
+        elif saved_key in state:
+            state[key] = state[saved_key]
+
+
+def _delete_navigation_value(
+    state: MutableMapping[str, Any],
+    key: str,
+) -> None:
+    """Delete both a live widget value and its navigation snapshot."""
+
+    state.pop(key, None)
+    state.pop(NAVIGATION_STATE_PREFIX + key, None)
+
+
+def _remember_upload_draft(
+    state: MutableMapping[str, Any],
+    draft_key: str,
+    upload: Any,
+) -> ListUploadDraft | None:
+    """Retain uploaded bytes without trying to repopulate a file widget."""
+
+    if upload is not None:
+        state[draft_key] = ListUploadDraft(
+            name=str(upload.name),
+            data=bytes(upload.getvalue()),
+        )
+    draft = state.get(draft_key)
+    return draft if isinstance(draft, ListUploadDraft) else None
+
+
+def clear_inactive_intake_entries(
+    state: MutableMapping[str, Any],
+    active_count: int,
+) -> None:
+    """Delete hidden intake widget values when an entry is removed (FR-01)."""
+
+    if not 0 <= active_count <= MAX_CHILDREN_PER_SESSION:
+        raise ValueError("Active intake entry count is outside the allowed range")
+    for index in range(active_count, MAX_CHILDREN_PER_SESSION):
+        for prefix in INTAKE_ENTRY_VALUE_PREFIXES:
+            _delete_navigation_value(state, f"{prefix}_{index}")
+        _delete_navigation_value(state, f"entity_type_{index}")
+        _delete_navigation_value(
+            state,
+            f"{INTAKE_ENTRY_TYPE_TRACKER_PREFIX}_{index}",
+        )
+        _delete_navigation_value(
+            state,
+            f"document_sections_child-{index + 1}",
+        )
+
+
+def reset_intake_entry_after_type_change(
+    state: MutableMapping[str, Any],
+    index: int,
+    entity_type: str | None,
+) -> bool:
+    """Clear incompatible entry values after Student/Classroom changes (FR-05)."""
+
+    normalized_type = (
+        entity_type if entity_type in {"Student", "Classroom"} else None
+    )
+    tracker_key = f"{INTAKE_ENTRY_TYPE_TRACKER_PREFIX}_{index}"
+    previous_type = state.get(tracker_key)
+    changed = (
+        previous_type in {"Student", "Classroom"}
+        and normalized_type in {"Student", "Classroom"}
+        and previous_type != normalized_type
+    )
+    if changed:
+        for prefix in INTAKE_ENTRY_VALUE_PREFIXES:
+            _delete_navigation_value(state, f"{prefix}_{index}")
+        _delete_navigation_value(
+            state,
+            f"document_sections_child-{index + 1}",
+        )
+    if normalized_type is None:
+        _delete_navigation_value(state, tracker_key)
+    else:
+        state[tracker_key] = normalized_type
+    return changed
 
 
 def intake_entry_display_number(
@@ -3063,6 +3223,22 @@ def intake_entry_display_number(
         for prior_index in range(index)
     )
     return matching_prior_entries + 1
+
+
+def budget_entry_fields(
+    entries: Sequence[Mapping[str, Any]],
+) -> tuple[tuple[int, str, str, str], ...]:
+    """Return one FR-03 budget field specification for every intake entry."""
+
+    return tuple(
+        (
+            index,
+            str(entry["child_id"]),
+            str(entry["label"]),
+            f"budget_{index}",
+        )
+        for index, entry in enumerate(entries)
+    )
 
 
 def _render_intake_step_progress(st: Any, step: int) -> None:
@@ -3090,6 +3266,13 @@ def _render_intake_step_progress(st: Any, step: int) -> None:
     )
 
 
+def _navigation_button_columns(st: Any) -> tuple[Any, Any]:
+    """Return equal-width columns for paired Back and Continue actions."""
+
+    back_column, continue_column = st.columns(2)
+    return back_column, continue_column
+
+
 def _render_student_step(st: Any) -> None:
     """Render type-first FR-01/FR-05 intake with exit validation."""
 
@@ -3106,6 +3289,7 @@ def _render_student_step(st: Any) -> None:
             ),
         )
     )
+    clear_inactive_intake_entries(st.session_state, student_count)
     validation_attempted = bool(
         st.session_state.get("student_validation_attempted", False)
     )
@@ -3147,6 +3331,16 @@ def _render_student_step(st: Any) -> None:
             else:
                 st.session_state[grade_key] = None
         current_type = st.session_state.get(entity_key)
+        reset_intake_entry_after_type_change(
+            st.session_state,
+            index,
+            (
+                str(current_type)
+                if current_type in {"Student", "Classroom"}
+                else None
+            ),
+        )
+        st.session_state.setdefault(name_key, "")
         if current_type == "Classroom":
             st.session_state.setdefault(
                 teacher_name_key,
@@ -3285,7 +3479,7 @@ def _render_student_step(st: Any) -> None:
     st.session_state["ui_error_active"] = (
         validation_attempted and bool(validation_errors)
     )
-    _, continue_column = st.columns([2, 1])
+    _, continue_column = _navigation_button_columns(st)
     continue_clicked = continue_column.button(
         "Continue to budget",
         type="primary",
@@ -3320,7 +3514,7 @@ def _render_budget_step(st: Any) -> None:
         (
             "One combined budget",
             "A budget for each student or classroom",
-            "No set budget — just show me the best plan",
+            NO_SET_BUDGET_LABEL,
         ),
         horizontal=True,
         key="budget_mode_label",
@@ -3343,23 +3537,20 @@ def _render_budget_step(st: Any) -> None:
             if validation_attempted:
                 st.error(escape_streamlit_dollars(error))
     elif budget_mode_label == "A budget for each student or classroom":
-        columns = st.columns(2)
-        for index, student in enumerate(students):
-            budget_key = f"budget_{index}"
+        for _, _, label, budget_key in budget_entry_fields(students):
             st.session_state.setdefault(budget_key, "75.00")
-            column = columns[index % 2]
-            budget_text = column.text_input(
+            budget_text = st.text_input(
                 escape_streamlit_dollars(
-                    f"{student['label']} budget (\\$)"
+                    f"{label} budget (\\$)"
                 ),
                 key=budget_key,
             )
             error = budget_entry_error(budget_text)
             if error is not None:
-                message = f"{student['label']}: {error}"
+                message = f"{label}: {error}"
                 budget_errors.append(message)
                 if validation_attempted:
-                    column.error(escape_streamlit_dollars(message))
+                    st.error(escape_streamlit_dollars(message))
     else:
         st.info(
             "The plan will still minimize landed cost. Budget comparisons "
@@ -3368,8 +3559,8 @@ def _render_budget_step(st: Any) -> None:
     st.session_state["ui_error_active"] = (
         validation_attempted and bool(budget_errors)
     )
-    back, forward = st.columns([1, 2])
-    if back.button("Back to students"):
+    back, forward = _navigation_button_columns(st)
+    if back.button("Back to students", use_container_width=True):
         st.session_state["intake_step"] = 1
         st.session_state["budget_validation_attempted"] = False
         st.session_state["ui_error_active"] = False
@@ -3404,16 +3595,13 @@ def _budget_from_intake_state(
             money_to_cents(str(state.get("combined_budget_text", ""))),
             {},
         )
-    if (
-        state.get("budget_mode_label")
-        == "No set budget — just show me the best plan"
-    ):
+    if state.get("budget_mode_label") == NO_SET_BUDGET_LABEL:
         return "none", None, {}
     allocations = {
-        str(student["child_id"]): money_to_cents(
-            str(state.get(f"budget_{index}", ""))
+        child_id: money_to_cents(
+            str(state.get(budget_key, ""))
         )
-        for index, student in enumerate(students)
+        for _, child_id, _, budget_key in budget_entry_fields(students)
     }
     return "per_child", sum(allocations.values()), allocations
 
@@ -3557,8 +3745,8 @@ def _render_preferences_step(st: Any) -> None:
     st.session_state["ui_error_active"] = (
         validation_attempted and bool(preference_errors)
     )
-    back, forward = st.columns([1, 2])
-    if back.button("Back to budget"):
+    back, forward = _navigation_button_columns(st)
+    if back.button("Back to budget", use_container_width=True):
         st.session_state["intake_step"] = 2
         st.session_state["preferences_validation_attempted"] = False
         st.session_state["ui_error_active"] = False
@@ -3633,11 +3821,15 @@ def _build_list_inputs(
             "Upload a file",
         )
         if mode == "Upload a file":
-            upload = st.session_state.get("shared_list_upload")
-            if upload is None:
+            draft = _remember_upload_draft(
+                st.session_state,
+                "shared_list_upload_draft",
+                st.session_state.get("shared_list_upload"),
+            )
+            if draft is None:
                 raise ValueError("Choose the shared district file.")
-            data = upload.getvalue()
-            mime_type = validate_uploaded_document(upload.name, data)
+            data = draft.data
+            mime_type = validate_uploaded_document(draft.name, data)
             return tuple(
                 ListInput(
                     child_id=str(child["child_id"]),
@@ -3669,13 +3861,17 @@ def _build_list_inputs(
     for index, child in enumerate(children):
         mode = st.session_state.get(f"list_mode_{index}", "Paste text")
         if mode == "Upload a file":
-            upload = st.session_state.get(f"list_upload_{index}")
-            if upload is None:
+            draft = _remember_upload_draft(
+                st.session_state,
+                f"list_upload_draft_{index}",
+                st.session_state.get(f"list_upload_{index}"),
+            )
+            if draft is None:
                 errors.append(f"{child['label']}: choose a file.")
                 continue
-            data = upload.getvalue()
+            data = draft.data
             try:
-                mime_type = validate_uploaded_document(upload.name, data)
+                mime_type = validate_uploaded_document(draft.name, data)
             except ValueError as error:
                 errors.append(f"{child['label']}: {error}")
                 continue
@@ -3779,6 +3975,11 @@ def _render_lists(st: Any) -> None:
             if shared_source
             else f"list_upload_{index}"
         )
+        upload_draft_key = (
+            "shared_list_upload_draft"
+            if shared_source
+            else f"list_upload_draft_{index}"
+        )
         paste_key = (
             "shared_list_paste"
             if shared_source
@@ -3806,7 +4007,7 @@ def _render_lists(st: Any) -> None:
                 key=mode_key,
             )
             if st.session_state[mode_key] == "Upload a file":
-                st.file_uploader(
+                upload = st.file_uploader(
                     (
                         "District supply-list document"
                         if shared_source
@@ -3815,6 +4016,18 @@ def _render_lists(st: Any) -> None:
                     type=("docx", "pdf", "jpg", "jpeg", "png", "txt"),
                     key=upload_key,
                 )
+                upload_draft = _remember_upload_draft(
+                    st.session_state,
+                    upload_draft_key,
+                    upload,
+                )
+                if upload is None and upload_draft is not None:
+                    st.caption(
+                        escape_streamlit_dollars(
+                            f"Saved file: {upload_draft.name}. Upload another "
+                            "file to replace it."
+                        )
+                    )
                 st.caption(
                     f"Maximum size: {MAX_UPLOAD_BYTES // 1_000_000} MB."
                 )
@@ -3834,12 +4047,16 @@ def _render_lists(st: Any) -> None:
                     key=paste_key,
                     placeholder="Paste required items and optional sections…",
                 )
-    left, right = st.columns([1, 2])
-    if left.button("Back"):
+    left, right = _navigation_button_columns(st)
+    if left.button("Back", use_container_width=True):
         st.session_state["progress_substep"] = "setup"
         st.session_state["screen"] = "intake"
         st.rerun()
-    if right.button("Organize my list", type="primary"):
+    if right.button(
+        "Organize my list",
+        type="primary",
+        use_container_width=True,
+    ):
         try:
             list_inputs = _build_list_inputs(st, children)
         except ValueError as error:
@@ -4375,7 +4592,7 @@ def _render_list_identity_warnings(
                     )
                 )
     with st.form("list_identity_confirmation"):
-        left, right = st.columns(2)
+        left, right = _navigation_button_columns(st)
         continue_anyway = left.form_submit_button(
             "Continue anyway",
             type="primary",
@@ -5251,11 +5468,19 @@ def _render_sections(st: Any) -> None:
                     "All unselected sections, including translated repeats, "
                     "will be named as ignored in the review and summary."
                 )
-        submitted = st.form_submit_button(
+        back_column, continue_column = _navigation_button_columns(st)
+        return_to_lists = back_column.form_submit_button(
+            "Back to lists",
+            use_container_width=True,
+        )
+        submitted = continue_column.form_submit_button(
             "Read the selected sections",
             type="primary",
             use_container_width=True,
         )
+    if return_to_lists:
+        st.session_state["screen"] = "lists"
+        st.rerun()
     if submitted:
         try:
             for child_id in selected_by_child:
@@ -5273,11 +5498,6 @@ def _render_sections(st: Any) -> None:
         st.session_state["progress_substep"] = "reading selected sections"
         st.session_state["screen"] = "working"
         st.rerun()
-    if st.button("Back to lists"):
-        st.session_state["screen"] = "lists"
-        st.rerun()
-
-
 def _render_review(st: Any) -> None:
     """Render a compact source-versus-interpretation review (FR-12)."""
 
@@ -5524,13 +5744,18 @@ def _render_review(st: Any) -> None:
                         escape_streamlit_dollars(note.source_text)
                     )
 
-        submitted = st.form_submit_button(
+        back_column, continue_column = _navigation_button_columns(st)
+        return_to_lists = back_column.form_submit_button(
+            "Back to lists",
+            use_container_width=True,
+        )
+        submitted = continue_column.form_submit_button(
             "Use these choices and build my shopping plan",
             type="primary",
             use_container_width=True,
         )
 
-    if st.button("Back to lists"):
+    if return_to_lists:
         st.session_state["screen"] = "lists"
         st.rerun()
     if not submitted:
@@ -8334,15 +8559,18 @@ def _render_summary(st: Any) -> None:
             f"{format_streamlit_money(confirmation['landed_cost'])}."
         )
 
-    left, right = st.columns(2)
-    if left.button("Change shopping settings"):
+    left, right = _navigation_button_columns(st)
+    if left.button(
+        "Change shopping settings",
+        use_container_width=True,
+    ):
         st.session_state["result"] = None
         st.session_state["checkout_confirmation"] = None
         st.session_state["ui_error_active"] = False
         st.session_state["progress_substep"] = "setup"
         st.session_state["screen"] = "intake"
         st.rerun()
-    if right.button("Start a new session"):
+    if right.button("Start a new session", use_container_width=True):
         clear_session_data(st)
         st.rerun()
 
@@ -8828,6 +9056,7 @@ def main() -> None:
         page_icon="🎒",
         layout="wide",
     )
+    preserve_navigation_state(st.session_state)
     _initialize_state(st)
     _apply_custom_css(st)
     screen = st.session_state["screen"]

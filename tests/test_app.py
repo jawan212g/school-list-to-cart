@@ -234,6 +234,205 @@ def test_student_and_classroom_display_counters_are_separate_only_in_ui() -> Non
     ) == ("child-1", "child-2", "child-3", "child-4")
 
 
+def test_removed_intake_entry_returns_blank_when_count_increases() -> None:
+    """FR-01: reducing the count deletes rather than hides entry state."""
+
+    state: dict[str, object] = {
+        "entity_type_0": "Student",
+        "child_label_0": "Maya",
+        "child_grade_0": "Grade 2",
+        "entity_type_1": "Student",
+        "intake_previous_entity_type_1": "Student",
+        "child_label_1": "Jesse",
+        "student_name_1": "Jesse",
+        "child_grade_1": "Grade 5",
+        "budget_1": "75.00",
+        "list_mode_1": "Paste text",
+        "list_paste_1": "2 pencils",
+    }
+
+    app.clear_inactive_intake_entries(state, 1)
+    app.clear_inactive_intake_entries(state, 2)
+
+    assert state == {
+        "entity_type_0": "Student",
+        "child_label_0": "Maya",
+        "child_grade_0": "Grade 2",
+    }
+    new_entries = app._intake_students_from_state(state, 2)
+    assert new_entries[1]["label"] == ""
+    assert new_entries[1]["grade"] == ""
+    assert "entity_type_1" not in state
+
+
+@pytest.mark.parametrize(
+    ("previous_type", "new_type"),
+    (
+        ("Classroom", "Student"),
+        ("Student", "Classroom"),
+    ),
+)
+def test_switching_entry_type_clears_previous_fields(
+    previous_type: str,
+    new_type: str,
+) -> None:
+    """FR-05: Student and Classroom values never leak across a type change."""
+
+    state: dict[str, object] = {
+        "entity_type_0": new_type,
+        "intake_previous_entity_type_0": previous_type,
+        "child_label_0": "Previous name",
+        "student_name_0": "Jesse",
+        "teacher_name_0": "Ms. Rivera",
+        "child_grade_0": "Grade 3",
+        "student_count_0": 20,
+        "budget_0": "200.00",
+        "list_mode_0": "Paste text",
+        "list_paste_0": "2 pencils",
+        "navigation_saved::student_name_0": "Jesse",
+        "navigation_saved::teacher_name_0": "Ms. Rivera",
+        "navigation_saved::child_grade_0": "Grade 3",
+        "navigation_saved::budget_0": "200.00",
+        "navigation_saved::list_paste_0": "2 pencils",
+    }
+
+    changed = app.reset_intake_entry_after_type_change(
+        state,
+        0,
+        new_type,
+    )
+
+    assert changed is True
+    assert state == {
+        "entity_type_0": new_type,
+        "intake_previous_entity_type_0": new_type,
+    }
+
+
+def test_backward_intake_navigation_preserves_all_section_values() -> None:
+    """FR-01–FR-04: Back reviews prior values instead of resetting them."""
+
+    state: dict[str, object] = {
+        "intake_step": 1,
+        "child_count": 1,
+        "entity_type_0": "Student",
+        "intake_previous_entity_type_0": "Student",
+        "child_label_0": "Jesse",
+        "student_name_0": "Jesse",
+        "child_grade_0": "Grade 5",
+        "budget_mode_label": "A budget for each student or classroom",
+        "budget_0": "85.00",
+        "shopping_preference_label": "Lowest landed cost",
+        "store_radius_miles": 7.5,
+        "fulfillment_label": "Pickup",
+        "sales_tax_state": "Indiana",
+        "tax_rate_text": "7.0",
+        "list_mode_0": "Paste text",
+        "list_paste_0": "24 pencils",
+        "clear:child-1:pencils:item": "pencils",
+    }
+    widget_keys = (
+        "entity_type_0",
+        "student_name_0",
+        "child_grade_0",
+        "budget_mode_label",
+        "budget_0",
+        "shopping_preference_label",
+        "store_radius_miles",
+        "fulfillment_label",
+        "sales_tax_state",
+        "tax_rate_text",
+        "list_mode_0",
+        "list_paste_0",
+        "clear:child-1:pencils:item",
+    )
+
+    app.preserve_navigation_state(state)
+    state["intake_step"] = 2
+    for key in widget_keys:
+        state.pop(key)
+    app.preserve_navigation_state(state)
+    state["intake_step"] = 1
+
+    assert {key: state[key] for key in widget_keys} == {
+        "entity_type_0": "Student",
+        "student_name_0": "Jesse",
+        "child_grade_0": "Grade 5",
+        "budget_mode_label": "A budget for each student or classroom",
+        "budget_0": "85.00",
+        "shopping_preference_label": "Lowest landed cost",
+        "store_radius_miles": 7.5,
+        "fulfillment_label": "Pickup",
+        "sales_tax_state": "Indiana",
+        "tax_rate_text": "7.0",
+        "list_mode_0": "Paste text",
+        "list_paste_0": "24 pencils",
+        "clear:child-1:pencils:item": "pencils",
+    }
+    restored = app._intake_students_from_state(state, 1)
+    assert restored[0]["label"] == "Jesse"
+    assert restored[0]["grade"] == "Grade 5"
+    assert restored[0]["entity_type"] == "student"
+
+
+def test_deliberate_removal_clears_saved_navigation_values() -> None:
+    """FR-01: navigation snapshots cannot resurrect a removed entry."""
+
+    state: dict[str, object] = {
+        "entity_type_1": "Student",
+        "student_name_1": "Jesse",
+        "child_label_1": "Jesse",
+        "child_grade_1": "Grade 5",
+        "budget_1": "85.00",
+        "list_mode_1": "Paste text",
+        "list_paste_1": "24 pencils",
+    }
+    app.preserve_navigation_state(state)
+
+    app.clear_inactive_intake_entries(state, 1)
+    app.preserve_navigation_state(state)
+
+    assert not any(
+        key.endswith("_1")
+        for key in state
+    )
+
+
+def test_uploaded_list_draft_survives_setup_and_review_navigation() -> None:
+    """FR-06: a selected file remains usable after leaving the lists screen."""
+
+    state: dict[str, object] = {
+        "shared_list_for_all": False,
+        "list_mode_0": "Upload a file",
+        "list_upload_0": SimpleNamespace(
+            name="grade5.txt",
+            getvalue=lambda: b"24 pencils",
+        ),
+    }
+    app._remember_upload_draft(
+        state,
+        "list_upload_draft_0",
+        state["list_upload_0"],
+    )
+    state.pop("list_upload_0")
+    st = SimpleNamespace(session_state=state)
+
+    inputs = app._build_list_inputs(
+        st,
+        (
+            {
+                "child_id": "child-1",
+                "label": "Jesse",
+            },
+        ),
+    )
+
+    assert len(inputs) == 1
+    assert inputs[0].child_id == "child-1"
+    assert inputs[0].source == b"24 pencils"
+    assert inputs[0].mime_type == "text/plain"
+
+
 def test_individual_budgets_include_students_and_classrooms() -> None:
     """FR-03/FR-05: every intake entry receives an allocation."""
 
@@ -267,6 +466,112 @@ def test_individual_budgets_include_students_and_classrooms() -> None:
         "child-1": 5_000,
         "child-2": 25_000,
     }
+    session = app._pipeline_session(
+        {
+            "session_id": "mixed-entry-budgets",
+            "children": students,
+            "budget_total": total,
+            "budget_mode": mode,
+            "budget_allocations": allocations,
+            "shopping_mode": "budget",
+            "store_radius_miles": 10.0,
+            "allowed_stores": None,
+            "fulfillment_pref": "pickup",
+            "tax_basis_points": 0,
+            "max_stores": None,
+        }
+    )
+    assert session.children == ("child-1", "child-2")
+    assert session.budget_total == 30_000
+    assert session.budget_allocations == {
+        "child-1": 5_000,
+        "child-2": 25_000,
+    }
+
+
+def test_budget_step_renders_one_field_for_every_intake_entry() -> None:
+    """FR-03/FR-05: mixed entry types produce two visible budget widgets."""
+
+    rendered_fields: list[tuple[str, str]] = []
+
+    class ButtonColumn:
+        @staticmethod
+        def button(*args: object, **kwargs: object) -> bool:
+            del args, kwargs
+            return False
+
+    class BudgetStreamlit:
+        session_state: dict[str, object] = {
+            "child_count": 2,
+            "entity_type_0": "Student",
+            "child_label_0": "Maya",
+            "child_grade_0": "Grade 2",
+            "entity_type_1": "Classroom",
+            "child_label_1": "Ms. Rivera",
+            "child_grade_1": "Grade 3",
+            "student_count_1": 20,
+            "budget_mode_label": (
+                "A budget for each student or classroom"
+            ),
+            "budget_validation_attempted": False,
+        }
+
+        @staticmethod
+        def caption(value: str) -> None:
+            del value
+
+        @classmethod
+        def radio(
+            cls,
+            label: str,
+            options: tuple[str, ...],
+            **kwargs: object,
+        ) -> str:
+            del label, options, kwargs
+            return str(cls.session_state["budget_mode_label"])
+
+        @classmethod
+        def text_input(
+            cls,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del kwargs
+            rendered_fields.append((label, key))
+            return str(cls.session_state[key])
+
+        @staticmethod
+        def info(value: str) -> None:
+            del value
+
+        @staticmethod
+        def error(value: str) -> None:
+            del value
+
+        @staticmethod
+        def columns(specification: object) -> tuple[ButtonColumn, ButtonColumn]:
+            del specification
+            return ButtonColumn(), ButtonColumn()
+
+    app._render_budget_step(BudgetStreamlit())
+
+    assert tuple(key for _, key in rendered_fields) == (
+        "budget_0",
+        "budget_1",
+    )
+    assert "Maya budget" in rendered_fields[0][0]
+    assert "Ms. Rivera budget" in rendered_fields[1][0]
+    assert app.budget_entry_fields(
+        app._intake_students_from_state(
+            BudgetStreamlit.session_state,
+            2,
+        )
+    ) == (
+        (0, "child-1", "Maya", "budget_0"),
+        (1, "child-2", "Ms. Rivera", "budget_1"),
+    )
 
 
 def test_no_budget_intake_has_no_ceiling_or_allocations() -> None:
@@ -282,9 +587,7 @@ def test_no_budget_intake_has_no_ceiling_or_allocations() -> None:
     )
     mode, total, allocations = app._budget_from_intake_state(
         {
-            "budget_mode_label": (
-                "No set budget — just show me the best plan"
-            ),
+            "budget_mode_label": "No set budget",
         },
         students,
     )
@@ -295,7 +598,7 @@ def test_no_budget_intake_has_no_ceiling_or_allocations() -> None:
     assert allocations == {}
     assert budget_source.index('"One combined budget"') < (
         budget_source.index(
-            '"No set budget — just show me the best plan"'
+            "NO_SET_BUDGET_LABEL"
         )
     )
 
@@ -308,6 +611,7 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     student_source = inspect.getsource(app._render_student_step)
     budget_source = inspect.getsource(app._render_budget_step)
     preferences_source = inspect.getsource(app._render_preferences_step)
+    main_source = inspect.getsource(app.main)
 
     assert "if debug_enabled" in intake_source
     assert 'st.session_state["demo_mode"] = False' in intake_source
@@ -348,7 +652,8 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert 'st.subheader("Budget")' not in budget_source
     assert "Step 2" not in budget_source
     assert "A budget for each student or classroom" in budget_source
-    assert "No set budget — just show me the best plan" in budget_source
+    assert "NO_SET_BUDGET_LABEL" in budget_source
+    assert app.NO_SET_BUDGET_LABEL == "No set budget"
     assert "budget_validation_attempted" in budget_source
     assert "disabled=" not in budget_source
     assert "forward.button" in budget_source
@@ -362,6 +667,48 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert "forward.button" in preferences_source
     assert "use_container_width=True" in preferences_source
     assert "Shopping mode" not in preferences_source
+    assert "_navigation_button_columns(st)" in student_source
+    assert "_navigation_button_columns(st)" in budget_source
+    assert "_navigation_button_columns(st)" in preferences_source
+    assert 'back.button("Back to students", use_container_width=True)' in (
+        budget_source
+    )
+    assert 'back.button("Back to budget", use_container_width=True)' in (
+        preferences_source
+    )
+    assert main_source.index(
+        "preserve_navigation_state(st.session_state)"
+    ) < main_source.index("_initialize_state(st)")
+
+
+def test_navigation_button_columns_are_equal_width() -> None:
+    """Paired navigation actions share the same amount of horizontal space."""
+
+    first = object()
+    second = object()
+
+    class FakeStreamlit:
+        @staticmethod
+        def columns(specification: object) -> tuple[object, object]:
+            assert specification == 2
+            return first, second
+
+    assert app._navigation_button_columns(FakeStreamlit()) == (
+        first,
+        second,
+    )
+    paired_navigation_renderers = (
+        app._render_budget_step,
+        app._render_preferences_step,
+        app._render_lists,
+        app._render_sections,
+        app._render_review,
+        app._render_summary,
+    )
+    for renderer in paired_navigation_renderers:
+        source = inspect.getsource(renderer)
+        assert "_navigation_button_columns(st)" in source
+        assert source.count("use_container_width=True") >= 2
 
 
 def test_visual_system_keeps_notebook_pattern_behind_opaque_cards() -> None:

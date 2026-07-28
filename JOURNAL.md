@@ -1150,3 +1150,190 @@ Run one deployed no-budget session with a student and a classroom, confirm both
 receive their own per-entry budget field when that mode is selected, then return to
 no-budget mode and verify the summary shows exact landed cost without a budget
 comparison.
+
+## 2026-07-28 — Reset removed entries and repair mixed-entry budgets
+
+### Objective
+
+Prevent positional Streamlit widget values from reappearing after entry removal or
+crossing between Student and Classroom types, and prove that every mixed entry
+receives a budget field and retains its allocation through cart review.
+
+### Work completed
+
+- Added deterministic intake-state cleanup for every removed entry slot, including
+  its type, names, grade, classroom multiplier, budget, list widgets, and document
+  section selection.
+- Added a previous-type marker for each active slot. Switching between Student and
+  Classroom now clears both name variants, the shared grade, classroom count, budget,
+  and list values before the new type's fields render.
+- Changed a missing stored label to remain empty instead of becoming a synthetic
+  Student-number label, so an increased count always creates a genuinely blank entry.
+- Made budget rendering and budget parsing share one unfiltered list of field
+  specifications derived from every intake entry.
+- Rendered per-entry budget fields in a simple vertical sequence rather than routing
+  them through separate columns.
+- Shortened the third budget option to `No set budget`.
+- Added tests covering reduce-then-increase, both type-switch directions, two rendered
+  budget widgets for a Student and Classroom, app-to-pipeline allocation transfer,
+  proportional per-entry cost attribution, and the resulting aggregate budget
+  interrupt.
+
+### Decisions made
+
+- Kept stable internal child IDs unchanged; only values associated with a removed or
+  repurposed position are cleared.
+- Preserved the current BRD behavior in which per-entry allocations sum to the
+  deterministic session ceiling. Per-entry rebalance prompts remain the deferred
+  E-22 feature.
+- Changed no optimizer, matching, extraction, or approval-gate implementation.
+
+### Problems or limitations
+
+- Streamlit is unavailable on this Windows ARM64 machine, so live widget lifecycle
+  behavior could not be observed locally. The actual rendering function was executed
+  through a Streamlit-shaped test double instead of relying only on source inspection
+  or allocation parsing.
+
+### Files created or changed
+
+- Updated `app.py`, `tests/test_app.py`, `tests/test_pipeline.py`, and `JOURNAL.md`.
+
+### Testing performed
+
+- Focused intake, pipeline, gate, and optimizer suites: 90 passed.
+- Complete automated suite: 234 passed in 2.65 seconds.
+- Python compilation completed without errors.
+- Git whitespace validation completed without errors; only the repository's existing
+  LF-to-CRLF conversion warnings were reported.
+
+### Remaining work
+
+- Confirm in deployed Streamlit that lowering and restoring the count produces a
+  blank slot, both type-switch directions clear immediately, and two mixed entries
+  display two budget fields.
+
+### Recommended next step
+
+Repeat the reported Jesse reproduction in the deployed app, then enter one Student
+and one Classroom, assign distinct budgets, and verify both budget variances appear
+in the final per-entry summary.
+
+## 2026-07-28 — Preserve form values across backward navigation
+
+### Objective
+
+Make every backward navigation action reviewable and reversible without weakening
+the intentional clearing behavior for removed entries or Student/Classroom type
+changes.
+
+### Work completed
+
+- Added a durable navigation snapshot for Student, Budget, Shopping preferences,
+  pasted-list, document-section, and extracted-item review widgets.
+- Restored saved widget values before Streamlit initializes defaults, preventing
+  hidden controls from being reset when the parent returns to an earlier screen.
+- Preserved list source choices and pasted text across setup, lists, working, and
+  review screens.
+- Added an in-memory uploaded-file draft so a selected file remains usable after
+  navigating away. The file widget itself is not programmatically repopulated; the
+  retained filename is shown and the stored bytes remain available to list intake.
+- Kept deliberate deletion authoritative by removing both the live widget value and
+  its navigation snapshot when an entry count decreases.
+- Kept type changes authoritative by removing both live and saved values belonging
+  to the previous Student or Classroom form.
+- Preserved unsaved extracted-item review controls through their existing stable
+  review keys when the parent returns to the lists screen.
+
+### Decisions made
+
+- Used non-widget shadow values because Streamlit automatically cleans widget keys
+  when their widgets disappear on another screen.
+- Stored uploaded-file bytes separately rather than assigning a value back into a
+  browser file-upload control.
+- Made no changes to extraction, matching, optimization, calculations, or the
+  approval gate.
+
+### Problems or limitations
+
+- Streamlit is unavailable on this Windows ARM64 machine, so the browser-level widget
+  cleanup cycle could not be observed live. Tests simulate that cleanup by removing
+  hidden widget keys and then exercising the same restore path called by `main`.
+
+### Files created or changed
+
+- Updated `app.py`, `tests/test_app.py`, and `JOURNAL.md`. The previously modified
+  `tests/test_pipeline.py` remains part of the same uncommitted intake-fix block.
+
+### Testing performed
+
+- Focused application and pipeline suites: 60 passed.
+- Complete automated suite: 237 passed in 3.60 seconds.
+- Python compilation completed without errors.
+- Git whitespace validation completed without errors; only the repository's existing
+  LF-to-CRLF conversion warnings were reported.
+
+### Remaining work
+
+- Confirm in deployed Streamlit that Student, Budget, Shopping preferences, pasted
+  lists, uploaded-list drafts, section choices, and review edits all remain visible
+  after moving backward and forward.
+
+### Recommended next step
+
+Run the deployed sequence Students → Budget → Students → Budget → Shopping
+preferences → Budget, then continue to Lists and Review and use each Back action once
+before completing the plan.
+
+## 2026-07-28 - Standardize navigation button sizing
+
+### Objective
+
+Make paired Back and Continue actions the same size throughout the application,
+including the oversized Continue to shopping preferences button.
+
+### Work completed
+
+- Replaced the unequal one-third/two-thirds navigation layouts with one shared
+  equal-width column helper.
+- Made both actions fill their matching columns on the Budget, Shopping preferences,
+  Lists, section selection, extracted-item review, and Summary screens.
+- Kept the first Students screen's single Continue action aligned to the same
+  right-hand half-width position.
+- Added a regression test covering the equal column specification and its use by
+  every screen with a paired navigation row.
+
+### Decisions made
+
+- Standardized paired actions structurally in Python rather than imposing a global
+  CSS width that could distort unrelated buttons such as approval choices, downloads,
+  and donation controls.
+- Made no changes to extraction, matching, optimization, calculations, or the
+  approval gate.
+
+### Problems or limitations
+
+- Streamlit is unavailable on this Windows ARM64 machine, so the final visual
+  proportions were verified structurally rather than in a live browser.
+
+### Files created or changed
+
+- Updated `app.py`, `tests/test_app.py`, and `JOURNAL.md`.
+
+### Testing performed
+
+- Focused application suite: 52 passed.
+- Complete automated suite: 238 passed in 2.77 seconds.
+- Python compilation completed without errors.
+- Git whitespace validation completed without errors; only the repository's existing
+  LF-to-CRLF conversion warnings were reported.
+
+### Remaining work
+
+- Confirm in deployed Streamlit that Back and Continue buttons have matching widths
+  at desktop and phone sizes.
+
+### Recommended next step
+
+Open the Budget and Shopping preferences screens in the deployed app and confirm the
+navigation row is balanced at both desktop and phone widths.

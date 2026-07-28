@@ -105,6 +105,77 @@ def test_pipeline_wires_two_lists_through_one_optimized_cart() -> None:
     assert all(decision.actor == "agent" for decision in result.decisions)
 
 
+def test_per_entry_budgets_reach_cost_attribution_and_budget_review() -> None:
+    """FR-03/BR-09: mixed-entry allocations survive through the budget gate."""
+
+    store = Store(
+        store_id="S",
+        name="Store",
+        distance_miles=1.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=0,
+        delivery_minimum=0,
+        tax_applies=False,
+    )
+    offer = Offer(
+        sku="PENCILS-5",
+        store_id="S",
+        brand="Generic",
+        title="Five pencils",
+        category="pencils",
+        pack_size=5,
+        unit_price=100,
+        pack_price=500,
+        stock_qty=1,
+        is_returnable=True,
+        attributes={},
+    )
+    session = PipelineSession(
+        session_id="per-entry-budgets",
+        children=("student", "classroom"),
+        budget_total=400,
+        budget_mode="per_child",
+        budget_allocations={
+            "student": 150,
+            "classroom": 250,
+        },
+        shopping_mode="budget",
+        fulfillment_pref="pickup",
+        tax_basis_points=0,
+    )
+
+    result = run_pipeline(
+        session,
+        (
+            ListInput(child_id="student", source="list-a"),
+            ListInput(child_id="classroom", source="list-b"),
+        ),
+        stores=(store,),
+        offers=(offer,),
+        suitability_judge=StructuredSuitabilityJudge(),
+        extractor=_fake_extractor,
+    )
+
+    assert result.session.budget_allocations == {
+        "student": 150,
+        "classroom": 250,
+    }
+    assert result.proposed_cart.plan.per_child_item_costs == {
+        "student": 200,
+        "classroom": 300,
+    }
+    assert result.proposed_cart.plan.per_child_landed_costs == {
+        "student": 200,
+        "classroom": 300,
+    }
+    assert result.proposed_cart.landed_cost == 500
+    assert result.proposed_cart.shortfall_cents == 100
+    assert tuple(
+        interrupt.kind for interrupt in result.approval_batch.interrupts
+    ) == ("budget_exceeded",)
+
+
 def test_confirmed_extraction_boundary_builds_without_reextracting() -> None:
     """FR-12: only the reviewed envelope enters plan generation."""
 
