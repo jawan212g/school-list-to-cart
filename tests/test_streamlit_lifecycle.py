@@ -34,6 +34,79 @@ def _assert_no_exception(test_app: AppTest) -> None:
     assert not test_app.exception
 
 
+def _run_section_screen() -> AppTest:
+    """Mount the production section screen with production Pydantic models."""
+
+    test_app = AppTest.from_string(
+        """
+import streamlit as st
+import app
+from agent.pipeline import ListInput
+from agent.schema import DocumentSection, DocumentStructureEnvelope
+
+st.session_state.setdefault(
+    "intake",
+    {
+        "children": (
+            {
+                "child_id": "child-1",
+                "label": "Ms. K",
+                "grade": "Grade 1",
+            },
+        )
+    },
+)
+st.session_state.setdefault(
+    "document_structures",
+    {
+        "child-1": DocumentStructureEnvelope(
+            document_title="Machias School Supply List",
+            languages=("English",),
+            primary_language="English",
+            sections=(
+                DocumentSection(
+                    section_id="grade-1",
+                    label="1st Grade",
+                    grades=("Grade 1",),
+                    page_numbers=(1,),
+                    language="English",
+                    source_line="1st Grade",
+                ),
+                DocumentSection(
+                    section_id="highly-capable",
+                    label="Highly Capable Class",
+                    page_numbers=(3,),
+                    language="English",
+                    source_line="Highly Capable Class",
+                ),
+            ),
+        )
+    },
+)
+st.session_state.setdefault(
+    "list_inputs",
+    (
+        ListInput(
+            child_id="child-1",
+            source="1st Grade\\nHighly Capable Class",
+            mime_type="text/plain",
+            document_name="Machias.pdf",
+        ),
+    ),
+)
+st.session_state.setdefault("document_selections", {})
+st.session_state.setdefault("structure_errors", {})
+st.session_state.setdefault("screen", "sections")
+st.session_state.setdefault("organized_list_confirmed", False)
+st.session_state.setdefault("extraction_cache_ready", False)
+app._render_sections(st)
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
 def _widget(
     test_app: AppTest,
     widget_type: str,
@@ -230,3 +303,34 @@ def test_untouched_defaults_are_committed_before_continue() -> None:
     assert intake["budget_total"] == 15_000
     assert intake["store_radius_miles"] == 10.0
     assert intake["tax_basis_points"] == 700
+
+
+def test_section_statement_and_submitted_scope_use_same_live_state() -> None:
+    """A5: the section explanation cannot diverge from the submitted IDs."""
+
+    test_app = _run_section_screen()
+    success_text = " ".join(str(item.value) for item in test_app.success)
+    assert "Will read 1st Grade" in success_text
+    assert "Highly Capable Class" not in success_text
+
+    question = next(
+        checkbox
+        for checkbox in test_app.checkbox
+        if checkbox.label == "Also use Highly Capable Class for Ms. K?"
+    )
+    assert question.value is False
+    question.set_value(True).run()
+    _assert_no_exception(test_app)
+    success_text = " ".join(str(item.value) for item in test_app.success)
+    assert "Will read 1st Grade and Highly Capable Class" in success_text
+
+    _click_label(test_app, "Continue with these sections")
+    selection = test_app.session_state["document_selections"]["child-1"]
+    assert selection.selected_section_ids == (
+        "grade-1",
+        "highly-capable",
+    )
+    assert selection.selected_section_labels == (
+        "1st Grade",
+        "Highly Capable Class",
+    )

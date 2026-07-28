@@ -1,6 +1,8 @@
 """Named business-rule constants from BRD Section 9.7."""
 
 from decimal import Decimal
+import re
+from typing import Literal
 
 
 MINOR_SUBSTITUTION_TYPES = frozenset(
@@ -68,6 +70,50 @@ MINIMUM_MATCH_CONFIDENCE = Decimal("0.0")  # FR-18: missing judgment is blocked.
 CART_REVALIDATION_REQUIRED = True  # BR-12: revalidate before checkout.
 
 DUPLICATE_SUPPRESSION_REQUIRED = True  # BR-13: combine identical needs.
+
+SECTION_MATCHING_GRADE_ACTION = "auto_select"
+# BR-14: a source-language section with the student's grade token is selected.
+SECTION_OTHER_GRADE_ACTION = "rule_out"
+# BR-15: a section with a different grade token is excluded without a question.
+SECTION_TRANSLATED_DUPLICATE_ACTION = "provenance_only"
+# BR-16: a translated duplicate is evidence for its original, never a choice.
+SECTION_WITHOUT_GRADE_ACTION = "ask_parent"
+# BR-17: only a source-language section without any grade token asks the parent.
+SECTION_NO_MATCH_ACTION = "stop"
+# BR-18: zero matching source-language sections stops extraction for that student.
+PRIMARY_LANGUAGE_FALLBACK_INDEX = 0
+# BR-18: when the model does not name a primary language, use the first detected one.
+GRADE_TOKEN_NUMBER_INDEX = 0
+# BR-14: when a grade token contains a number, its first number is the grade.
+NONPAGINATED_SOURCE_PAGE = 1
+# BR-19: pasted and TXT source evidence uses page 1 for uniform provenance.
+
+SectionResolutionAction = Literal[
+    "auto_select",
+    "rule_out",
+    "provenance_only",
+    "ask_parent",
+]
+
+GRADE_WORD_IDENTIFIERS = {
+    "prekindergarten": "pre-k",
+    "prek": "pre-k",
+    "kindergarten": "k",
+    "kindergarden": "k",
+    "kinder": "k",
+    "first": "1",
+    "second": "2",
+    "third": "3",
+    "fourth": "4",
+    "fifth": "5",
+    "sixth": "6",
+    "seventh": "7",
+    "eighth": "8",
+    "ninth": "9",
+    "tenth": "10",
+    "eleventh": "11",
+    "twelfth": "12",
+}
 
 
 ALLOWED_CATEGORIES = frozenset(
@@ -245,3 +291,77 @@ def non_returnable_offer_requires_approval(
         and pack_price_cents
         > NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS
     )
+
+
+def grade_token_identifier(value: str) -> str:
+    """Normalize an explicit grade token for BR-14 and BR-15."""
+
+    normalized = re.sub(r"[^a-z0-9]+", "", value.casefold())
+    if not normalized:
+        return ""
+    if normalized in {"k", "gradek"}:
+        return "k"
+    for word, identifier in GRADE_WORD_IDENTIFIERS.items():
+        if word in normalized:
+            return identifier
+    numbers = re.findall(r"\d+", normalized)
+    return numbers[GRADE_TOKEN_NUMBER_INDEX] if numbers else normalized
+
+
+def choose_primary_document_language(
+    stated_primary_language: str | None,
+    detected_languages: tuple[str, ...],
+    original_section_languages: tuple[str, ...],
+) -> str | None:
+    """Apply BR-18's deterministic source-language fallback."""
+
+    if stated_primary_language:
+        return stated_primary_language
+    if detected_languages:
+        return detected_languages[PRIMARY_LANGUAGE_FALLBACK_INDEX]
+    return next(
+        (language for language in original_section_languages if language),
+        None,
+    )
+
+
+def section_is_in_primary_language(
+    section_language: str | None,
+    primary_language: str | None,
+) -> bool:
+    """Keep only source-language originals for BR-14 through BR-18."""
+
+    if not primary_language:
+        return True
+    if not section_language:
+        return False
+    return section_language.casefold() == primary_language.casefold()
+
+
+def section_is_parent_selectable(
+    translated_duplicate_of: str | None,
+) -> bool:
+    """Apply BR-16 before a section reaches any parent control."""
+
+    return translated_duplicate_of is None
+
+
+def document_section_action(
+    student_grade: str,
+    section_grade_tokens: tuple[str, ...],
+    *,
+    translated_duplicate_of: str | None,
+) -> SectionResolutionAction:
+    """Resolve one model-detected section fact using BR-14 through BR-17."""
+
+    if translated_duplicate_of is not None:
+        return SECTION_TRANSLATED_DUPLICATE_ACTION
+    if not section_grade_tokens:
+        return SECTION_WITHOUT_GRADE_ACTION
+    student_grade_id = grade_token_identifier(student_grade)
+    if student_grade_id and any(
+        grade_token_identifier(token) == student_grade_id
+        for token in section_grade_tokens
+    ):
+        return SECTION_MATCHING_GRADE_ACTION
+    return SECTION_OTHER_GRADE_ACTION

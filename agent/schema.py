@@ -13,6 +13,7 @@ from agent.rules import (
     ALLOWED_CATEGORIES,
     CANONICAL_ITEM_ALIASES,
     CORRECTED_EXTRACTION_CONFIDENCE,
+    NONPAGINATED_SOURCE_PAGE,
 )
 
 
@@ -249,8 +250,9 @@ class Requirement(BaseModel):
     condition_group_id: str | None = None
     condition_question: str | None = None
     condition_option: str | None = None
+    source_document: str | None = None
     source_section: str | None = None
-    source_page: int | None = Field(default=None, ge=1)
+    source_page: int = Field(default=NONPAGINATED_SOURCE_PAGE, ge=1)
     source_language: str | None = None
     attributes: RequirementAttributes = Field(
         default_factory=RequirementAttributes
@@ -385,6 +387,7 @@ class DocumentSection(BaseModel):
     page_numbers: tuple[int, ...] = ()
     language: str | None = None
     column_label: str | None = None
+    source_line: str = Field(min_length=1)
     duplicate_of_section_id: str | None = None
 
     @field_validator("grades", "teachers", "named_sections")
@@ -413,6 +416,7 @@ class DocumentStructureEnvelope(BaseModel):
     document_title: str | None = None
     layouts: tuple[DocumentLayout, ...] = ("single_section",)
     languages: tuple[str, ...] = ()
+    primary_language: str | None = None
     sections: tuple[DocumentSection, ...] = ()
     unreadable_regions: tuple[str, ...] = ()
 
@@ -516,6 +520,7 @@ class SupplyItemReview(BaseModel):
     condition_group_id: str | None = None
     condition_question: str | None = None
     condition_option: str | None = None
+    source_document: str | None = None
     source_section: str | None = None
     source_page: int | None = Field(default=None, ge=1)
     source_language: str | None = None

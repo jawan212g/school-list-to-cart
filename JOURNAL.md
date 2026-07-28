@@ -1610,3 +1610,81 @@ Streamlit widgets were conditionally unmounted and remounted.
 Run `python -m pytest -q tests/test_streamlit_lifecycle.py` in the deployment or CI
 environment, then manually confirm one Budget mode round-trip and one advanced
 preferences banner round-trip in the hosted app.
+
+## 2026-07-28 - Resolve document sections deterministically
+
+### Objective
+
+Replace the district-document section spreadsheet with a rule-driven statement of
+what will be read, while retaining one-click source evidence and explicit handling
+for genuinely unresolved sections.
+
+### Work completed
+
+- Added BR-14 through BR-18 for matching-grade selection, other-grade exclusion,
+  translated-copy provenance, ungraded parent questions, and the zero-match stop.
+- Added BR-19 so non-paginated list evidence consistently uses page 1.
+- Added a pure section-resolution layer that consumes the production Pydantic
+  structure envelope and returns one choice object used by both display and submit.
+- Removed label and column-text guessing from grade resolution. Only the extractor's
+  explicit grade tokens can cause automatic selection.
+- Kept translated copies out of parent controls and attached them to their
+  source-language originals as provenance.
+- Added an explicit mismatch outcome naming the student, document, and covered
+  grades, with paths to select manually, upload another document, or return to setup.
+- Carried trusted document names, page numbers, and exact source lines through list
+  input, extraction, and review models.
+- Added one-click rendered-page previews for document sections, unresolved section
+  questions, and extracted item source lines.
+- Fixed the demo structure label so a stored value such as `Grade 1` is not prefixed
+  a second time.
+- Added production-shape unit tests plus a real Streamlit `AppTest` for the Ms. K
+  state/explanation mismatch. The AppTest remains locally skipped by platform policy.
+- Added a non-English injection case proving that translated document text cannot
+  change section resolution and that an out-of-domain injected item is rejected.
+
+### Decisions made
+
+- Diagnosed the Ms. K defect as two sources of truth: a retained multiselect widget
+  and a separately computed caption. The replacement fingerprints widget state to
+  the actual document and grade, then derives the statement and submission from one
+  `ResolvedSectionChoice`.
+- Required the structure model to return only source facts (`primary_language` and
+  `source_line`); all section decisions remain deterministic.
+- Moved page-number indexing to a model-free document-page utility so
+  `agent/extract.py` contains no quantity, money, or page arithmetic.
+- Did not add translation, review redesign, approval changes, or calculation changes.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 machine, so the new production
+  `AppTest` is collected but cannot execute locally.
+- The requested live OpenAI Maple regression attempt timed out for both list
+  extractions. The resulting empty plan was correctly treated as extraction failure
+  and is not a valid replacement for the recorded $111.21 and $71.07 baselines.
+
+### Files created or changed
+
+- Added `agent/document_pages.py`, `agent/sections.py`, and
+  `tests/test_sections.py`.
+- Updated `agent/extract.py`, `agent/pipeline.py`, `agent/review.py`,
+  `agent/rules.py`, `agent/schema.py`, `app.py`, `tests/test_app.py`,
+  `tests/test_extract.py`, and `tests/test_streamlit_lifecycle.py`.
+
+### Testing performed
+
+- Focused section, extraction, application, review, and pipeline suite:
+  124 passed.
+- Complete local suite: 259 passed, 1 skipped.
+- Real PDF source preview verified against page 3 of the Machias reference PDF.
+- Live OpenAI regression attempt: both list reads timed out; no comparable cart.
+
+### Remaining work
+
+- Run `tests/test_streamlit_lifecycle.py` in the deployed x86 Streamlit environment.
+- Re-run the $150 and $85 OpenAI Maple baselines when the endpoint is reachable.
+
+### Recommended next step
+
+Deploy the Part A screen, run the Ms. K Grade 1/Highly Capable scenario once, and
+then repeat the two Maple baseline runs while OpenAI connectivity is healthy.

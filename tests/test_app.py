@@ -241,11 +241,13 @@ def test_student_and_classroom_fields_preserve_grade_context() -> None:
                 section_id="grade-3",
                 label="Third Grade",
                 grades=("Grade 3",),
+                source_line="THIRD GRADE",
             ),
             DocumentSection(
                 section_id="grade-4",
                 label="Fourth Grade",
                 grades=("Grade 4",),
+                source_line="FOURTH GRADE",
             ),
         )
     )
@@ -2319,14 +2321,16 @@ def test_shared_document_structure_is_inspected_only_once() -> None:
         return DocumentStructureEnvelope(
             sections=(
                 DocumentSection(
-                    section_id="grade-2",
-                    label="Grade 2",
-                    grades=("Grade 2",),
-                ),
+                        section_id="grade-2",
+                        label="Grade 2",
+                        grades=("Grade 2",),
+                        source_line="Grade 2",
+                    ),
                 DocumentSection(
-                    section_id="grade-5",
-                    label="Grade 5",
-                    grades=("Grade 5",),
+                        section_id="grade-5",
+                        label="Grade 5",
+                        grades=("Grade 5",),
+                        source_line="Grade 5",
                 ),
             )
         )
@@ -2355,6 +2359,7 @@ def test_grade_section_defaults_and_selection_reach_real_extractor_contract() ->
                 grades=("Grade 2",),
                 page_numbers=(1,),
                 column_label="SECOND GRADE",
+                source_line="SECOND GRADE",
             ),
             DocumentSection(
                 section_id="grade-5",
@@ -2362,6 +2367,7 @@ def test_grade_section_defaults_and_selection_reach_real_extractor_contract() ->
                 grades=("Grade 5",),
                 page_numbers=(2,),
                 column_label="FIFTH GRADE",
+                source_line="FIFTH GRADE",
             ),
         ),
     )
@@ -2390,7 +2396,13 @@ def test_grade_section_defaults_and_selection_reach_real_extractor_contract() ->
         )
 
     extractions, errors = app._extract_list_inputs(
-        (ListInput(child_id="child-1", source="district list"),),
+        (
+            ListInput(
+                child_id="child-1",
+                source="district list",
+                document_name="district-list.txt",
+            ),
+        ),
         extractor=extractor,
         selections={"child-1": selection},
     )
@@ -2402,6 +2414,10 @@ def test_grade_section_defaults_and_selection_reach_real_extractor_contract() ->
     assert received[0].selected_page_numbers == (1,)
     assert received[0].selected_column_labels == ("SECOND GRADE",)
     assert received[0].ignored_section_labels == ("Fifth Grade",)
+    assert (
+        extractions["child-1"].requirements[0].source_document
+        == "district-list.txt"
+    )
 
 
 def test_section_picker_uses_only_section_choices_when_details_add_nothing() -> None:
@@ -2416,6 +2432,7 @@ def test_section_picker_uses_only_section_choices_when_details_add_nothing() -> 
                 grades=("2nd Grade",),
                 page_numbers=(1,),
                 language="English",
+                source_line="2nd Grade",
             ),
             DocumentSection(
                 section_id="grade-5",
@@ -2423,6 +2440,7 @@ def test_section_picker_uses_only_section_choices_when_details_add_nothing() -> 
                 grades=("5th Grade",),
                 page_numbers=(1,),
                 language="English",
+                source_line="5th Grade",
             ),
         ),
     )
@@ -2437,8 +2455,8 @@ def test_section_picker_uses_only_section_choices_when_details_add_nothing() -> 
     assert app._join_names(()) == ""
 
 
-def test_section_table_is_sparse_and_explains_translated_duplicates() -> None:
-    """Only meaningful varying metadata appears in a multilingual table."""
+def test_section_table_is_sparse_and_omits_translated_duplicates() -> None:
+    """BR-16: translated copies are provenance, not selectable rows."""
 
     structure = DocumentStructureEnvelope(
         languages=("English", "Spanish"),
@@ -2450,6 +2468,7 @@ def test_section_table_is_sparse_and_explains_translated_duplicates() -> None:
                 named_sections=("Individual", "Shared"),
                 page_numbers=(1,),
                 language="English",
+                source_line="Grade 2",
             ),
             DocumentSection(
                 section_id="grade-5-en",
@@ -2457,6 +2476,7 @@ def test_section_table_is_sparse_and_explains_translated_duplicates() -> None:
                 grades=("Grade 5",),
                 page_numbers=(2,),
                 language="English",
+                source_line="Grade 5",
             ),
             DocumentSection(
                 section_id="grade-2-es",
@@ -2464,6 +2484,7 @@ def test_section_table_is_sparse_and_explains_translated_duplicates() -> None:
                 grades=("Grade 2",),
                 page_numbers=(1,),
                 language="Spanish",
+                source_line="Grado 2",
                 duplicate_of_section_id="grade-2-en",
             ),
         ),
@@ -2480,9 +2501,8 @@ def test_section_table_is_sparse_and_explains_translated_duplicates() -> None:
         "Language": "English",
     }
     assert rows[1]["Includes"] == ""
-    assert rows[2]["Language"] == (
-        "Spanish — translated copy of Grade 2"
-    )
+    assert len(rows) == 2
+    assert all(row["Language"] == "English" for row in rows)
     assert all("Teacher" not in row for row in rows)
     assert all("Status" not in row for row in rows)
     assert all(
@@ -2500,10 +2520,14 @@ def test_grade_preselection_handles_ordinals_and_preserves_parent_changes() -> N
             DocumentSection(
                 section_id="grade-2",
                 label="Second Grade",
+                grades=("Second Grade",),
+                source_line="Second Grade",
             ),
             DocumentSection(
                 section_id="grade-5",
                 label="5th Grade",
+                grades=("5th Grade",),
+                source_line="5th Grade",
             ),
         ),
     )

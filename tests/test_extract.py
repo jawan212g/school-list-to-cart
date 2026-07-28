@@ -703,6 +703,7 @@ def test_matrix_and_translated_sections_are_parent_selectable() -> None:
                 page_numbers=(1,),
                 language="English",
                 column_label="K",
+                source_line="K",
             ),
             DocumentSection(
                 section_id="english-1",
@@ -711,6 +712,7 @@ def test_matrix_and_translated_sections_are_parent_selectable() -> None:
                 page_numbers=(1,),
                 language="English",
                 column_label="1",
+                source_line="1",
             ),
             DocumentSection(
                 section_id="spanish-k",
@@ -719,6 +721,7 @@ def test_matrix_and_translated_sections_are_parent_selectable() -> None:
                 page_numbers=(2,),
                 language="Spanish",
                 column_label="K",
+                source_line="KINDER",
                 duplicate_of_section_id="english-k",
             ),
         ),
@@ -740,7 +743,6 @@ def test_matrix_and_translated_sections_are_parent_selectable() -> None:
         "English — Grade 1 column",
         "Spanish — Kindergarten column",
     )
-    assert extraction.automatic_document_selection(structure) is None
     assert selection.selected_page_numbers == (1,)
     assert selection.selected_column_labels == ("K",)
 
@@ -757,18 +759,30 @@ def test_one_grade_skips_parent_section_choice_but_names_translation() -> None:
                 label="Grade 2 — English",
                 grades=("Grade 2",),
                 language="English",
+                source_line="Grade 2",
             ),
             DocumentSection(
                 section_id="spanish",
                 label="Grade 2 — Spanish",
                 grades=("Grade 2",),
                 language="Spanish",
+                source_line="Grado 2",
                 duplicate_of_section_id="english",
             ),
         ),
     )
 
-    selection = extraction.automatic_document_selection(structure)
+    from agent.sections import (
+        build_resolved_section_choice,
+        choice_to_document_selection,
+        resolve_document_sections,
+    )
+
+    resolution = resolve_document_sections(structure, "Grade 2")
+    selection = choice_to_document_selection(
+        structure,
+        build_resolved_section_choice(resolution),
+    )
 
     assert selection is not None
     assert selection.selected_section_ids == ("english",)

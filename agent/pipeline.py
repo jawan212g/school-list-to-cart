@@ -93,6 +93,25 @@ class ListInput:
     child_id: str
     source: str | Path | bytes
     mime_type: str | None = None
+    document_name: str | None = None
+
+    @property
+    def resolved_document_name(self) -> str:
+        """Return trusted source provenance without using model output."""
+
+        if self.document_name:
+            return self.document_name
+        if isinstance(self.source, Path):
+            return self.source.name
+        if isinstance(self.source, str):
+            candidate = Path(self.source)
+            try:
+                if candidate.is_file():
+                    return candidate.name
+            except OSError:
+                pass
+            return "Pasted supply list"
+        return "Uploaded supply list"
 
 
 @dataclass(frozen=True)
@@ -427,7 +446,10 @@ def run_pipeline(
                         update={
                             "req_id": (
                                 f"{list_input.child_id}:{requirement.req_id}"
-                            )
+                            ),
+                            "source_document": (
+                                list_input.resolved_document_name
+                            ),
                         }
                     )
                     for requirement in extraction.requirements

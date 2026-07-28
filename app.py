@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import unicodedata
+from io import BytesIO
 from collections.abc import Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
@@ -14,6 +15,8 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
+
+import pypdfium2 as pdfium
 
 from agent.aggregate import UnitNeed
 from agent.addons import AddOnSelectionEvaluation, evaluate_addon_selection
@@ -36,7 +39,7 @@ from agent.decisions import Decision, DecisionLog
 from agent.demo import DEMO_LIST_TEXT, extract_demo_document
 from agent.extract import (
     MODEL_NAME,
-    automatic_document_selection,
+    PDF_RENDER_SCALE,
     build_document_selection,
     extract_document,
     inspect_document_structure,
@@ -96,6 +99,14 @@ from agent.rules import (
     MODEL_MAX_CONCURRENCY,
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     SUBSTITUTION_NONE,
+    grade_token_identifier,
+)
+from agent.sections import (
+    ResolvedSectionChoice,
+    SectionResolution,
+    build_resolved_section_choice,
+    choice_to_document_selection,
+    resolve_document_sections,
 )
 from agent.schema import (
     DocumentSection,
@@ -2937,6 +2948,7 @@ def _initialize_state(st: Any) -> None:
         "list_inputs": (),
         "document_structures": {},
         "document_selections": {},
+        "source_reference_cache": {},
         "structure_errors": {},
         "structure_cache_ready": False,
         "extracted_lists": {},
@@ -3231,6 +3243,155 @@ class ListUploadDraft:
 
     name: str
     data: bytes
+
+
+@dataclass(frozen=True)
+class SourceReference:
+    """One-click evidence for a detected section or extracted source line."""
+
+    document_name: str
+    page_number: int | None
+    source_line: str
+    rendered_page: bytes | None
+    mime_type: str | None
+
+
+def _list_input_bytes(list_input: ListInput) -> bytes | None:
+    """Return retained session-only source bytes for an evidence preview."""
+
+    source = list_input.source
+    if isinstance(source, bytes):
+        return source
+    if isinstance(source, Path):
+        return source.read_bytes()
+    if list_input.mime_type == "text/plain":
+        return source.encode("utf-8")
+    try:
+        path = Path(source)
+        return path.read_bytes() if path.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
+def build_source_reference(
+    list_input: ListInput,
+    *,
+    page_number: int | None,
+    source_line: str,
+) -> SourceReference:
+    """Render the named source page while retaining its exact evidence line."""
+
+    data = _list_input_bytes(list_input)
+    rendered_page: bytes | None = None
+    if (
+        data is not None
+        and list_input.mime_type == "application/pdf"
+        and page_number is not None
+    ):
+        document = pdfium.PdfDocument(data)
+        try:
+            page_index = page_number - 1
+            if page_index < 0 or page_index >= len(document):
+                raise ValueError(
+                    f"Page {page_number} is not present in the uploaded document."
+                )
+            page = document[page_index]
+            bitmap = None
+            try:
+                bitmap = page.render(scale=PDF_RENDER_SCALE)
+                image = bitmap.to_pil()
+                output = BytesIO()
+                image.save(output, format="PNG")
+                rendered_page = output.getvalue()
+            finally:
+                if bitmap is not None:
+                    bitmap.close()
+                page.close()
+        finally:
+            document.close()
+    elif (
+        data is not None
+        and list_input.mime_type in {"image/jpeg", "image/png"}
+    ):
+        rendered_page = data
+    return SourceReference(
+        document_name=list_input.resolved_document_name,
+        page_number=page_number,
+        source_line=source_line,
+        rendered_page=rendered_page,
+        mime_type=list_input.mime_type,
+    )
+
+
+def _source_reference_cache_key(
+    list_input: ListInput,
+    page_number: int | None,
+) -> tuple[str, str, int, int | None]:
+    return (
+        list_input.child_id,
+        list_input.resolved_document_name,
+        hash(list_input.source),
+        page_number,
+    )
+
+
+def _render_source_reference(
+    st: Any,
+    list_input: ListInput,
+    *,
+    page_number: int | None,
+    source_line: str,
+    key: str,
+) -> None:
+    """Place the exact source line and rendered uploaded page one click away."""
+
+    del key
+    cache = st.session_state.setdefault("source_reference_cache", {})
+    cache_key = _source_reference_cache_key(list_input, page_number)
+    reference = cache.get(cache_key)
+    if reference is None:
+        reference = build_source_reference(
+            list_input,
+            page_number=page_number,
+            source_line=source_line,
+        )
+        cache[cache_key] = reference
+    elif reference.source_line != source_line:
+        reference = replace(reference, source_line=source_line)
+    page_text = (
+        f" · page {reference.page_number}"
+        if reference.page_number is not None
+        else ""
+    )
+    with st.popover(
+        f"View source · {reference.document_name}{page_text}",
+    ):
+        st.caption(
+            escape_streamlit_dollars(
+                f"Exact source line: {reference.source_line}"
+            )
+        )
+        if reference.rendered_page is not None:
+            st.image(
+                reference.rendered_page,
+                caption=(
+                    f"{reference.document_name}{page_text}. "
+                    "Use the exact line above to locate the source."
+                ),
+                use_container_width=True,
+            )
+        elif reference.mime_type == "text/plain":
+            source_bytes = _list_input_bytes(list_input) or b""
+            st.code(
+                source_bytes.decode("utf-8", errors="replace"),
+                language=None,
+                wrap_lines=True,
+            )
+        else:
+            st.info(
+                "A rendered preview is unavailable. The document name, page, "
+                "and exact source line are shown above."
+            )
 
 
 def _is_navigation_widget_key(key: str) -> bool:
@@ -3555,6 +3716,17 @@ def clear_inactive_intake_entries(
                 for list_input in saved_inputs
                 if getattr(list_input, "child_id", None) != child_id
             )
+        source_cache = state.get("source_reference_cache")
+        if isinstance(source_cache, Mapping):
+            state["source_reference_cache"] = {
+                cache_key: value
+                for cache_key, value in source_cache.items()
+                if not (
+                    isinstance(cache_key, tuple)
+                    and cache_key
+                    and cache_key[0] == child_id
+                )
+            }
         intake = state.get("intake")
         if isinstance(intake, Mapping):
             updated_intake = dict(intake)
@@ -4715,6 +4887,7 @@ def _build_list_inputs(
                     child_id=str(child["child_id"]),
                     source=data,
                     mime_type=mime_type,
+                    document_name=draft.name,
                 )
                 for child in children
             )
@@ -4732,6 +4905,7 @@ def _build_list_inputs(
                 child_id=str(child["child_id"]),
                 source=pasted,
                 mime_type="text/plain",
+                document_name="Pasted district list",
             )
             for child in children
         )
@@ -4760,6 +4934,7 @@ def _build_list_inputs(
                     child_id=str(child["child_id"]),
                     source=data,
                     mime_type=mime_type,
+                    document_name=draft.name,
                 )
             )
         else:
@@ -4779,6 +4954,7 @@ def _build_list_inputs(
                     child_id=str(child["child_id"]),
                     source=pasted,
                     mime_type="text/plain",
+                    document_name=f"{child['label']}'s pasted list",
                 )
             )
     if errors:
@@ -4813,6 +4989,7 @@ def _render_lists(st: Any) -> None:
             st.session_state["list_identity_confirmed"] = False
             st.session_state["document_structures"] = {}
             st.session_state["document_selections"] = {}
+            st.session_state["source_reference_cache"] = {}
             st.session_state["structure_errors"] = {}
             st.session_state["structure_cache_ready"] = False
             st.session_state["review_items"] = ()
@@ -4948,6 +5125,7 @@ def _render_lists(st: Any) -> None:
         st.session_state["list_inputs"] = list_inputs
         st.session_state["document_structures"] = {}
         st.session_state["document_selections"] = {}
+        st.session_state["source_reference_cache"] = {}
         st.session_state["structure_errors"] = {}
         st.session_state["structure_cache_ready"] = False
         st.session_state["extracted_lists"] = {}
@@ -5000,7 +5178,7 @@ def _demo_document_structure(
 
     grade = str(child.get("grade") or "").strip()
     label = (
-        f"Grade {grade} supply list"
+        f"{grade} supply list"
         if grade
         else f"{child.get('label', 'Selected student')} supply list"
     )
@@ -5008,6 +5186,7 @@ def _demo_document_structure(
         document_title="Offline demonstration list",
         layouts=("single_section",),
         languages=("English",),
+        primary_language="English",
         sections=(
             DocumentSection(
                 section_id="demo-section",
@@ -5016,6 +5195,7 @@ def _demo_document_structure(
                 named_sections=("Required supplies",),
                 page_numbers=(1,),
                 language="English",
+                source_line=label,
             ),
         ),
     )
@@ -5112,7 +5292,7 @@ def document_section_rows(
 ) -> tuple[dict[str, str], ...]:
     """Return only document-section columns that help a parent choose."""
 
-    sections = structure.sections
+    sections = selectable_document_sections(structure)
     labels_by_id = {
         section.section_id: section.label for section in sections
     }
@@ -5190,38 +5370,10 @@ def document_sections_need_table(
     return any(set(row) != {"Section"} for row in rows)
 
 
-GRADE_WORD_VALUES = {
-    "kindergarten": "k",
-    "kindergarden": "k",
-    "kinder": "k",
-    "first": "1",
-    "second": "2",
-    "third": "3",
-    "fourth": "4",
-    "fifth": "5",
-    "sixth": "6",
-    "seventh": "7",
-    "eighth": "8",
-    "ninth": "9",
-    "tenth": "10",
-    "eleventh": "11",
-    "twelfth": "12",
-}
-
-
 def _grade_identifier(value: str) -> str:
     """Normalize entered and detected grade labels for picker preselection."""
 
-    normalized = re.sub(r"[^a-z0-9]+", "", value.casefold())
-    if not normalized:
-        return ""
-    if normalized in {"k", "gradek"}:
-        return "k"
-    for word, identifier in GRADE_WORD_VALUES.items():
-        if word in normalized:
-            return identifier
-    numbers = re.findall(r"\d+", normalized)
-    return numbers[0] if numbers else normalized
+    return grade_token_identifier(value)
 
 
 def section_picker_default_ids(
@@ -5230,21 +5382,13 @@ def section_picker_default_ids(
 ) -> tuple[str, ...]:
     """Suggest matching grade sections without deciding for the parent."""
 
-    grade_key = _grade_identifier(entered_grade)
-    matches = tuple(
+    return tuple(
         section.section_id
-        for section in selectable_document_sections(structure)
-        if grade_key
-        and any(
-            _grade_identifier(candidate) == grade_key
-            for candidate in (
-                *section.grades,
-                section.label,
-                section.column_label or "",
-            )
-        )
+        for section in resolve_document_sections(
+            structure,
+            entered_grade,
+        ).auto_selected
     )
-    return matches
 
 
 def initialize_section_picker_state(
@@ -5313,7 +5457,21 @@ def _extract_list_inputs(
                     f"Read {done_count} of {len(list_inputs)} lists",
                 )
             try:
-                completed[list_input.child_id] = future.result()
+                extraction = future.result()
+                completed[list_input.child_id] = extraction.model_copy(
+                    update={
+                        "requirements": tuple(
+                            requirement.model_copy(
+                                update={
+                                    "source_document": (
+                                        list_input.resolved_document_name
+                                    )
+                                }
+                            )
+                            for requirement in extraction.requirements
+                        )
+                    }
+                )
             except Exception as error:
                 errors[list_input.child_id] = error
     for list_input in list_inputs:
@@ -5539,6 +5697,7 @@ def _review_editor_rows(
             "Allow equivalents": item.allow_equivalents,
             "Notes": item.notes or "",
             "Source text": item.source_text,
+            "Source document": item.source_document or "",
             "Source section": item.source_section or "",
             "Source page": item.source_page,
             "Source language": item.source_language or "",
@@ -5670,6 +5829,9 @@ def _review_items_from_editor(
                     prior.condition_option
                     if prior is not None
                     else None
+                ),
+                source_document=(
+                    prior.source_document if prior is not None else None
                 ),
                 source_section=(
                     prior.source_section if prior is not None else None
@@ -6087,6 +6249,10 @@ def _render_compact_review_row(
             [5, 4, 2]
         )
         with source_column:
+            source_inputs = {
+                list_input.child_id: list_input
+                for list_input in st.session_state.get("list_inputs", ())
+            }
             for member in members:
                 if len(members) > 1:
                     st.caption(
@@ -6100,6 +6266,15 @@ def _render_compact_review_row(
                 st.write(
                     escape_streamlit_dollars(member.source_text)
                 )
+                list_input = source_inputs.get(member.child_id)
+                if list_input is not None:
+                    _render_source_reference(
+                        st,
+                        list_input,
+                        page_number=member.source_page,
+                        source_line=member.source_text,
+                        key=f"{key_prefix}:item-source:{member.review_id}",
+                    )
         with understanding_column:
             st.write(
                 escape_streamlit_dollars(
@@ -6208,8 +6383,119 @@ def _new_review_item_from_controls(
     )
 
 
+def _document_scope_fingerprint(
+    list_input: ListInput,
+    structure: DocumentStructureEnvelope,
+    grade: str,
+) -> int:
+    """Keep section widget state tied to one document and entered grade."""
+
+    return abs(
+        hash(
+            (
+                list_input.resolved_document_name,
+                list_input.source,
+                grade,
+                tuple(
+                    (
+                        section.section_id,
+                        section.grades,
+                        section.duplicate_of_section_id,
+                    )
+                    for section in structure.sections
+                ),
+            )
+        )
+    )
+
+
+def _section_choice_from_state(
+    state: MutableMapping[str, Any],
+    resolution: SectionResolution,
+    *,
+    key_prefix: str,
+    initial_section_ids: tuple[str, ...],
+) -> ResolvedSectionChoice:
+    """Derive displayed and submitted scope from one durable state."""
+
+    override_toggle_key = f"{key_prefix}:override-enabled"
+    override_selection_key = f"{key_prefix}:override-sections"
+    state.setdefault(override_toggle_key, False)
+    state.setdefault(override_selection_key, list(initial_section_ids))
+    selected_question_ids = []
+    for section in resolution.parent_questions:
+        question_key = f"{key_prefix}:question:{section.section_id}"
+        state.setdefault(
+            question_key,
+            section.section_id in initial_section_ids,
+        )
+        if bool(state[question_key]):
+            selected_question_ids.append(section.section_id)
+    override_ids = (
+        tuple(state[override_selection_key])
+        if bool(state[override_toggle_key])
+        else None
+    )
+    return build_resolved_section_choice(
+        resolution,
+        selected_question_ids=tuple(selected_question_ids),
+        override_section_ids=override_ids,
+    )
+
+
+def _render_section_source_links(
+    st: Any,
+    list_input: ListInput,
+    sections: Sequence[DocumentSection],
+    *,
+    key_prefix: str,
+) -> None:
+    """Render one-click provenance for every stated section."""
+
+    for section in sections:
+        for page_number in section.page_numbers or (None,):
+            _render_source_reference(
+                st,
+                list_input,
+                page_number=page_number,
+                source_line=section.source_line,
+                key=(
+                    f"{key_prefix}:{section.section_id}:{page_number}"
+                ),
+            )
+
+
+def _section_exclusion_summary(
+    resolution: SectionResolution,
+) -> str:
+    """Name excluded section counts without listing irrelevant rows."""
+
+    parts = []
+    if resolution.other_grade_sections:
+        count = len(resolution.other_grade_sections)
+        parts.append(
+            f"{count} "
+            + (
+                "section was for another grade"
+                if count == 1
+                else "sections were for other grades"
+            )
+        )
+    if resolution.translated_duplicates:
+        count = len(resolution.translated_duplicates)
+        parts.append(
+            f"{count} translated "
+            + (
+                "copy was kept as source context"
+                if count == 1
+                else "copies were kept as source context"
+            )
+        )
+    return "; ".join(parts)
+
+
 def _render_sections(st: Any) -> None:
-    """Let the parent choose among detected document sections (FR-06)."""
+    """State deterministic scope and ask only unresolved section questions."""
 
     intake = st.session_state["intake"]
     structures: Mapping[str, DocumentStructureEnvelope] = (
@@ -6218,22 +6504,27 @@ def _render_sections(st: Any) -> None:
     if intake is None or not structures:
         st.session_state["screen"] = "working"
         st.rerun()
-    children = intake["children"]
+        return
     child_by_id = {
-        str(child["child_id"]): child for child in children
+        str(child["child_id"]): child
+        for child in intake["children"]
+    }
+    input_by_child = {
+        list_input.child_id: list_input
+        for list_input in st.session_state["list_inputs"]
     }
     selections = dict(st.session_state["document_selections"])
 
-    st.header("Choose the part of each document to read")
+    st.header("What will be read from each list")
     st.write(
-        "Some district files contain several grades, teachers, or translated "
-        "copies. Select only the sections that apply to each student. The next "
-        "screen will show the exact lines read from those sections."
+        "The matching grade is selected automatically. You only need to "
+        "answer when a section has no grade or the document does not contain "
+        "the grade entered for a student."
     )
     if st.session_state["structure_errors"]:
         st.error(
-            "The documents listed below could not be organized and will not "
-            "be included. Other lists can continue."
+            "The documents named below could not be organized. They will not "
+            "be read, but the other lists can continue."
         )
         for child_id, error in st.session_state["structure_errors"].items():
             child = child_by_id.get(child_id, {})
@@ -6243,133 +6534,210 @@ def _render_sections(st: Any) -> None:
                 )
             )
 
-    selected_by_child: dict[str, tuple[str, ...]] = {}
-    with st.form("document_section_selection"):
-        for child_id, structure in structures.items():
-            child = child_by_id[child_id]
-            with st.container(border=True):
-                st.subheader(
-                    escape_streamlit_dollars(
-                        f"{child['label']} · entered as grade {child['grade']}"
+    choices: dict[str, ResolvedSectionChoice] = {}
+    blocked_actions: dict[str, str] = {}
+    for child_id, structure in structures.items():
+        child = child_by_id[child_id]
+        list_input = input_by_child[child_id]
+        grade = str(child["grade"])
+        resolution = resolve_document_sections(structure, grade)
+        current = selections.get(child_id)
+        initial_ids = (
+            tuple(current.selected_section_ids)
+            if current is not None
+            else tuple(
+                section.section_id
+                for section in resolution.auto_selected
+            )
+        )
+        key_prefix = (
+            f"document_scope:{child_id}:"
+            f"{_document_scope_fingerprint(list_input, structure, grade)}"
+        )
+        choice = _section_choice_from_state(
+            st.session_state,
+            resolution,
+            key_prefix=key_prefix,
+            initial_section_ids=initial_ids,
+        )
+        choices[child_id] = choice
+        document_name = list_input.resolved_document_name
+
+        with st.container(border=True):
+            st.subheader(
+                escape_streamlit_dollars(
+                    f"{child['label']} · {grade}"
+                )
+            )
+            st.caption(
+                escape_streamlit_dollars(f"Document: {document_name}")
+            )
+
+            if not resolution.has_primary_language_source:
+                languages = _join_names(
+                    structure.languages
+                    or tuple(
+                        section.language
+                        for section in structure.sections
+                        if section.language
                     )
                 )
-                if structure.document_title:
-                    st.caption(
-                        escape_streamlit_dollars(
-                            f"Document: {structure.document_title}"
-                        )
+                st.error(
+                    escape_streamlit_dollars(
+                        f"{document_name} contains {languages or 'translated'} "
+                        "sections, but no source-language original that can be "
+                        f"resolved for {child['label']}. Nothing will be read "
+                        "until you choose how to proceed."
                     )
-                automatic = automatic_document_selection(structure)
-                if automatic is not None:
-                    selections[child_id] = automatic
-                    st.info(
-                        escape_streamlit_dollars(
-                            "One applicable list was detected. Reading: "
-                            + _join_names(
-                                automatic.selected_section_labels
-                            )
-                        )
+                )
+                blocked_actions[child_id] = st.radio(
+                    f"How would you like to proceed for {child['label']}?",
+                    (
+                        "Upload a different document",
+                        f"Go to Your students to remove {child['label']}",
+                    ),
+                    key=f"{key_prefix}:blocked-action",
+                )
+            elif not resolution.has_grade_match:
+                covered = (
+                    _join_names(resolution.covered_grades)
+                    or "no identified grades"
+                )
+                st.error(
+                    escape_streamlit_dollars(
+                        f"No section in {document_name} matches "
+                        f"{child['label']} ({grade}). The document covers "
+                        f"{covered}. Nothing will be read until you choose "
+                        "how to proceed."
                     )
-                    if automatic.ignored_section_labels:
-                        st.caption(
-                            escape_streamlit_dollars(
-                                "Not reading: "
-                                + _join_names(
-                                    automatic.ignored_section_labels
-                                )
-                            )
-                        )
-                    continue
-                primary = selectable_document_sections(structure)
-                section_rows = document_section_rows(structure)
-                if document_sections_need_table(section_rows):
-                    st.table(
-                        escape_streamlit_data(section_rows)
+                )
+                blocked_actions[child_id] = st.radio(
+                    f"How would you like to proceed for {child['label']}?",
+                    (
+                        "Pick a section manually",
+                        "Upload a different document",
+                        f"Go to Your students to remove {child['label']}",
+                    ),
+                    key=f"{key_prefix}:blocked-action",
+                )
+            elif choice.selected_section_labels:
+                reason = (
+                    "your manual selection"
+                    if choice.manually_overridden
+                    else f"the grade entered for {child['label']}"
+                )
+                st.success(
+                    escape_streamlit_dollars(
+                        "Will read "
+                        + _join_names(choice.selected_section_labels)
+                        + f" from {document_name}, based on {reason}."
                     )
-                    if any(
-                        section.duplicate_of_section_id is not None
-                        for section in structure.sections
-                    ):
-                        st.caption(
-                            "Translated copies are shown for context and are "
-                            "not separate choices."
-                        )
+                )
+
+            override_toggle_key = f"{key_prefix}:override-enabled"
+            for section in resolution.parent_questions:
+                st.checkbox(
+                    f"Also use {section.label} for {child['label']}?",
+                    key=f"{key_prefix}:question:{section.section_id}",
+                    disabled=bool(
+                        st.session_state[override_toggle_key]
+                    ),
+                    help=(
+                        "This section has no grade token, so it cannot be "
+                        "included or excluded automatically."
+                    ),
+                )
+                _render_section_source_links(
+                    st,
+                    list_input,
+                    (section,),
+                    key_prefix=f"{key_prefix}:question-source",
+                )
+
+            selected_sections_by_id = {
+                section.section_id: section
+                for section in resolution.primary_language_sections
+            }
+            _render_section_source_links(
+                st,
+                list_input,
+                tuple(
+                    selected_sections_by_id[section_id]
+                    for section_id in choice.selected_section_ids
+                    if section_id in selected_sections_by_id
+                ),
+                key_prefix=f"{key_prefix}:selected-source",
+            )
+
+            exclusion_summary = _section_exclusion_summary(resolution)
+            if exclusion_summary:
+                st.caption(
+                    escape_streamlit_dollars(
+                        f"Not read: {exclusion_summary}."
+                    )
+                )
+
+            with st.expander("Change which sections are read"):
+                st.checkbox(
+                    "Use a different section selection",
+                    key=override_toggle_key,
+                )
                 option_ids = tuple(
-                    section.section_id for section in primary
+                    section.section_id
+                    for section in resolution.primary_language_sections
                 )
                 labels_by_id = {
                     section.section_id: section.label
-                    for section in primary
+                    for section in resolution.primary_language_sections
                 }
-                current = selections.get(child_id)
-                grade_default_ids = section_picker_default_ids(
-                    structure,
-                    str(child["grade"]),
+                st.multiselect(
+                    f"Sections for {child['label']}",
+                    option_ids,
+                    format_func=lambda section_id, labels=labels_by_id: (
+                        labels[section_id]
+                    ),
+                    key=f"{key_prefix}:override-sections",
+                    disabled=not bool(
+                        st.session_state[override_toggle_key]
+                    ),
                 )
-                initial_ids = (
-                    tuple(current.selected_section_ids)
-                    if current is not None
-                    else grade_default_ids
-                )
-                widget_key = f"document_sections_{child_id}"
-                initialize_section_picker_state(
-                    st.session_state,
-                    widget_key,
-                    initial_ids,
-                )
-                selected_by_child[child_id] = tuple(
-                    st.multiselect(
-                        f"Which section applies to {child['label']}?",
-                        option_ids,
-                        format_func=lambda section_id, labels=labels_by_id: (
-                            labels[section_id]
-                        ),
-                        key=widget_key,
-                    )
-                )
-                if (
-                    current is None
-                    and grade_default_ids
-                    and tuple(st.session_state[widget_key])
-                    == grade_default_ids
-                ):
-                    st.info(
-                        escape_streamlit_dollars(
-                            "Preselected "
-                            + _join_names(
-                                tuple(
-                                    labels_by_id[section_id]
-                                    for section_id in grade_default_ids
-                                )
-                            )
-                            + f" because {child['label']} was entered as "
-                            f"grade {child['grade']}. You can change it."
-                        )
-                    )
                 st.caption(
-                    "All unselected sections, including translated repeats, "
-                    "will be named as ignored in the review and summary."
+                    "Translated copies are source context only and are never "
+                    "available as separate choices."
                 )
-        back_column, continue_column = _navigation_button_columns(st)
-        return_to_lists = back_column.form_submit_button(
-            "Back to lists",
-            use_container_width=True,
-        )
-        submitted = continue_column.form_submit_button(
-            "Read the selected sections",
-            type="primary",
-            use_container_width=True,
-        )
+
+    back_column, continue_column = _navigation_button_columns(st)
+    return_to_lists = back_column.button(
+        "Back to lists",
+        use_container_width=True,
+    )
+    submitted = continue_column.button(
+        "Continue with these sections",
+        type="primary",
+        use_container_width=True,
+    )
     if return_to_lists:
         navigate_back_to_screen(st.session_state, "lists")
         st.rerun()
     if submitted:
+        if any(
+            action == "Upload a different document"
+            for action in blocked_actions.values()
+        ):
+            navigate_back_to_screen(st.session_state, "lists")
+            st.rerun()
+        if any(
+            action.startswith("Go to Your students")
+            for action in blocked_actions.values()
+        ):
+            st.session_state["intake_step"] = 1
+            navigate_back_to_screen(st.session_state, "intake")
+            st.rerun()
         try:
-            for child_id in selected_by_child:
-                selected_ids = selected_by_child.get(child_id, ())
-                selections[child_id] = build_document_selection(
+            for child_id, choice in choices.items():
+                selections[child_id] = choice_to_document_selection(
                     structures[child_id],
-                    selected_ids,
+                    choice,
                 )
         except ValueError as error:
             st.session_state["ui_error_active"] = True
@@ -6383,6 +6751,8 @@ def _render_sections(st: Any) -> None:
         st.session_state["progress_substep"] = "reading selected sections"
         st.session_state["screen"] = "working"
         st.rerun()
+
+
 def _render_review(st: Any) -> None:
     """Render a compact source-versus-interpretation review (FR-12)."""
 
@@ -6812,9 +7182,24 @@ def _render_working(st: Any) -> None:
             )
             selections: dict[str, DocumentSelection] = {}
             for child_id, structure in structures.items():
-                automatic = automatic_document_selection(structure)
-                if automatic is not None:
-                    selections[child_id] = automatic
+                child = next(
+                    child
+                    for child in intake["children"]
+                    if str(child["child_id"]) == child_id
+                )
+                resolution = resolve_document_sections(
+                    structure,
+                    str(child["grade"]),
+                )
+                if (
+                    resolution.has_grade_match
+                    and not resolution.needs_parent_screen
+                ):
+                    choice = build_resolved_section_choice(resolution)
+                    selections[child_id] = choice_to_document_selection(
+                        structure,
+                        choice,
+                    )
             st.session_state["document_structures"] = structures
             st.session_state["document_selections"] = selections
             st.session_state["structure_errors"] = structure_errors
@@ -6828,7 +7213,16 @@ def _render_working(st: Any) -> None:
     structures = st.session_state["document_structures"]
     selections = st.session_state["document_selections"]
     needs_section_choice = any(
-        automatic_document_selection(structure) is None
+        resolve_document_sections(
+            structure,
+            str(
+                next(
+                    child["grade"]
+                    for child in intake["children"]
+                    if str(child["child_id"]) == child_id
+                )
+            ),
+        ).needs_parent_screen
         and child_id not in selections
         for child_id, structure in structures.items()
     )

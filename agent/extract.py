@@ -24,6 +24,11 @@ from pydantic import ValidationError
 from pypdf import PdfReader
 import pypdfium2 as pdfium
 
+from agent.document_pages import (
+    selected_numbered_pages,
+    selected_page_indexes,
+)
+from agent.sections import build_document_selection
 from agent.rules import (
     ALLOWED_CATEGORIES,
     CONFIDENCE_FLOOR,
@@ -32,6 +37,7 @@ from agent.rules import (
     MODEL_CALL_TIMEOUT_SECONDS,
     NON_PURCHASABLE_CATEGORY,
     VISION_MODEL_CALL_TIMEOUT_SECONDS,
+    section_is_parent_selectable,
 )
 from agent.provider import (
     DEFAULT_OPENAI_MODEL,
@@ -133,6 +139,9 @@ Structure rules:
   accompanies, even when it sits outside the individual grade boxes. Attach that
   named section to every affected grade so it remains in selected scope.
 - Record every page number on which the section appears.
+- Set primary_language to the document's source language. For every section,
+  preserve the exact visible heading or column text in source_line so the
+  application can show the evidence for its section decision.
 - Detect every language. If the same list is repeated as a translation, keep both
   visible in sections but set duplicate_of_section_id on the translated copy so it
   cannot multiply quantities.
@@ -207,8 +216,11 @@ Extraction rules:
   Use null for condition_group_id, condition_question, and condition_option only
   when the condition is genuinely independent rather than one branch of a set.
 - Set source_section, source_page, and source_language when the document states or
-  visually establishes them. Put any visible source line that cannot be interpreted
-  safely in uninterpreted_lines rather than silently dropping it.
+  visually establishes them. Use source_page=1 for non-paginated pasted or TXT
+  content. Put any visible source line that cannot be interpreted safely in
+  uninterpreted_lines rather than silently dropping it.
+- Leave source_document null. The application attaches the trusted uploaded filename
+  after schema validation; never infer or invent a filename from document content.
 - Put a visible line deliberately skipped for a stated reason in skipped_lines,
   prefixed by that short reason. Do not use skipped_lines for parent-ignored
   document sections; the application records those separately.
@@ -346,10 +358,9 @@ def _pdf_text(
     """Fallback PDF text extraction used only when page rendering fails."""
 
     reader = PdfReader(BytesIO(data))
-    selected_indexes = (
-        tuple(page_number - 1 for page_number in page_numbers)
-        if page_numbers
-        else tuple(range(len(reader.pages)))
+    selected_indexes = selected_page_indexes(
+        len(reader.pages),
+        page_numbers,
     )
     text = "\n".join(
         reader.pages[index].extract_text() or ""
@@ -415,13 +426,7 @@ def _pdf_content(
         )
         return _text_content(_pdf_text(data, page_numbers))
 
-    selected_pages = tuple(
-        (page_number, pages[page_number - 1])
-        for page_number in (
-            page_numbers or tuple(range(1, len(pages) + 1))
-        )
-        if 1 <= page_number <= len(pages)
-    )
+    selected_pages = selected_numbered_pages(pages, page_numbers)
     if not selected_pages:
         raise ExtractionInputError(
             "The selected document section has no renderable pages"
@@ -724,82 +729,9 @@ def selectable_document_sections(
     return tuple(
         section
         for section in structure.sections
-        if section.duplicate_of_section_id is None
-    )
-
-
-def build_document_selection(
-    structure: DocumentStructureEnvelope,
-    selected_section_ids: tuple[str, ...],
-) -> DocumentSelection:
-    """Validate parent-selected sections and name every ignored section."""
-
-    sections_by_id = {
-        section.section_id: section for section in structure.sections
-    }
-    unknown = tuple(
-        section_id
-        for section_id in selected_section_ids
-        if section_id not in sections_by_id
-    )
-    if unknown:
-        raise ValueError(
-            "Unknown document section selection: " + ", ".join(unknown)
+        if section_is_parent_selectable(
+            section.duplicate_of_section_id
         )
-    selected = tuple(
-        sections_by_id[section_id] for section_id in selected_section_ids
-    )
-    ignored = tuple(
-        section
-        for section in structure.sections
-        if section.section_id not in selected_section_ids
-    )
-    return DocumentSelection(
-        selected_section_ids=selected_section_ids,
-        selected_section_labels=tuple(section.label for section in selected),
-        selected_page_numbers=tuple(
-            sorted(
-                {
-                    page_number
-                    for section in selected
-                    for page_number in section.page_numbers
-                }
-            )
-        ),
-        selected_column_labels=tuple(
-            section.column_label
-            for section in selected
-            if section.column_label is not None
-        ),
-        selected_named_sections=tuple(
-            dict.fromkeys(
-                named_section
-                for section in selected
-                for named_section in section.named_sections
-            )
-        ),
-        ignored_section_ids=tuple(section.section_id for section in ignored),
-        ignored_section_labels=tuple(section.label for section in ignored),
-    )
-
-
-def automatic_document_selection(
-    structure: DocumentStructureEnvelope,
-) -> DocumentSelection | None:
-    """Skip the section picker only for one unambiguous grade/list."""
-
-    primary = selectable_document_sections(structure)
-    grades = {
-        grade.casefold()
-        for section in primary
-        for grade in section.grades
-        if grade.strip()
-    }
-    if len(primary) != 1 or len(grades) > 1:
-        return None
-    return build_document_selection(
-        structure,
-        (primary[0].section_id,),
     )
 
 
