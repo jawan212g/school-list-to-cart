@@ -1474,3 +1474,68 @@ actual edit.
 Run one deployed session through Summary, use the four-stage banner to jump to
 Students, then verify one-click return to each still-valid completed stage before
 testing a grade change and entry removal.
+
+## 2026-07-28 - Restore banner choices and refine budget and shopping setup
+
+### Objective
+
+Make completed intake sections reliably revisitable, make budget-mode switching
+reversible and exact, and clarify the shopping-preference controls without changing
+the cart pipeline or business calculations.
+
+### Work completed
+
+- Removed unfinished-stage circles from both banners while retaining completion
+  checkmarks.
+- Made navigation snapshots section-aware so hidden widget defaults cannot overwrite
+  saved Students, Budget, or Shopping preferences values during a banner jump.
+- Restored the saved widgets for a completed section before rendering it, including
+  per-entry budget fields and advanced shopping settings.
+- Verified that a parent can complete intake, jump back through the banner, and still
+  continue to Their lists.
+- Kept both budget-mode drafts while the parent switches between them and clears only
+  the unused mode after Continue.
+- Seeded per-entry budgets from a combined budget with exact-cent remainder handling,
+  and seeded an empty combined budget from the exact sum of per-entry allocations.
+- Suppressed clearing notices when no value was actually removed.
+- Accepted an optional leading dollar sign and correctly grouped thousands commas;
+  rejected pound, euro, yen, and cent symbols with a US-dollar message.
+- Ensured Shopping preferences starts with a 10-mile pickup radius and a populated
+  state-rate tax value.
+- Added plain-language help for shopping mode, store selection, maximum stores,
+  fulfillment, pickup radius, state, and the optional tax override.
+
+### Decisions made
+
+- Reused the deterministic proportional-cent allocator already used for BR-09 so
+  budget seeds sum exactly with no float arithmetic.
+- Treated alternative budget-mode figures as editable drafts until the parent leaves
+  Budget; switching the radio alone is not a commitment.
+- Kept all state and display work in `app.py`. Extraction, matching, approval-gate,
+  and cart-calculation behavior were not changed.
+
+### Problems or limitations
+
+- Streamlit is unavailable on this Windows ARM64 machine, so the interactive banner
+  and widget behavior was verified with Streamlit-shaped test doubles rather than a
+  local browser.
+
+### Files created or changed
+
+- Updated `app.py`, `tests/test_app.py`, and `JOURNAL.md`.
+
+### Testing performed
+
+- Focused application suite: 63 passed.
+- Complete automated suite: 249 passed in 4.89 seconds.
+
+### Remaining work
+
+- Confirm the restored field values, help icons, and banner styling in the deployed
+  Streamlit app at desktop and phone widths.
+
+### Recommended next step
+
+In the deployed app, enter a combined budget with an odd-cent split, switch between
+budget modes twice, jump to Students through the banner, then return to Shopping
+preferences and continue to Their lists.

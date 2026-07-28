@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import unicodedata
 from collections.abc import Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
@@ -53,6 +54,7 @@ from agent.optimize import (
     CartPlan,
     OptimizationConfig,
     OptimizationResult,
+    _allocate_cents,
     optimize_cart,
 )
 from agent.pipeline import (
@@ -526,7 +528,35 @@ def progress_narration(
 def money_to_cents(value: str) -> int:
     """Parse a positive display amount into integer cents (E-37)."""
 
-    cleaned = value.strip().replace("$", "").replace(",", "")
+    raw_value = value.strip()
+    if any(
+        unicodedata.category(character) == "Sc" and character != "$"
+        for character in raw_value
+    ):
+        raise ValueError(
+            "Amounts are in US dollars. Use $ or no currency symbol."
+        )
+    if "$" in raw_value:
+        if not raw_value.startswith("$") or raw_value.count("$") != 1:
+            raise ValueError(
+                "Amounts are in US dollars. Put $ only at the beginning."
+            )
+        raw_value = raw_value[1:].strip()
+    integer_part = raw_value.split(".", maxsplit=1)[0]
+    if "," in integer_part:
+        comma_groups = integer_part.split(",")
+        if (
+            not comma_groups[0].isdigit()
+            or not 1 <= len(comma_groups[0]) <= 3
+            or any(
+                len(group) != 3 or not group.isdigit()
+                for group in comma_groups[1:]
+            )
+        ):
+            raise ValueError(
+                "Use commas only as thousands separators, such as 1,200."
+            )
+    cleaned = raw_value.replace(",", "")
     try:
         amount = Decimal(cleaned)
     except InvalidOperation as error:
@@ -590,10 +620,38 @@ def initialize_state_tax_prefill(
 ) -> None:
     """Prefill tax when the state changes without overwriting later edits."""
 
-    if state.get("tax_prefill_state") == state_name:
+    if (
+        state.get("tax_prefill_state") == state_name
+        and str(state.get("tax_rate_text", "")).strip()
+    ):
         return
     state["tax_rate_text"] = state_tax_rate_percent(state_name)
     state["tax_prefill_state"] = state_name
+
+
+def initialize_preference_defaults(
+    state: MutableMapping[str, Any],
+) -> None:
+    """Set first-render FR-04/BR-02 defaults without overwriting edits."""
+
+    if bool(state.get("preferences_defaults_initialized", False)):
+        return
+    radius_value = state.get("store_radius_miles")
+    if radius_value is None or float(radius_value) == 0:
+        state["store_radius_miles"] = DEFAULT_RADIUS_MILES
+        state[
+            NAVIGATION_STATE_PREFIX + "store_radius_miles"
+        ] = DEFAULT_RADIUS_MILES
+    if not str(state.get("tax_rate_text", "")).strip():
+        state_name = str(
+            state.get("sales_tax_state", DEFAULT_TAX_STATE_OPTION)
+        )
+        state["tax_rate_text"] = state_tax_rate_percent(state_name)
+        state[
+            NAVIGATION_STATE_PREFIX + "tax_rate_text"
+        ] = state["tax_rate_text"]
+        state["tax_prefill_state"] = state_name
+    state["preferences_defaults_initialized"] = True
 
 
 def student_input_errors(
@@ -2867,6 +2925,7 @@ def _initialize_state(st: Any) -> None:
         "shopping_preference_label": next(iter(SHOPPING_MODES)),
         "store_radius_miles": DEFAULT_RADIUS_MILES,
         "fulfillment_label": next(iter(FULFILLMENT_OPTIONS)),
+        "preferences_defaults_initialized": False,
         "sales_tax_state": DEFAULT_TAX_STATE_OPTION,
         "tax_rate_text": STATE_GENERAL_SALES_TAX_PERCENT[
             DEFAULT_TAX_STATE_OPTION
@@ -3022,14 +3081,12 @@ def _screen_progress(
         start=1,
     ):
         marker = (
-            "●"
-            if status == "current"
-            else "✓"
+            "✓ "
             if status == "completed"
-            else "○"
+            else ""
         )
         clicked = column.button(
-            f"{marker} {label}",
+            f"{marker}{label}",
             key=f"journey_stage_navigation_{stage}",
             type="primary" if status == "current" else "secondary",
             disabled=status != "completed",
@@ -3186,9 +3243,42 @@ def _is_navigation_widget_key(key: str) -> bool:
     )
 
 
+def _intake_section_for_navigation_key(key: str) -> int | None:
+    """Return the intake section that owns a widget-backed value."""
+
+    if key == "child_count" or key.startswith(
+        (
+            "entity_type_",
+            "student_name_",
+            "teacher_name_",
+            "child_grade_",
+            "student_grade_",
+            "classroom_grade_",
+            "student_count_",
+        )
+    ):
+        return 1
+    if key in {"budget_mode_label", "combined_budget_text"} or key.startswith(
+        "budget_"
+    ):
+        return 2
+    if key in {
+        "shopping_preference_label",
+        "selected_store_names",
+        "maximum_stores",
+        "store_radius_miles",
+        "fulfillment_label",
+        "sales_tax_state",
+        "tax_rate_text",
+    }:
+        return 3
+    return None
+
+
 def preserve_navigation_state(state: MutableMapping[str, Any]) -> None:
     """Snapshot and restore reversible form navigation state (FR-01–FR-06)."""
 
+    active_intake_section = int(state.get("intake_step", 1))
     widget_keys: set[str] = set()
     for key in tuple(state):
         if key.startswith(NAVIGATION_STATE_PREFIX):
@@ -3197,9 +3287,65 @@ def preserve_navigation_state(state: MutableMapping[str, Any]) -> None:
             widget_keys.add(key)
     for key in widget_keys:
         saved_key = NAVIGATION_STATE_PREFIX + key
+        owner_section = _intake_section_for_navigation_key(key)
+        if owner_section is not None and owner_section != active_intake_section:
+            if saved_key in state:
+                state[key] = state[saved_key]
+            continue
         if key in state:
             state[saved_key] = state[key]
         elif saved_key in state:
+            state[key] = state[saved_key]
+
+
+def restore_intake_section_values(
+    state: MutableMapping[str, Any],
+    section: int,
+    entry_count: int,
+) -> None:
+    """Restore saved FR-01-FR-04 widgets when a banner reopens a section."""
+
+    if section not in {1, 2, 3}:
+        raise ValueError("Unsupported intake section")
+    shared_keys: Mapping[int, tuple[str, ...]] = {
+        1: ("child_count",),
+        2: ("budget_mode_label", "combined_budget_text"),
+        3: (
+            "shopping_preference_label",
+            "selected_store_names",
+            "maximum_stores",
+            "store_radius_miles",
+            "fulfillment_label",
+            "sales_tax_state",
+            "tax_rate_text",
+        ),
+    }
+    keys = list(shared_keys[section])
+    saved_child_count = state.get(
+        NAVIGATION_STATE_PREFIX + "child_count",
+        state.get("child_count", entry_count),
+    )
+    effective_entry_count = int(saved_child_count)
+    if section == 1:
+        for index in range(effective_entry_count):
+            keys.extend(
+                (
+                    f"entity_type_{index}",
+                    f"student_name_{index}",
+                    f"teacher_name_{index}",
+                    f"child_grade_{index}",
+                    f"student_grade_{index}",
+                    f"classroom_grade_{index}",
+                    f"student_count_{index}",
+                )
+            )
+    elif section == 2:
+        keys.extend(
+            f"budget_{index}" for index in range(effective_entry_count)
+        )
+    for key in keys:
+        saved_key = NAVIGATION_STATE_PREFIX + key
+        if saved_key in state:
             state[key] = state[saved_key]
 
 
@@ -3479,33 +3625,118 @@ def clear_section_selection_after_grade_change(
     return ()
 
 
-def clear_budget_fields_after_mode_change(
+def _budget_text_from_cents(cents: int) -> str:
+    """Format exact cents as an editable US-dollar budget value."""
+
+    return format_money(cents).removeprefix("$")
+
+
+def prepare_budget_mode_drafts(
     state: MutableMapping[str, Any],
     current_mode: str,
     entry_count: int,
-) -> tuple[str, ...]:
-    """Clear only FR-03 fields belonging to the budget mode left."""
+) -> None:
+    """Seed reversible FR-03 drafts when the parent changes budget mode."""
 
     tracker_key = "previous_budget_mode_label"
     previous_mode = state.get(tracker_key)
     state[tracker_key] = current_mode
     if previous_mode is None or str(previous_mode) == current_mode:
-        return ()
-    notices: list[str] = []
-    if previous_mode == "One combined budget":
-        _delete_navigation_value(state, "combined_budget_text")
-        state["combined_budget_text"] = ""
-        state[NAVIGATION_STATE_PREFIX + "combined_budget_text"] = ""
-        notices.append("The combined budget was cleared.")
-    elif previous_mode == "A budget for each student or classroom":
-        for index in range(entry_count):
-            key = f"budget_{index}"
-            _delete_navigation_value(state, key)
-            state[key] = ""
-            state[NAVIGATION_STATE_PREFIX + key] = ""
-        notices.append("The individual budget allocations were cleared.")
+        return
+    if (
+        previous_mode == "One combined budget"
+        and current_mode == "A budget for each student or classroom"
+        and entry_count > 0
+        and all(
+            not str(state.get(f"budget_{index}", "")).strip()
+            for index in range(entry_count)
+        )
+    ):
+        try:
+            total_cents = money_to_cents(
+                str(state.get("combined_budget_text", ""))
+            )
+        except ValueError:
+            total_cents = 0
+        if total_cents:
+            allocations = _allocate_cents(
+                total_cents,
+                {
+                    str(index): 1
+                    for index in range(entry_count)
+                },
+            )
+            for index in range(entry_count):
+                key = f"budget_{index}"
+                value = _budget_text_from_cents(
+                    allocations[str(index)]
+                )
+                state[key] = value
+                state[NAVIGATION_STATE_PREFIX + key] = value
+    elif (
+        previous_mode == "A budget for each student or classroom"
+        and current_mode == "One combined budget"
+        and not str(state.get("combined_budget_text", "")).strip()
+    ):
+        try:
+            allocation_cents = tuple(
+                money_to_cents(str(state.get(f"budget_{index}", "")))
+                for index in range(entry_count)
+            )
+        except ValueError:
+            allocation_cents = ()
+        if len(allocation_cents) == entry_count and allocation_cents:
+            value = _budget_text_from_cents(sum(allocation_cents))
+            state["combined_budget_text"] = value
+            state[
+                NAVIGATION_STATE_PREFIX + "combined_budget_text"
+            ] = value
     _limit_reached_stage(state, 3)
     _invalidate_plan_state(state)
+
+
+def commit_budget_mode_drafts(
+    state: MutableMapping[str, Any],
+    current_mode: str,
+    entry_count: int,
+) -> tuple[str, ...]:
+    """Clear actual unused FR-03 drafts only after Continue."""
+
+    notices: list[str] = []
+    clear_combined = current_mode != "One combined budget"
+    clear_allocations = (
+        current_mode != "A budget for each student or classroom"
+    )
+    if clear_combined:
+        combined_value = str(
+            state.get(
+                "combined_budget_text",
+                state.get(
+                    NAVIGATION_STATE_PREFIX + "combined_budget_text",
+                    "",
+                ),
+            )
+        ).strip()
+        if combined_value:
+            _delete_navigation_value(state, "combined_budget_text")
+            notices.append("The unused combined budget draft was cleared.")
+    if clear_allocations:
+        cleared_allocation = False
+        for index in range(entry_count):
+            key = f"budget_{index}"
+            value = str(
+                state.get(
+                    key,
+                    state.get(NAVIGATION_STATE_PREFIX + key, ""),
+                )
+            ).strip()
+            if value:
+                cleared_allocation = True
+            _delete_navigation_value(state, key)
+        if cleared_allocation:
+            notices.append(
+                "The unused individual budget drafts were cleared."
+            )
     return tuple(notices)
 
 
@@ -3596,14 +3827,12 @@ def _render_intake_step_progress(st: Any, step: int) -> None:
             else "unavailable"
         )
         marker = (
-            "●"
-            if status == "current"
-            else "✓"
+            "✓ "
             if status == "completed"
-            else "○"
+            else ""
         )
         clicked = column.button(
-            f"{marker} {label}",
+            f"{marker}{label}",
             key=f"intake_section_navigation_{section}",
             type="primary" if status == "current" else "secondary",
             disabled=status != "completed",
@@ -3913,12 +4142,11 @@ def _render_budget_step(st: Any) -> None:
         horizontal=True,
         key="budget_mode_label",
     )
-    for notice in clear_budget_fields_after_mode_change(
+    prepare_budget_mode_drafts(
         st.session_state,
         str(budget_mode_label),
         len(students),
-    ):
-        st.info(escape_streamlit_dollars(notice))
+    )
     validation_attempted = bool(
         st.session_state.get("budget_validation_attempted", False)
     )
@@ -3978,6 +4206,13 @@ def _render_budget_step(st: Any) -> None:
         st.rerun()
     else:
         st.session_state["budget_validation_attempted"] = False
+        notices = commit_budget_mode_drafts(
+            st.session_state,
+            str(budget_mode_label),
+            len(students),
+        )
+        if notices:
+            st.session_state["pending_intake_notices"] = notices
         navigate_intake_step(st.session_state, 3)
         st.session_state["ui_error_active"] = False
         st.rerun()
@@ -4009,10 +4244,15 @@ def _budget_from_intake_state(
 def _render_preferences_step(st: Any) -> None:
     """Render guided FR-04 preferences and advanced BR-02 controls."""
 
+    initialize_preference_defaults(st.session_state)
     students = _intake_students_from_state(
         st.session_state,
         int(st.session_state["child_count"]),
     )
+    for notice in tuple(
+        st.session_state.pop("pending_intake_notices", ())
+    ):
+        st.info(escape_streamlit_dollars(str(notice)))
     st.caption(
         "Choose how you want the plan to balance cost, stores, and "
         "convenience."
@@ -4021,6 +4261,16 @@ def _render_preferences_step(st: Any) -> None:
         "Shopping preferences",
         tuple(SHOPPING_MODES),
         key="shopping_preference_label",
+        help=(
+            "Lowest landed cost finds the cheapest full amount, including "
+            "tax and pickup or delivery fees, and may use multiple stores. "
+            "A second store must save more than a few dollars to justify the "
+            "extra trip. Single store keeps everything at one store; if no "
+            "store carries everything, you will see the best option and what "
+            "is missing. Custom lets you choose stores, a maximum number of "
+            "stores, and a pickup distance. Landed cost always means the full "
+            "amount including tax and fees, never just the item subtotal."
+        ),
     )
     shopping_mode = SHOPPING_MODES[mode_label]
     validation_attempted = bool(
@@ -4037,6 +4287,7 @@ def _render_preferences_step(st: Any) -> None:
             store_options,
             default=store_options,
             key="selected_store_names",
+            help="Choose which fictional stores may appear in the plan.",
         )
         if not selected_names:
             message = "Choose at least one store to build a custom plan."
@@ -4057,6 +4308,7 @@ def _render_preferences_step(st: Any) -> None:
                 value=2,
                 step=1,
                 key="maximum_stores",
+                help="The plan will not use more than this many stores.",
             )
         )
 
@@ -4068,6 +4320,11 @@ def _render_preferences_step(st: Any) -> None:
             "Pickup or delivery preference",
             tuple(FULFILLMENT_OPTIONS),
             key="fulfillment_label",
+            help=(
+                "Best available compares pickup and delivery. Pickup only "
+                "requires a trip within the selected radius. Delivery only "
+                "does not use the pickup radius."
+            ),
         )
         fulfillment_preference = FULFILLMENT_OPTIONS[fulfillment_label]
         radius_disabled = update_pickup_radius_for_fulfillment(
@@ -4110,14 +4367,18 @@ def _render_preferences_step(st: Any) -> None:
             "State used for the tax estimate",
             tuple(STATE_GENERAL_SALES_TAX_PERCENT),
             key="sales_tax_state",
+            help=(
+                "Prefills a general state sales-tax rate. City and county "
+                "rates are not estimated."
+            ),
         )
         initialize_state_tax_prefill(st.session_state, state_name)
         tax_rate_text = st.text_input(
             "Sales tax rate override (%)",
             key="tax_rate_text",
             help=(
-                "Starts with the selected state's general rate. Edit it to "
-                "use a different rate."
+                "Optional. Keep the prefilled state rate, or enter a "
+                "different percentage if you know the rate you want used."
             ),
         )
         try:
@@ -4208,6 +4469,14 @@ def _render_intake(st: Any) -> None:
     else:
         st.session_state["demo_mode"] = False
     step = min(3, max(1, int(st.session_state.get("intake_step", 1))))
+    previous_step = st.session_state.get("last_rendered_intake_step")
+    if previous_step is None or int(previous_step) != step:
+        restore_intake_section_values(
+            st.session_state,
+            step,
+            int(st.session_state.get("child_count", 1)),
+        )
+    st.session_state["last_rendered_intake_step"] = step
     _render_intake_step_progress(st, step)
     with st.container(border=True):
         if step == 1:

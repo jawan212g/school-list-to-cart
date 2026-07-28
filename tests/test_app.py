@@ -118,6 +118,9 @@ def test_money_and_tax_inputs_convert_at_the_interface_boundary() -> None:
 
     assert app.money_to_cents("75") == 7_500
     assert app.money_to_cents("$1,234.56") == 123_456
+    assert app.money_to_cents("$85.50") == 8_550
+    assert app.money_to_cents("85.50") == 8_550
+    assert app.money_to_cents("1,200") == 120_000
     assert app.tax_percent_to_basis_points("7.0") == 700
     assert app.tax_percent_to_basis_points("7.125") == 713
     assert app.format_money(300) == "$3.00"
@@ -125,6 +128,14 @@ def test_money_and_tax_inputs_convert_at_the_interface_boundary() -> None:
     assert app.escape_streamlit_dollars(
         r"Adds \$3.00 and $0.20"
     ) == r"Adds \$3.00 and \$0.20"
+
+
+@pytest.mark.parametrize("symbol", ("£", "€", "¥", "¢"))
+def test_budget_rejects_non_us_currency_symbols(symbol: str) -> None:
+    """E-37: budget entry accepts dollars and names other currencies clearly."""
+
+    with pytest.raises(ValueError, match="Amounts are in US dollars"):
+        app.money_to_cents(f"{symbol}85.50")
 
 
 def test_state_selection_prefills_general_rate_without_overwriting_override() -> None:
@@ -153,6 +164,15 @@ def test_delivery_disables_pickup_radius_and_return_resets_ten_miles() -> None:
     initial_state = SimpleNamespace(session_state={})
     app._initialize_state(initial_state)
     assert initial_state.session_state["store_radius_miles"] == 10.0
+    first_render_state: dict[str, object] = {
+        "store_radius_miles": 0.0,
+        "sales_tax_state": app.DEFAULT_TAX_STATE_OPTION,
+        "tax_rate_text": "",
+        "tax_prefill_state": app.DEFAULT_TAX_STATE_OPTION,
+    }
+    app.initialize_preference_defaults(first_render_state)
+    assert first_render_state["store_radius_miles"] == 10.0
+    assert first_render_state["tax_rate_text"] == "7.0"
 
     state: dict[str, object] = {
         "store_radius_miles": 4.5,
@@ -521,6 +541,148 @@ def test_banner_navigation_preserves_every_completed_stage_value() -> None:
         )
 
 
+def test_banner_jump_back_then_forward_reaches_lists() -> None:
+    """FR-01-FR-04: banner review never blocks the normal forward path."""
+
+    class RerunSignal(Exception):
+        pass
+
+    class ExpanderContext:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    class NavigationColumn:
+        def __init__(self, forward: bool) -> None:
+            self.forward = forward
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del kwargs
+            return self.forward and label == "Continue to the lists"
+
+    class PreferencesStreamlit:
+        session_state: dict[str, object] = {
+            "screen": "intake",
+            "intake_step": 1,
+            "max_intake_step_reached": 3,
+            "max_stage_reached": 1,
+            "last_rendered_intake_step": 1,
+            "child_count": 1,
+            "entity_type_0": "Student",
+            "child_label_0": "Maya",
+            "student_name_0": "Maya",
+            "child_grade_0": "Grade 2",
+            "student_grade_0": "Grade 2",
+            "budget_mode_label": "One combined budget",
+            "previous_budget_mode_label": "One combined budget",
+            "combined_budget_text": "85.50",
+            "shopping_preference_label": "Lowest landed cost",
+            "store_radius_miles": 10.0,
+            "fulfillment_label": "Best available",
+            "sales_tax_state": app.DEFAULT_TAX_STATE_OPTION,
+            "tax_rate_text": "7.0",
+            "tax_prefill_state": app.DEFAULT_TAX_STATE_OPTION,
+            "preferences_defaults_initialized": True,
+            "preferences_validation_attempted": False,
+            "demo_mode": False,
+        }
+
+        @staticmethod
+        def caption(value: str) -> None:
+            del value
+
+        @staticmethod
+        def info(value: str) -> None:
+            del value
+
+        @staticmethod
+        def error(value: str) -> None:
+            raise AssertionError(value)
+
+        @staticmethod
+        def expander(label: str) -> ExpanderContext:
+            del label
+            return ExpanderContext()
+
+        @classmethod
+        def selectbox(
+            cls,
+            label: str,
+            options: tuple[str, ...],
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, options, kwargs
+            return str(cls.session_state[key])
+
+        @classmethod
+        def number_input(
+            cls,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> float:
+            del label, kwargs
+            return float(cls.session_state[key])
+
+        @classmethod
+        def text_input(
+            cls,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            return str(cls.session_state[key])
+
+        @staticmethod
+        def dataframe(*args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        @staticmethod
+        def columns(specification: object) -> tuple[
+            NavigationColumn,
+            NavigationColumn,
+        ]:
+            del specification
+            return NavigationColumn(False), NavigationColumn(True)
+
+        @staticmethod
+        def rerun() -> None:
+            raise RerunSignal
+
+    state = PreferencesStreamlit.session_state
+    app.preserve_navigation_state(state)
+    app.navigate_intake_step(state, 2)
+    app.navigate_intake_step(state, 3)
+    app.preserve_navigation_state(state)
+    app.navigate_intake_step(state, 1)
+    state["combined_budget_text"] = ""
+    state["shopping_preference_label"] = ""
+    state["store_radius_miles"] = 0.0
+    state["tax_rate_text"] = ""
+    app.restore_intake_section_values(state, 2, 1)
+    assert state["combined_budget_text"] == "85.50"
+    app.navigate_intake_step(state, 3)
+    app.restore_intake_section_values(state, 3, 1)
+    assert state["shopping_preference_label"] == "Lowest landed cost"
+    assert state["store_radius_miles"] == 10.0
+    assert state["tax_rate_text"] == "7.0"
+
+    with pytest.raises(RerunSignal):
+        app._render_preferences_step(PreferencesStreamlit())
+
+    assert state["screen"] == "lists"
+    assert state["intake"]["budget_total"] == 8_550
+    assert state["intake"]["store_radius_miles"] == 10.0
+    assert state["intake"]["tax_basis_points"] == 700
+
+
 def test_removing_entry_clears_only_its_budget_and_list() -> None:
     """FR-01/FR-03: roster removal leaves independent session values intact."""
 
@@ -625,38 +787,81 @@ def test_grade_change_clears_only_that_entry_section_selection() -> None:
     assert state["max_stage_reached"] == 2
 
 
-def test_budget_mode_change_clears_only_mode_being_left() -> None:
-    """FR-03: changing budget setup preserves lists and unrelated fields."""
+def test_budget_mode_drafts_seed_exactly_and_clear_only_on_continue() -> None:
+    """FR-03/BR-09: reversible budget drafts never lose or invent cents."""
 
-    list_inputs = (
-        ListInput(child_id="child-1", source="Maya list"),
-        ListInput(child_id="child-2", source="Noah list"),
+    state: dict[str, object] = {
+        "previous_budget_mode_label": "One combined budget",
+        "combined_budget_text": "100.00",
+        "max_stage_reached": 4,
+    }
+
+    app.prepare_budget_mode_drafts(
+        state,
+        "A budget for each student or classroom",
+        3,
     )
+
+    assert (
+        app.money_to_cents(str(state["budget_0"])),
+        app.money_to_cents(str(state["budget_1"])),
+        app.money_to_cents(str(state["budget_2"])),
+    ) == (3_334, 3_333, 3_333)
+    assert sum(
+        app.money_to_cents(str(state[f"budget_{index}"]))
+        for index in range(3)
+    ) == 10_000
+    assert state["combined_budget_text"] == "100.00"
+    assert state["max_stage_reached"] == 3
+    notices = app.commit_budget_mode_drafts(
+        state,
+        "A budget for each student or classroom",
+        3,
+    )
+    assert notices == ("The unused combined budget draft was cleared.",)
+    assert "combined_budget_text" not in state
+    assert state["budget_0"] == "33.34"
+    assert state["budget_1"] == "33.33"
+    assert state["budget_2"] == "33.33"
+
+
+def test_per_entry_drafts_seed_empty_combined_without_overwriting() -> None:
+    """FR-03: an existing combined figure always remains parent-controlled."""
+
     state: dict[str, object] = {
         "previous_budget_mode_label": (
             "A budget for each student or classroom"
         ),
-        "budget_0": "60.00",
-        "budget_1": "90.00",
-        "combined_budget_text": "150.00",
-        "list_inputs": list_inputs,
-        "shopping_preference_label": "Lowest landed cost",
-        "max_stage_reached": 4,
+        "budget_0": "$40.00",
+        "budget_1": "45.50",
+        "combined_budget_text": "",
     }
 
-    notices = app.clear_budget_fields_after_mode_change(
+    app.prepare_budget_mode_drafts(
         state,
         "One combined budget",
         2,
     )
 
-    assert notices == ("The individual budget allocations were cleared.",)
-    assert state["budget_0"] == ""
-    assert state["budget_1"] == ""
-    assert state["combined_budget_text"] == "150.00"
-    assert state["list_inputs"] == list_inputs
-    assert state["shopping_preference_label"] == "Lowest landed cost"
-    assert state["max_stage_reached"] == 3
+    assert state["combined_budget_text"] == "85.50"
+    state["previous_budget_mode_label"] = (
+        "A budget for each student or classroom"
+    )
+    state["combined_budget_text"] = "90.00"
+    app.prepare_budget_mode_drafts(
+        state,
+        "One combined budget",
+        2,
+    )
+    assert state["combined_budget_text"] == "90.00"
+    empty_state: dict[str, object] = {
+        "combined_budget_text": "",
+    }
+    assert app.commit_budget_mode_drafts(
+        empty_state,
+        "One combined budget",
+        2,
+    ) == ()
 
 
 def test_deliberate_removal_clears_saved_navigation_values() -> None:
@@ -1339,6 +1544,8 @@ def test_visible_navigation_uses_four_required_stages() -> None:
     assert app.screen_phase_label("summary") == "Your shopping plan"
     assert "st.progress" not in intake_sections_source
     assert "intake_section_navigation_" in intake_sections_source
+    assert '"●"' not in intake_sections_source
+    assert '"○"' not in intake_sections_source
 
     rendered: list[tuple[str, dict[str, object]]] = []
 
@@ -1372,6 +1579,11 @@ def test_visible_navigation_uses_four_required_stages() -> None:
         "primary",
         "secondary",
     ]
+    assert all("●" not in label and "○" not in label for label, _ in rendered)
+    assert rendered[0][0].startswith("✓ ")
+    assert rendered[1][0].startswith("✓ ")
+    assert not rendered[2][0].startswith("✓ ")
+    assert not rendered[3][0].startswith("✓ ")
     assert rendered[2][0].endswith("Personalize")
     assert app.journey_stage_statuses(3, 3) == (
         "completed",
