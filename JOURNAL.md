@@ -871,3 +871,74 @@ the existing extraction, matching, approval, and deterministic calculation paths
 Deploy the branch and walk through one single-student and one two-student setup at
 desktop and phone widths, paying particular attention to the immediate validation
 placement and the state-to-tax-rate prefill.
+
+## 2026-07-28 — Unify the landing journey and visual identity
+
+### Objective
+
+Remove the competing numbering and repeated purpose copy from the landing screen,
+restore a readable school-notebook identity, and make grade entry bounded without
+changing extraction, matching, approval, or calculation behavior.
+
+### Work completed
+
+- Made the four-stage journey the only numbered sequence: set up students and budget,
+  add supply lists, review what was read, then approve decisions and get the plan.
+- Removed step numbers from the Students, Budget, and Shopping preferences sections
+  and aligned every screen's visible stage label with the canonical journey.
+- Consolidated the landing explanation into one dismissible introduction with one
+  purpose sentence and the four-stage journey.
+- Replaced the old tagline with “Sorted before the first bell.”
+- Reduced the persistent limitation copy to one visible line and moved the complete
+  explanation into a “How this works and what is simulated” expander. The tax
+  limitation remains beside the tax controls.
+- Rendered Ready, Set, and School in separate crayon red, notebook blue, and
+  chalkboard green title colors on every screen.
+- Restored ruled-notebook decoration behind a solid opaque application card, and
+  applied opaque cards, stronger accents, high-contrast text, consistent spacing,
+  and responsive narrow-screen rules across the whole application.
+- Replaced free-form grade entry with Pre-K, Kindergarten, Grades 1–12, and Classroom
+  group choices. Selecting Classroom group continues to expose student count.
+- Updated the Streamlit theme, README tagline, and application tests.
+
+### Decisions made
+
+- Kept all four journey labels in one constant so the introduction and progress
+  display cannot drift independently.
+- Mapped document-section selection to Add supply lists, extracted-item review to
+  Review what we read, and cart building, approvals, and summary to the final stage.
+- Kept the ruled-paper treatment outside the opaque main content surface so decorative
+  lines never sit behind body text.
+- Preserved internal grade and student identifiers where they are pipeline contracts;
+  only the parent-facing controls and copy changed.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 machine, so an actual browser
+  rendering at desktop and phone widths could not be inspected locally. Responsive
+  rules, copy, structure, imports, and state behavior were verified through source
+  tests and Python compilation.
+
+### Files created or changed
+
+- Updated `app.py`, `.streamlit/config.toml`, `README.md`,
+  `tests/test_app.py`, and `JOURNAL.md`.
+
+### Testing performed
+
+- Focused application suite: 39 passed.
+- Complete automated suite: 221 passed in 2.65 seconds.
+- Python compilation completed without errors.
+- Git diff validation reported no content errors; only expected Windows line-ending
+  notices were shown.
+
+### Remaining work
+
+- Confirm the final visual rhythm in the deployed Streamlit application at desktop
+  and phone widths.
+
+### Recommended next step
+
+Deploy the branch and check the Students, Budget, and Shopping preferences sections
+at both widths, including one Classroom group selection and one full journey through
+the final plan.

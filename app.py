@@ -113,7 +113,7 @@ from data.loader import Offer, Store, load_catalog, load_stores
 
 LOGGER = logging.getLogger(__name__)
 APP_NAME = "Ready, Set, School"
-APP_TAGLINE = "One list in. One cart out. One trip."
+APP_TAGLINE = "Sorted before the first bell."
 CENTS_PER_DOLLAR = 100
 BASIS_POINTS_PER_PERCENT = 100
 MAX_TAX_PERCENT = Decimal("25")
@@ -201,15 +201,27 @@ SCREEN_ORDER = (
     "approval",
     "summary",
 )
+JOURNEY_STAGES = (
+    "Set up students and budget",
+    "Add supply lists",
+    "Review what we read",
+    "Approve decisions and get your plan",
+)
 SCREEN_PHASES: Mapping[str, tuple[str, str]] = {
-    "intake": ("1", "Upload and organize my list"),
-    "lists": ("1", "Upload and organize my list"),
-    "working": ("3", "Build my shopping plan"),
-    "sections": ("1", "Choose the part of the document to read"),
-    "review": ("2", "Review extracted items"),
-    "approval": ("4", "Approve final plan"),
-    "summary": ("4", "Approve final plan"),
+    "intake": ("1", JOURNEY_STAGES[0]),
+    "lists": ("2", JOURNEY_STAGES[1]),
+    "working": ("4", JOURNEY_STAGES[3]),
+    "sections": ("2", JOURNEY_STAGES[1]),
+    "review": ("3", JOURNEY_STAGES[2]),
+    "approval": ("4", JOURNEY_STAGES[3]),
+    "summary": ("4", JOURNEY_STAGES[3]),
 }
+GRADE_OPTIONS = (
+    "Pre-K",
+    "Kindergarten",
+    *(f"Grade {grade}" for grade in range(1, 13)),
+    "Classroom group",
+)
 SHOPPING_MODES: Mapping[str, str] = {
     "Lowest landed cost": "budget",
     "Single store when possible": "single_stop",
@@ -417,7 +429,7 @@ WARM_COPY = CopySet(
 )
 PLAIN_COPY = CopySet(
     register="plain",
-    tagline="Review the shopping plan and any unresolved items.",
+    tagline=APP_TAGLINE,
     summary_heading="Shopping plan",
     headline_heading="Plan status",
     complete_status="Required items covered",
@@ -432,10 +444,11 @@ def select_copy_set(state: ToneState) -> CopySet:
 
 
 def screen_phase_label(screen: str, substep: str | None = None) -> str:
-    """Return one of the four required workflow stage labels."""
+    """Return the canonical four-stage journey label for one screen."""
 
+    del substep
     stage, default_substep = SCREEN_PHASES[screen]
-    return f"Stage {stage} of 4 · {substep or default_substep}"
+    return f"Stage {stage} of 4 · {default_substep}"
 
 
 def progress_narration(
@@ -2850,18 +2863,25 @@ def clear_session_data(st: Any) -> None:
 
 
 def _persistent_notice(st: Any) -> None:
-    st.info(
-        "Ready, Set, School uses a simulated catalog and fictional stores. "
-        "Store distances are simulated from a notional home location; no "
-        "address is collected and no geocoding occurs. The radius applies to "
-        "pickup trips only, never delivery. Checkout is simulated, and no "
-        "payment information is collected."
-    )
     st.caption(
-        "Tax uses the state-level estimate or override you choose. Local "
-        "rates, state-specific school-supply exemptions, and tax holidays "
-        "are not modeled."
+        "Simulated catalog and fictional stores · Checkout collects no payment."
     )
+    with st.expander("How this works and what is simulated"):
+        st.write(
+            "A language model reads and interprets the supply list. "
+            "Deterministic code calculates quantities, package choices, "
+            "prices, fees, tax, and totals from the confirmed interpretation."
+        )
+        st.write(
+            "Catalog products, prices, stock, fees, and stores are simulated. "
+            "Store distances use a notional home location; no address is "
+            "collected and no geocoding occurs. The radius applies to pickup "
+            "trips only, never delivery."
+        )
+        st.write(
+            "Checkout is simulated, no payment information is collected, and "
+            "nothing is saved after the session ends."
+        )
 
 
 def _screen_progress(
@@ -2873,7 +2893,9 @@ def _screen_progress(
 
     phase, label = SCREEN_PHASES[screen]
     st.progress(int(phase) / 4)
-    st.caption(f"Stage {phase} of 4 · {substep or label}")
+    st.caption(f"Stage {phase} of 4 · {label}")
+    if substep and substep != label:
+        st.caption(substep.capitalize())
 
 
 def _render_development_diagnostic(st: Any) -> None:
@@ -2964,8 +2986,14 @@ def _intake_students_from_state(
 
     students: list[dict[str, Any]] = []
     for index in range(student_count):
+        grade_value = state.get(f"child_grade_{index}")
+        grade = "" if grade_value is None else str(grade_value).strip()
         entity_label = str(
             state.get(f"entity_type_{index}", "One student")
+        )
+        is_classroom = (
+            grade == "Classroom group"
+            or entity_label == "A classroom group"
         )
         students.append(
             {
@@ -2973,17 +3001,15 @@ def _intake_students_from_state(
                 "label": str(
                     state.get(f"child_label_{index}", f"Student {index + 1}")
                 ).strip(),
-                "grade": str(
-                    state.get(f"child_grade_{index}", "")
-                ).strip(),
+                "grade": grade,
                 "student_count": (
                     int(state.get(f"student_count_{index}", 20))
-                    if entity_label == "A classroom group"
+                    if is_classroom
                     else 1
                 ),
                 "entity_type": (
                     "classroom"
-                    if entity_label == "A classroom group"
+                    if is_classroom
                     else "student"
                 ),
             }
@@ -2992,19 +3018,28 @@ def _intake_students_from_state(
 
 
 def _render_intake_walkthrough(st: Any) -> None:
-    """Show the short, dismissible first-arrival workflow explanation."""
+    """Show the single dismissible introduction and canonical journey."""
 
     if st.session_state.get("walkthrough_dismissed"):
         return
     with st.container(border=True):
-        st.subheader("From a school list to a shopping plan")
         st.write(
-            "Ready, Set, School reads the list, shows you what it understood, "
-            "and proposes a cart for you to check."
+            "Read a school-supply list, check what was understood, and get a "
+            "shopping plan ready for your approval."
         )
-        st.write(
-            "1. Set up students and budget · 2. Add lists · "
-            "3. Review what we read · 4. Approve decisions and get your plan"
+        journey = "".join(
+            (
+                '<ol class="rss-journey" aria-label="How it works">',
+                *(
+                    f"<li><strong>{index}</strong><span>{label}</span></li>"
+                    for index, label in enumerate(JOURNEY_STAGES, start=1)
+                ),
+                "</ol>",
+            )
+        )
+        st.markdown(
+            journey,
+            unsafe_allow_html=True,
         )
         if st.button("Hide this overview", key="dismiss_walkthrough"):
             st.session_state["walkthrough_dismissed"] = True
@@ -3015,9 +3050,9 @@ def _render_intake_step_progress(st: Any, step: int) -> None:
     """Keep the parent oriented within the three-part setup."""
 
     labels = (
-        "1 · Students",
-        "2 · Budget",
-        "3 · Shopping preferences",
+        "Students",
+        "Budget",
+        "Shopping preferences",
     )
     st.progress(step / len(labels))
     columns = st.columns(len(labels))
@@ -3031,7 +3066,7 @@ def _render_intake_step_progress(st: Any, step: int) -> None:
 def _render_student_step(st: Any) -> None:
     """Render guided FR-01/FR-05 student intake with immediate validation."""
 
-    st.subheader("Step 1 — Who are you shopping for?")
+    st.subheader("Students")
     st.write(
         "Add each student whose list should be included in this shopping plan."
     )
@@ -3058,8 +3093,18 @@ def _render_student_step(st: Any) -> None:
         grade_key = f"child_grade_{index}"
         entity_key = f"entity_type_{index}"
         st.session_state.setdefault(name_key, f"Student {index + 1}")
-        st.session_state.setdefault(grade_key, "")
         st.session_state.setdefault(entity_key, "One student")
+        existing_grade = st.session_state.get(grade_key)
+        if existing_grade not in (None, *GRADE_OPTIONS):
+            normalized = str(existing_grade).strip().casefold()
+            if normalized in {"pk", "pre-k", "prekindergarten"}:
+                st.session_state[grade_key] = "Pre-K"
+            elif normalized in {"k", "kindergarten"}:
+                st.session_state[grade_key] = "Kindergarten"
+            elif normalized.isdigit() and 1 <= int(normalized) <= 12:
+                st.session_state[grade_key] = f"Grade {int(normalized)}"
+            else:
+                st.session_state[grade_key] = None
         current_name = str(st.session_state.get(name_key, "")).strip()
         with st.container(border=True):
             st.subheader(current_name or f"Student {index + 1}")
@@ -3069,26 +3114,29 @@ def _render_student_step(st: Any) -> None:
                 key=name_key,
                 placeholder="Example: Sam",
             )
-            grade = grade_column.text_input(
-                "Grade",
+            grade = grade_column.selectbox(
+                "Grade or group",
+                GRADE_OPTIONS,
+                index=None,
                 key=grade_key,
-                placeholder="Example: 2",
+                placeholder="Select a grade",
             )
-            errors = student_input_errors(name, grade)
+            grade_text = "" if grade is None else str(grade)
+            errors = student_input_errors(name, grade_text)
             if not name.strip():
                 name_column.error(errors[0])
-            if not grade.strip():
+            if not grade_text:
                 grade_column.error("Enter the student's grade.")
             immediate_errors.extend(
                 f"{name.strip() or f'Student {index + 1}'}: {error}"
                 for error in errors
             )
-            entity_type = st.radio(
-                "Shopping for",
-                ("One student", "A classroom group"),
-                horizontal=True,
-                key=entity_key,
+            entity_type = (
+                "A classroom group"
+                if grade_text == "Classroom group"
+                else "One student"
             )
+            st.session_state[entity_key] = entity_type
             if entity_type == "A classroom group":
                 count_key = f"student_count_{index}"
                 st.session_state.setdefault(count_key, 20)
@@ -3117,7 +3165,7 @@ def _render_budget_step(st: Any) -> None:
         st.session_state,
         int(st.session_state["child_count"]),
     )
-    st.subheader("Step 2 — What is your budget?")
+    st.subheader("Budget")
     st.write(
         "Use one amount for the whole plan, or set a separate amount for "
         "each student."
@@ -3202,7 +3250,7 @@ def _render_preferences_step(st: Any) -> None:
         st.session_state,
         int(st.session_state["child_count"]),
     )
-    st.subheader("Step 3 — How do you want to shop?")
+    st.subheader("Shopping preferences")
     st.write(
         "Choose what matters most. The cart can compare total cost, favor "
         "one stop, or use only stores you select."
@@ -3370,21 +3418,20 @@ def _render_preferences_step(st: Any) -> None:
 
 
 def _render_intake(st: Any) -> None:
-    st.header("Set up your shopping plan")
     debug_enabled = development_diagnostics_enabled(st)
     if debug_enabled:
         _render_development_diagnostic(st)
     else:
         st.session_state["demo_mode"] = False
-    _render_intake_walkthrough(st)
     step = min(3, max(1, int(st.session_state.get("intake_step", 1))))
     _render_intake_step_progress(st, step)
-    if step == 1:
-        _render_student_step(st)
-    elif step == 2:
-        _render_budget_step(st)
-    else:
-        _render_preferences_step(st)
+    with st.container(border=True):
+        if step == 1:
+            _render_student_step(st)
+        elif step == 2:
+            _render_budget_step(st)
+        else:
+            _render_preferences_step(st)
 
 
 def _build_list_inputs(
@@ -5328,7 +5375,9 @@ def _render_review(st: Any) -> None:
     st.session_state["organized_list_confirmed"] = True
     st.session_state["allow_unresolved_items"] = False
     st.session_state["result"] = None
-    st.session_state["progress_substep"] = "Build my shopping plan"
+    st.session_state["progress_substep"] = (
+        "comparing products, stores, and the budget"
+    )
     st.session_state["screen"] = "working"
     st.rerun()
 
@@ -5388,7 +5437,9 @@ def _route_pipeline_result(
         "approval" if unresolved else "summary"
     )
     st.session_state["progress_substep"] = (
-        "decisions to review" if unresolved else "your plan"
+        "reviewing decisions"
+        if unresolved
+        else "showing the final shopping plan"
     )
     st.session_state["ui_error_active"] = bool(
         result.extraction_failures
@@ -5560,7 +5611,7 @@ def _render_working(st: Any) -> None:
             st.session_state["review_items"] = organize_extractions(
                 dict(extractions)
             )
-        st.session_state["progress_substep"] = "Review extracted items"
+        st.session_state["progress_substep"] = "checking what the lists said"
         st.session_state["screen"] = "review"
         st.rerun()
         return
@@ -6679,7 +6730,7 @@ def _render_approval(st: Any) -> None:
     st.session_state["parent_decisions"] = (
         tuple(st.session_state["parent_decisions"]) + response_log.entries
     )
-    st.session_state["progress_substep"] = "your plan"
+    st.session_state["progress_substep"] = "showing the final shopping plan"
     st.session_state["screen"] = "summary"
     st.rerun()
 
@@ -8073,27 +8124,58 @@ def _apply_custom_css(st: Any) -> None:
         """
         <style>
         :root {
-            --rss-ink: #1f2a24;
-            --rss-muted: #4f5f56;
-            --rss-paper: #f7f8f4;
+            --rss-ink: #17231d;
+            --rss-muted: #435249;
+            --rss-paper: #fbfaf2;
             --rss-card: #ffffff;
-            --rss-line: #cbd7cf;
-            --rss-pencil: #f4c542;
-            --rss-notebook: #2f6f9f;
-            --rss-chalkboard: #245740;
-            --rss-crayon: #bf3f4a;
-            --rss-soft-blue: #edf4f8;
-            --rss-soft-yellow: #fff8dc;
+            --rss-line: #a9c7d9;
+            --rss-pencil: #f5c400;
+            --rss-notebook: #006eae;
+            --rss-chalkboard: #167149;
+            --rss-crayon: #c52f45;
+            --rss-soft-blue: #eaf6fc;
+            --rss-soft-yellow: #fff7cf;
+            --rss-soft-red: #fff0f2;
         }
         .stApp {
             color: var(--rss-ink);
             background-color: var(--rss-paper);
+            background-image:
+                linear-gradient(
+                    to right,
+                    transparent 0,
+                    transparent 5.2rem,
+                    rgba(197, 47, 69, 0.24) 5.2rem,
+                    rgba(197, 47, 69, 0.24) 5.32rem,
+                    transparent 5.32rem
+                ),
+                repeating-linear-gradient(
+                    to bottom,
+                    #fbfaf2 0,
+                    #fbfaf2 2rem,
+                    rgba(0, 110, 174, 0.17) 2rem,
+                    rgba(0, 110, 174, 0.17) 2.08rem
+                );
+            background-attachment: fixed;
             font-family: "Segoe UI", Arial, sans-serif;
         }
         .block-container {
             max-width: 1040px;
-            padding-top: 1.75rem;
-            padding-bottom: 4.5rem;
+            margin-top: 1.25rem;
+            margin-bottom: 3rem;
+            padding: 2rem 2.35rem 4rem;
+            border: 3px solid var(--rss-notebook);
+            border-top: 0.65rem solid var(--rss-pencil);
+            border-radius: 1.25rem;
+            background-color: var(--rss-card);
+            box-shadow: 0 0.8rem 2rem rgba(23, 35, 29, 0.16);
+        }
+        [data-testid="stVerticalBlock"] {
+            gap: 1.1rem;
+        }
+        [data-testid="stHorizontalBlock"] {
+            align-items: flex-start;
+            gap: 1.4rem;
         }
         h1, h2, h3 {
             color: var(--rss-ink);
@@ -8102,56 +8184,121 @@ def _apply_custom_css(st: Any) -> None:
             line-height: 1.2;
         }
         h1 {
-            color: var(--rss-chalkboard);
-            margin-bottom: 0.25rem !important;
-            font-size: clamp(2.25rem, 5vw, 3.4rem) !important;
+            margin: 0 0 0.35rem !important;
+            font-size: clamp(2.2rem, 5vw, 3.55rem) !important;
             font-weight: 800 !important;
         }
+        .rss-title {
+            display: flex;
+            flex-wrap: nowrap;
+            align-items: baseline;
+            gap: 0.22em;
+            width: fit-content;
+            padding-bottom: 0.22rem;
+            border-bottom: 0.35rem solid var(--rss-pencil);
+            font-size: clamp(2.15rem, 7.2vw, 3.55rem) !important;
+            line-height: 1.05;
+            white-space: nowrap;
+        }
+        .rss-title__ready {color: var(--rss-crayon);}
+        .rss-title__set {color: var(--rss-notebook);}
+        .rss-title__school {color: var(--rss-chalkboard);}
         h2 {
-            margin-top: 2rem !important;
+            margin-top: 2.35rem !important;
+            margin-bottom: 1rem !important;
             padding-left: 0.9rem;
             border-left: 0.45rem solid var(--rss-pencil);
         }
         h3 {
             color: var(--rss-notebook);
-            margin-top: 1.35rem !important;
+            margin-top: 1.5rem !important;
+            margin-bottom: 0.75rem !important;
         }
         p, label, [data-testid="stCaptionContainer"] {
             color: var(--rss-ink);
-            line-height: 1.55;
+            line-height: 1.6;
         }
         label {
-            font-weight: 650 !important;
+            font-weight: 700 !important;
         }
         [data-testid="stCaptionContainer"] {
             color: var(--rss-muted);
             font-weight: 525;
         }
+        [data-testid="stWidgetLabel"] {
+            min-height: 1.8rem;
+            display: flex;
+            align-items: flex-end;
+        }
+        .rss-journey {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0.85rem;
+            margin: 1.15rem 0 0.25rem;
+            padding: 0;
+            list-style: none;
+        }
+        .rss-journey li {
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            min-height: 4.2rem;
+            padding: 0.8rem;
+            border: 2px solid var(--rss-line);
+            border-radius: 0.8rem;
+            background-color: var(--rss-card);
+            color: var(--rss-ink);
+            line-height: 1.3;
+        }
+        .rss-journey strong {
+            display: grid;
+            flex: 0 0 2rem;
+            width: 2rem;
+            height: 2rem;
+            place-items: center;
+            border-radius: 50%;
+            background-color: var(--rss-notebook);
+            color: #ffffff;
+        }
+        .rss-journey li:nth-child(2) strong {
+            background-color: var(--rss-crayon);
+        }
+        .rss-journey li:nth-child(3) strong {
+            background-color: var(--rss-chalkboard);
+        }
+        .rss-journey li:nth-child(4) strong {
+            background-color: #855000;
+        }
         [data-testid="stMetric"] {
-            border: 1px solid var(--rss-line);
-            border-top: 0.3rem solid var(--rss-notebook);
+            border: 2px solid var(--rss-line);
+            border-top: 0.35rem solid var(--rss-notebook);
             border-radius: 0.85rem;
-            padding: 1rem 1.1rem;
+            padding: 1.1rem 1.2rem;
             background-color: var(--rss-card);
         }
         [data-testid="stExpander"],
         [data-testid="stForm"],
         [data-testid="stVerticalBlockBorderWrapper"] {
-            border: 1px solid var(--rss-line) !important;
+            border: 2px solid var(--rss-line) !important;
             border-radius: 0.9rem !important;
             background-color: var(--rss-card) !important;
         }
+        [data-testid="stVerticalBlockBorderWrapper"] > div {
+            padding: 1.25rem 1.4rem;
+        }
         [data-testid="stNotification"] {
             border-radius: 0.8rem;
-            border-width: 1px;
+            border-width: 2px;
+            background-color: var(--rss-card) !important;
         }
         [data-testid="stTextInput"] input,
         [data-testid="stNumberInput"] input,
         [data-testid="stSelectbox"] > div > div {
             color: var(--rss-ink) !important;
-            border-radius: 0.65rem !important;
+            min-height: 2.85rem;
+            border-radius: 0.7rem !important;
             background-color: #ffffff !important;
-            border-color: #8da298 !important;
+            border-color: #6e8d9e !important;
         }
         [data-testid="stTextInput"] input:focus,
         [data-testid="stNumberInput"] input:focus {
@@ -8193,7 +8340,7 @@ def _apply_custom_css(st: Any) -> None:
         }
         [data-testid="stDataFrame"],
         [data-testid="stTable"] {
-            border: 1px solid var(--rss-line);
+            border: 2px solid var(--rss-line);
             border-radius: 0.75rem;
             background-color: #ffffff;
             overflow: hidden;
@@ -8212,14 +8359,52 @@ def _apply_custom_css(st: Any) -> None:
         }
         @media (max-width: 700px) {
             .block-container {
-                padding-top: 1rem;
-                padding-inline: 1rem;
+                margin-top: 0;
+                margin-bottom: 0;
+                padding: 1.2rem 1rem 3rem;
+                border-right-width: 0;
+                border-left-width: 0;
+                border-radius: 0;
+                box-shadow: none;
+            }
+            .rss-title {
+                gap: 0.16em;
+                font-size: clamp(2rem, 8.4vw, 2.8rem) !important;
+            }
+            .rss-journey {
+                grid-template-columns: 1fr;
+            }
+            .rss-journey li {
+                min-height: 0;
+                padding: 0.7rem 0.8rem;
+            }
+            [data-testid="stHorizontalBlock"] {
+                gap: 0.85rem;
+            }
+            [data-testid="stVerticalBlockBorderWrapper"] > div {
+                padding: 1rem;
             }
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def _render_app_title(st: Any) -> None:
+    """Render the high-contrast three-color application identity."""
+
+    st.markdown(
+        (
+            '<h1 class="rss-title" aria-label="Ready, Set, School">'
+            '<span class="rss-title__ready">Ready,</span>'
+            '<span class="rss-title__set">Set,</span>'
+            '<span class="rss-title__school">School</span>'
+            "</h1>"
+        ),
+        unsafe_allow_html=True,
+    )
+    st.caption(APP_TAGLINE)
 
 
 def main() -> None:
@@ -8234,11 +8419,8 @@ def main() -> None:
     )
     _initialize_state(st)
     _apply_custom_css(st)
-    copy = select_copy_set(tone_state_from_session(st.session_state))
-    st.title(APP_NAME)
-    st.caption(copy.tagline)
-    _persistent_notice(st)
     screen = st.session_state["screen"]
+    _render_app_title(st)
     progress_screen = (
         "lists"
         if screen == "working"
@@ -8250,6 +8432,9 @@ def main() -> None:
         progress_screen,
         st.session_state.get("progress_substep"),
     )
+    if screen == "intake":
+        _render_intake_walkthrough(st)
+    _persistent_notice(st)
     {
         "intake": _render_intake,
         "lists": _render_lists,

@@ -154,7 +154,36 @@ def test_student_fields_validate_as_the_parent_types() -> None:
         "Enter a student name or nickname.",
         "Enter the student's grade.",
     )
-    assert app.student_input_errors("Sam", "2") == ()
+    assert app.student_input_errors("Sam", "Grade 2") == ()
+    assert app.GRADE_OPTIONS == (
+        "Pre-K",
+        "Kindergarten",
+        "Grade 1",
+        "Grade 2",
+        "Grade 3",
+        "Grade 4",
+        "Grade 5",
+        "Grade 6",
+        "Grade 7",
+        "Grade 8",
+        "Grade 9",
+        "Grade 10",
+        "Grade 11",
+        "Grade 12",
+        "Classroom group",
+    )
+
+    classroom = app._intake_students_from_state(
+        {
+            "child_label_0": "Ms. Rivera's class",
+            "child_grade_0": "Classroom group",
+            "entity_type_0": "One student",
+            "student_count_0": 24,
+        },
+        1,
+    )
+    assert classroom[0]["entity_type"] == "classroom"
+    assert classroom[0]["student_count"] == 24
 
 
 def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
@@ -170,26 +199,56 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert 'st.session_state["demo_mode"] = False' in intake_source
     assert "Use stable offline demo mode" not in intake_source
     assert "Use stable offline demo mode" in diagnostic_source
-    assert "Step 1 — Who are you shopping for?" in student_source
+    assert 'st.subheader("Students")' in student_source
+    assert "Step 1" not in student_source
     assert "Student name or nickname" in student_source
+    assert "GRADE_OPTIONS" in student_source
+    assert "Select a grade" in student_source
+    assert '"Shopping for"' not in student_source
     assert "disabled=bool(immediate_errors)" in student_source
-    assert "Step 2 — What is your budget?" in budget_source
+    assert 'st.subheader("Budget")' in budget_source
+    assert "Step 2" not in budget_source
     assert "A budget for each student" in budget_source
     assert "disabled=bool(budget_errors)" in budget_source
-    assert "Step 3 — How do you want to shop?" in preferences_source
+    assert 'st.subheader("Shopping preferences")' in preferences_source
+    assert "Step 3" not in preferences_source
     assert '"Shopping preferences"' in preferences_source
     assert "Advanced shopping and tax options" in preferences_source
     assert "Shopping mode" not in preferences_source
 
 
-def test_visual_system_has_no_gradients_behind_text() -> None:
-    """Every screen uses the same high-contrast plain background system."""
+def test_visual_system_keeps_notebook_pattern_behind_opaque_cards() -> None:
+    """Decorative paper never sits directly behind application body copy."""
 
     css_source = inspect.getsource(app._apply_custom_css).casefold()
 
-    assert "gradient" not in css_source
+    assert "repeating-linear-gradient" in css_source
     assert "--rss-chalkboard" in css_source
-    assert "background-color: var(--rss-paper)" in css_source
+    assert ".block-container" in css_source
+    assert "background-color: var(--rss-card)" in css_source
+    assert "grid-template-columns: 1fr" in css_source
+    assert "@media (max-width: 700px)" in css_source
+
+
+def test_landing_has_one_introduction_and_colored_identity() -> None:
+    """The title, purpose, journey, and limitation copy each have one job."""
+
+    title_source = inspect.getsource(app._render_app_title)
+    intro_source = inspect.getsource(app._render_intake_walkthrough)
+    intake_source = inspect.getsource(app._render_intake)
+    notice_source = inspect.getsource(app._persistent_notice)
+
+    assert app.APP_TAGLINE == "Sorted before the first bell."
+    assert "rss-title__ready" in title_source
+    assert "rss-title__set" in title_source
+    assert "rss-title__school" in title_source
+    assert "JOURNEY_STAGES" in intro_source
+    assert "Set up your shopping plan" not in intake_source
+    assert "From a school list to a shopping plan" not in intro_source
+    assert "Simulated catalog and fictional stores" in notice_source
+    assert "How this works and what is simulated" in notice_source
+    assert "tax holidays" not in notice_source.casefold()
+    assert "state-specific" not in notice_source.casefold()
 
 
 def test_decision_log_copy_uses_student_terminology() -> None:
@@ -269,23 +328,26 @@ def test_visible_navigation_uses_four_required_stages() -> None:
     """Every internal screen maps to one of the four required stages."""
 
     assert app.screen_phase_label("intake") == (
-        "Stage 1 of 4 · Upload and organize my list"
+        "Stage 1 of 4 · Set up students and budget"
     )
     assert app.screen_phase_label("lists") == (
-        "Stage 1 of 4 · Upload and organize my list"
+        "Stage 2 of 4 · Add supply lists"
     )
     assert (
         app.screen_phase_label("working", "reading the lists")
-        == "Stage 3 of 4 · reading the lists"
+        == "Stage 4 of 4 · Approve decisions and get your plan"
+    )
+    assert app.screen_phase_label("sections") == (
+        "Stage 2 of 4 · Add supply lists"
     )
     assert app.screen_phase_label("review") == (
-        "Stage 2 of 4 · Review extracted items"
+        "Stage 3 of 4 · Review what we read"
     )
     assert app.screen_phase_label("approval") == (
-        "Stage 4 of 4 · Approve final plan"
+        "Stage 4 of 4 · Approve decisions and get your plan"
     )
     assert app.screen_phase_label("summary") == (
-        "Stage 4 of 4 · Approve final plan"
+        "Stage 4 of 4 · Approve decisions and get your plan"
     )
 
 

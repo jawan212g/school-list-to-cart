@@ -1,6 +1,6 @@
 # Ready, Set, School
 
-**One list in. One cart out. One trip.**
+**Sorted before the first bell.**
 
 Ready, Set, School turns school supply lists into an optimized multi-store shopping
 plan, with a human approval gate for the decisions a parent should actually make.
