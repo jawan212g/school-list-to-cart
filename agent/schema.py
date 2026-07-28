@@ -19,6 +19,14 @@ from agent.rules import (
 UnitType = Literal["each", "pack", "box", "ream"]
 RequirementType = Literal["required", "optional", "donation"]
 ReviewStatus = Literal["pending", "confirmed", "unresolved", "deleted"]
+SupplyScope = Literal["individual", "shared", "unspecified"]
+DocumentLayout = Literal[
+    "single_section",
+    "multi_section",
+    "grade_matrix",
+    "multilingual",
+    "mixed",
+]
 AttributeValue = str | int | float | bool | tuple[str, ...] | None
 UNRESTRICTED_COLOR_VALUES = frozenset(
     {"any", "any color", "any colors", "assorted", "no preference"}
@@ -105,7 +113,13 @@ def _correct_attribute_fields(
     ):
         corrected["style"] = None
         changed = True
-
+    if (
+        canonical_item == "spiral_notebooks"
+        and corrected.get("count") is not None
+        and re.search(r"\b\d+\s*[- ]subject\b", raw_evidence)
+    ):
+        corrected["count"] = None
+        changed = True
     count_match = re.search(r"\b(\d+)\s*count\b", raw_evidence)
     if count_match is not None and corrected.get("count") is None:
         corrected["count"] = int(count_match.group(1))
@@ -148,6 +162,23 @@ def _correct_attribute_fields(
     if (
         isinstance(material, str)
         and _evidence_text(material) not in raw_evidence.split()
+    ):
+        corrected["material"] = None
+        changed = True
+    if (
+        corrected.get("material") == "paper"
+        and (
+            canonical_item
+            in {
+                "composition_notebooks",
+                "notebook_paper",
+                "spiral_notebooks",
+                "pens",
+                "sticky_notes",
+                "cardstock",
+            }
+            or "paper mate" in raw_evidence
+        )
     ):
         corrected["material"] = None
         changed = True
@@ -211,6 +242,16 @@ class Requirement(BaseModel):
     is_required: bool = True
     is_purchasable: bool = True
     requirement_type: RequirementType = "required"
+    supply_scope: SupplyScope = "unspecified"
+    provided_by_school: bool = False
+    condition: str | None = None
+    condition_applies: bool | None = None
+    condition_group_id: str | None = None
+    condition_question: str | None = None
+    condition_option: str | None = None
+    source_section: str | None = None
+    source_page: int | None = Field(default=None, ge=1)
+    source_language: str | None = None
     attributes: RequirementAttributes = Field(
         default_factory=RequirementAttributes
     )
@@ -229,6 +270,14 @@ class Requirement(BaseModel):
         normalized = dict(value)
         if normalized.get("quantity_is_range") is not True:
             normalized["quantity_max"] = None
+        if (
+            normalized.get("provided_by_school") is True
+            or (
+                normalized.get("condition")
+                and normalized.get("condition_applies") is False
+            )
+        ):
+            normalized["is_purchasable"] = False
         if normalized.get("is_purchasable") is False:
             normalized["is_required"] = False
             if normalized.get("requirement_type", "required") == "required":
@@ -246,6 +295,40 @@ class Requirement(BaseModel):
             normalized["canonical_item"] = detected_item
             corrected = True
         attributes = normalized.get("attributes")
+        if isinstance(attributes, Mapping) and "|" in raw_text:
+            selected_cell = raw_text.split("|", 1)[1]
+            selected_cell = selected_cell.split(":", 1)[-1].strip()
+            container_match = re.match(
+                r"^1\s+(?:box|pack|pkg\.?)\b",
+                selected_cell,
+                re.IGNORECASE,
+            )
+            count = attributes.get("count")
+            quantity = normalized.get("quantity")
+            if (
+                container_match is not None
+                and isinstance(count, int)
+                and quantity == count
+            ):
+                normalized["quantity"] = 1
+                corrected = True
+            individual_units = re.match(
+                r"^\d+\s+(?!box\b|boxes\b|pack\b|pkg\b|set\b|dozen\b)"
+                r"[A-Za-z#]",
+                selected_cell,
+                re.IGNORECASE,
+            )
+            if (
+                individual_units is not None
+                and normalized.get("unit_type") in {"box", "pack"}
+            ):
+                normalized["unit_type"] = "each"
+                mutable_attributes = dict(attributes)
+                if mutable_attributes.get("count") == quantity:
+                    mutable_attributes["count"] = None
+                normalized["attributes"] = mutable_attributes
+                attributes = mutable_attributes
+                corrected = True
         if isinstance(attributes, Mapping):
             corrected_attributes, attributes_changed = (
                 _correct_attribute_fields(
@@ -286,6 +369,91 @@ class Requirement(BaseModel):
         return self
 
 
+class DocumentSection(BaseModel):
+    """One parent-selectable grade, teacher, or named document section."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    section_id: str = Field(
+        min_length=1,
+        pattern=r"^[A-Za-z0-9_.:-]+$",
+    )
+    label: str = Field(min_length=1)
+    grades: tuple[str, ...] = ()
+    teachers: tuple[str, ...] = ()
+    named_sections: tuple[str, ...] = ()
+    page_numbers: tuple[int, ...] = ()
+    language: str | None = None
+    column_label: str | None = None
+    duplicate_of_section_id: str | None = None
+
+    @field_validator("grades", "teachers", "named_sections")
+    @classmethod
+    def normalize_section_labels(
+        cls,
+        values: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Keep detected labels concise and unique."""
+
+        normalized: list[str] = []
+        for value in values:
+            cleaned = value.strip()
+            if cleaned and cleaned.casefold() not in {
+                item.casefold() for item in normalized
+            }:
+                normalized.append(cleaned)
+        return tuple(normalized)
+
+
+class DocumentStructureEnvelope(BaseModel):
+    """Schema-validated description produced before item extraction."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    document_title: str | None = None
+    layouts: tuple[DocumentLayout, ...] = ("single_section",)
+    languages: tuple[str, ...] = ()
+    sections: tuple[DocumentSection, ...] = ()
+    unreadable_regions: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def require_parent_selectable_structure(self) -> Self:
+        """Reject a structure response that silently identifies no sections."""
+
+        if not self.sections:
+            raise ValueError("Document structure contains no selectable sections")
+        section_ids = tuple(section.section_id for section in self.sections)
+        if len(set(section_ids)) != len(section_ids):
+            raise ValueError("Document section identifiers must be unique")
+        return self
+
+
+class DocumentSelection(BaseModel):
+    """Parent-confirmed structure scope attached to an extraction."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    selected_section_ids: tuple[str, ...]
+    selected_section_labels: tuple[str, ...]
+    selected_page_numbers: tuple[int, ...] = ()
+    selected_column_labels: tuple[str, ...] = ()
+    selected_named_sections: tuple[str, ...] = ()
+    ignored_section_ids: tuple[str, ...] = ()
+    ignored_section_labels: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def require_selected_section(self) -> Self:
+        """Require at least one section before item extraction."""
+
+        if not self.selected_section_ids:
+            raise ValueError("Select at least one document section")
+        if len(self.selected_section_ids) != len(
+            self.selected_section_labels
+        ):
+            raise ValueError("Selected section identifiers and labels differ")
+        return self
+
+
 class ExtractionEnvelope(BaseModel):
     """Schema-validated model response with explicit manual-review state."""
 
@@ -297,6 +465,9 @@ class ExtractionEnvelope(BaseModel):
     manual_review_required: bool = False
     review_reasons: tuple[str, ...] = ()
     deferred_review_reasons: tuple[str, ...] = ()
+    document_selection: DocumentSelection | None = None
+    uninterpreted_lines: tuple[str, ...] = ()
+    skipped_lines: tuple[str, ...] = ()
 
     @field_validator("stated_grades", "stated_teachers")
     @classmethod
@@ -335,6 +506,17 @@ class SupplyItemReview(BaseModel):
     material: str | None = None
     required_attributes: dict[str, AttributeValue] = Field(default_factory=dict)
     optional: bool = False
+    is_purchasable: bool = True
+    supply_scope: SupplyScope = "unspecified"
+    provided_by_school: bool = False
+    condition: str | None = None
+    condition_applies: bool | None = None
+    condition_group_id: str | None = None
+    condition_question: str | None = None
+    condition_option: str | None = None
+    source_section: str | None = None
+    source_page: int | None = Field(default=None, ge=1)
+    source_language: str | None = None
     notes: str | None = None
     source_text: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)

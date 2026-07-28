@@ -50,6 +50,7 @@ INTERRUPT_TARGET_COUNT = 3  # BR-10: target approval-interrupt maximum.
 INTERRUPT_DESIGN_FAILURE_COUNT = 6  # BR-10: more than six is a failure.
 
 MODEL_CALL_TIMEOUT_SECONDS = 30.0  # Operational ceiling for one model request.
+VISION_MODEL_CALL_TIMEOUT_SECONDS = 120.0  # Rendered-page vision requests need more time.
 MODEL_CALL_MAX_RETRIES = 1  # One transient-service retry per model request.
 MODEL_MAX_CONCURRENCY = 4  # Bound parallel model requests in one session.
 BUDGET_ALTERNATIVE_PLAN_COUNT = 2  # At most two whole-plan alternatives.
@@ -92,6 +93,16 @@ ALLOWED_CATEGORIES = frozenset(
         "zip_top_bags",
         "cardstock",
         "hand_sanitizer",
+        "play_dough",
+        "modeling_compound",
+        "watercolor_paints",
+        "dry_erase_markers",
+        "permanent_markers",
+        "sticky_notes",
+        "baby_wipes",
+        "water_bottles",
+        "pencil_sharpeners",
+        "pencil_pouches",
     }
 )
 
@@ -129,6 +140,23 @@ CANONICAL_ITEM_ALIASES = {
     "zipper_bags": "zip_top_bags",
     "card_stock": "cardstock",
     "sanitizer": "hand_sanitizer",
+    "play_doh": "play_dough",
+    "playdough": "play_dough",
+    "modeling_clay": "modeling_compound",
+    "modelling_compound": "modeling_compound",
+    "watercolor_paint": "watercolor_paints",
+    "watercolors": "watercolor_paints",
+    "dry_erase_marker": "dry_erase_markers",
+    "expo_marker": "dry_erase_markers",
+    "permanent_marker": "permanent_markers",
+    "sharpie": "permanent_markers",
+    "sticky_note": "sticky_notes",
+    "post_it_notes": "sticky_notes",
+    "baby_wipe": "baby_wipes",
+    "water_bottle": "water_bottles",
+    "pencil_sharpener": "pencil_sharpeners",
+    "pencil_pouch": "pencil_pouches",
+    "pencil_case": "pencil_pouches",
 }  # Deterministic canonical-name aliases for FR-11.
 
 STANDARD_PACK_COUNTS = {
@@ -143,6 +171,12 @@ STANDARD_PACK_COUNTS = {
     "pens": 12,
     "highlighters": 5,
     "erasers": 3,
+    "play_dough": 4,
+    "modeling_compound": 4,
+    "dry_erase_markers": 4,
+    "permanent_markers": 2,
+    "sticky_notes": 3,
+    "pencil_sharpeners": 2,
 }  # E-02: standard sizes used only when a count is omitted.
 
 STANDARD_CONTAINER_CONTENT_COUNTS = {

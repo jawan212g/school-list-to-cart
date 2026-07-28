@@ -475,7 +475,7 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
         self_sourced,
         (),
     )
-    assert "STATUS: INCOMPLETE" in summary
+    assert "STATUS: REQUIRED ITEMS OR LISTS ARE MISSING" in summary
     assert "ITEMS YOU CHOSE TO SOURCE YOURSELF" in summary
     assert "Headphones | Grade 2 and Grade 5" in summary
     assert "UNFULFILLED BY PARENT CHOICE" in summary

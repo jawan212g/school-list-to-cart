@@ -11,6 +11,10 @@ import pytest
 import agent.provider as provider
 from agent.extract import ExtractionInputError, extract_document
 from agent.schema import ExtractionEnvelope
+from agent.rules import (
+    MODEL_CALL_MAX_RETRIES,
+    VISION_MODEL_CALL_TIMEOUT_SECONDS,
+)
 
 
 PROVIDER_SETTING_NAMES = (
@@ -214,6 +218,56 @@ def test_custom_parser_reads_content_only(
     assert result == ExtractionEnvelope()
     assert calls[0]["response_format"]["type"] == "json_schema"
     assert calls[0]["response_format"]["json_schema"]["strict"] is True
+
+
+def test_structured_request_accepts_longer_vision_timeout() -> None:
+    """Rendered-page requests override the shorter text-call timeout."""
+
+    options: list[dict[str, Any]] = []
+    message = SimpleNamespace(
+        content=ExtractionEnvelope().model_dump_json()
+    )
+
+    class Completions:
+        def create(self, **kwargs: Any) -> object:
+            return SimpleNamespace(
+                choices=(SimpleNamespace(message=message),)
+            )
+
+    class Client:
+        chat = SimpleNamespace(completions=Completions())
+
+        def with_options(self, **kwargs: Any) -> "Client":
+            options.append(kwargs)
+            return self
+
+    provider.request_structured_output(
+        Client(),  # type: ignore[arg-type]
+        _custom_config(),
+        model="vision-model",
+        instructions="read the rendered page",
+        content=[
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,AA==",
+            }
+        ],
+        schema=ExtractionEnvelope,
+        timeout_seconds=VISION_MODEL_CALL_TIMEOUT_SECONDS,
+    )
+
+    assert options == [
+        {
+            "timeout": VISION_MODEL_CALL_TIMEOUT_SECONDS,
+            "max_retries": MODEL_CALL_MAX_RETRIES,
+        }
+    ]
+
+
+def test_default_openai_model_restores_full_capability_model() -> None:
+    """Vision extraction uses the pre-rendering model default."""
+
+    assert provider.DEFAULT_OPENAI_MODEL == "gpt-5.6-sol"
 
 
 def test_image_is_rejected_before_model_call_without_vision_model() -> None:

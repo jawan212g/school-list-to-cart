@@ -43,3 +43,19 @@ def jpeg_list_bytes() -> bytes:
     """Return stable JPEG bytes for image-content packaging tests."""
 
     return _image_bytes("JPEG")
+
+
+@pytest.fixture
+def multipage_pdf_bytes() -> bytes:
+    """Return a two-page PDF whose visual page boundaries are deterministic."""
+
+    first = Image.new("RGB", (120, 80), color=(255, 255, 255))
+    second = Image.new("RGB", (120, 80), color=(245, 245, 245))
+    output = BytesIO()
+    first.save(
+        output,
+        format="PDF",
+        save_all=True,
+        append_images=(second,),
+    )
+    return output.getvalue()

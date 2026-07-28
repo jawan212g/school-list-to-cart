@@ -10,10 +10,17 @@ Ian Demroff · Sarah Fritschy · Jawan Goodspeed · Marwa Gujarathi · Abhishek 
 
 ## What Ready, Set, School does
 
-Upload or paste one supply list per child. Set a budget and a shopping mode. The agent
-extracts the requirements, aggregates them across children, matches them to products,
-builds the cheapest compliant cart across a simulated four-store catalog, and stops to
-ask you whenever a decision falls outside its limits.
+Upload or paste one supply list per child. Set a budget and a shopping mode. PDF pages
+are rendered as images so the reading step can preserve tables and multi-column
+layouts. For district-wide documents, the parent first chooses the grade, teacher, or
+named section to read. The app then proposes a cart from a simulated four-store
+catalog and asks the parent to check the exact source lines and resolve flagged
+decisions.
+
+A language model reads and interprets list content. Deterministic Python code handles
+quantities, package choices, prices, tax, fees, and totals. The reading can be wrong;
+the calculated catalog arithmetic is exact for the confirmed interpretation and
+seeded data.
 
 ## Important
 
@@ -41,8 +48,8 @@ The default configuration uses OpenAI with `OPENAI_API_KEY` and the app's existi
 text-and-vision model. To use an OpenAI-compatible provider such as IU's Kelley GPT
 API, configure `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TEXT_MODEL` in Streamlit
 secrets or environment variables. Configure `LLM_VISION_MODEL` only when that
-endpoint has a verified image-capable model; otherwise the app rejects JPG and PNG
-lists with a clear message. Streamlit secrets take precedence over environment
+endpoint has a verified image-capable model; otherwise the app rejects PDF, JPG, and
+PNG lists with a clear message. Streamlit secrets take precedence over environment
 variables.
 
 ## Tests

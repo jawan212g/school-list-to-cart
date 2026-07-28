@@ -223,14 +223,18 @@ def create_model_client(
     return OpenAI(**options)
 
 
-def configured_model_client(client: OpenAI) -> OpenAI:
+def configured_model_client(
+    client: OpenAI,
+    *,
+    timeout_seconds: float = MODEL_CALL_TIMEOUT_SECONDS,
+) -> OpenAI:
     """Apply the same timeout and retry policy to an injected client."""
 
     with_options = getattr(client, "with_options", None)
     if not callable(with_options):
         return client
     return with_options(
-        timeout=MODEL_CALL_TIMEOUT_SECONDS,
+        timeout=timeout_seconds,
         max_retries=MODEL_CALL_MAX_RETRIES,
     )
 
@@ -289,10 +293,14 @@ def request_structured_output(
     instructions: str,
     content: str | list[dict[str, Any]],
     schema: type[SchemaModel],
+    timeout_seconds: float = MODEL_CALL_TIMEOUT_SECONDS,
 ) -> SchemaModel:
     """Request schema-validated output through the active provider transport."""
 
-    active_client = configured_model_client(client)
+    active_client = configured_model_client(
+        client,
+        timeout_seconds=timeout_seconds,
+    )
     if config.uses_openai_responses_api:
         response = active_client.responses.parse(
             model=model,

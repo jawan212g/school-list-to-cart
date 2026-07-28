@@ -432,3 +432,213 @@ Implement the approved DOCX, image, text, and manual-list intake workflow with a
 ### Recommended next step
 
 Run one API-backed JPG or PNG list through all four stages, then perform a narrow-screen accessibility review.
+
+## 2026-07-27 — Add layout-preserving district PDF intake
+
+### Objective
+
+Replace interleaved PDF text extraction with vision-based page rendering, add
+parent-confirmed document-section selection, preserve real-list structure and source
+evidence, and expand the catalog for three real district reference PDFs without
+changing matching, approval-gate, or optimizer logic.
+
+### Work completed
+
+- Added `pypdfium2` and changed PDF intake to render every page as a PNG for document
+  structure detection.
+- Kept PDF text extraction only as a logged fallback when page rendering fails.
+- Added a PDFium render lock after concurrent real-PDF verification exposed a Windows
+  ARM64 page-loading failure; model calls remain concurrent.
+- Added schema-validated document structure, section, and parent selection contracts
+  for grades, teachers, named sections, page numbers, matrix columns, languages, and
+  translated duplicates.
+- Added a document-section selection screen before item extraction. A single
+  unambiguous grade skips the picker; every selected and ignored section is named.
+- Limited item extraction to the rendered page numbers selected by the parent.
+- Added structured fields for individual/shared scope, school-provided items,
+  conditional applicability, source section/page/language, uninterpreted lines, and
+  deliberately skipped lines.
+- Added parent review controls for conditional applicability, supply scope, and
+  school-provided items.
+- Added deterministic duplicate suppression before quantity aggregation.
+- Added visible source-line interpretation, read/ignored sections, school-provided
+  items, uninterpreted content, and deliberately skipped content to the summary and
+  text export.
+- Added explicit summary copy separating model-based list reading from deterministic
+  quantity, package, price, tax, fee, and total calculations.
+- Expanded the seeded catalog from 120 to 162 unique offers and from 25 to 35
+  categories, including play dough, modeling compound, watercolor paints, dry-erase
+  markers, permanent markers, sticky notes, baby wipes, water bottles, pencil
+  sharpeners, and pencil pouches.
+- Added 1.5-inch and 2-inch binders, 5-tab subject dividers, plastic folders, and
+  block/cap/kneaded eraser choices while preserving the seeded non-monotonic pricing
+  cases.
+- Changed the default OpenAI text/vision model from `gpt-5.6-sol` to
+  `gpt-5.4-mini` after the former completed structure detection but timed out twice
+  on a selected one-page structured extraction under the required 30-second call
+  limit.
+- Added the three real district PDFs as reference fixtures and model-free tests that
+  verify page rendering and selected-page scoping.
+
+### Decisions made
+
+- Structure detection sees the whole document; item extraction sees only the
+  parent-selected pages plus the exact selected grade/column/named-section metadata.
+- Translated copies remain visible in detected structure but are not selectable when
+  marked as duplicates.
+- Global school-provided boxes are attached to each affected grade and preserved as
+  display-only items rather than cart requirements.
+- Matrix source evidence joins the exact row label and exact selected cell so the
+  parent can verify both item and quantity at a glance.
+- Model-reported duplicate rows are suppressed deterministically and named as skipped.
+- No silent fallback from a configured text-only Kelley provider to OpenAI vision was
+  added. PDF/JPG/PNG intake fails early with a clear message when no vision model is
+  configured, preserving the prior provider rule.
+
+### Problems or limitations
+
+- Model reading remains variable. In the final Machias Grade 4 verification,
+  `gpt-5.4-mini` extracted the gallon A-G and sandwich Q-Z conditional bag rows, but
+  incorrectly named the quart H-P row as a blank skipped line. The skipped exact row
+  is visible in review/summary so it is not silent, but this run did not extract all
+  three branches.
+- The active Kelley settings still have no vision model. Real PDF/image intake
+  therefore requires using the OpenAI configuration or configuring a verified
+  vision-capable provider model.
+- OpenAI latency varied materially: selected-page extraction ranged from about 16 to
+  59 seconds. The prior `gpt-5.6-sol` default exceeded the timeout; the new mini model
+  completed the reference runs but one run used most of the retry window.
+- Streamlit is intentionally not installed on this Windows ARM64 machine, so the
+  interface was not launched locally. UI structure was verified by import and pytest
+  only, per the environment constraint.
+
+### Files created or changed
+
+- Updated `README.md`, `requirements.txt`, `app.py`, `agent/provider.py`,
+  `agent/extract.py`, `agent/schema.py`, `agent/review.py`, `agent/rules.py`,
+  `agent/demo.py`, and `data/catalog.json`.
+- Updated focused application, approval-display, catalog, extraction, normalization,
+  and review tests.
+- Created `tests/test_real_pdf_intake.py`.
+- Added the three district PDFs under `tests/sample_lists/`.
+- Updated `JOURNAL.md`.
+
+### Testing performed
+
+- Focused PDF/extraction/review/catalog/application/provider tests: 119 passed.
+- Complete automated suite: 194 passed in 2.55 seconds.
+- Live OpenAI vision structure verification:
+  - Machias: grade matrix plus Highly Capable section; selected Fourth Grade on page
+    2 and named every ignored grade/section.
+  - New School: Kindergarten through Fifth Grade matrix; selected Fourth Grade with
+    Individual Supplies, Shared Supplies, and Optional named sections.
+  - Milford checklist: 10 English primary grade sections and 20 Haitian Creole/
+    Spanish translated duplicates; Grade 5 includes the global District will be
+    supplying section.
+- Live selected-grade extraction:
+  - Machias Fourth Grade: 22 requirements, exact selected-cell evidence, two
+    low-confidence review items, two extracted last-name conditions, and six named
+    skipped rows including the missed quart-bag condition.
+  - New School Fourth Grade: 21 requirements with separate individual, shared, and
+    optional scopes.
+  - Milford Grade 5: nine parent-purchased requirements plus four school-provided
+    items excluded from cart scope.
+
+### Remaining work
+
+- Perform a deployed Streamlit walkthrough with a working vision configuration.
+- Decide whether the missed Machias quart-bag condition warrants a second
+  model-reading strategy or a parent-facing "add skipped line" shortcut.
+- Measure a two-PDF end-to-end build in the deployed environment with the selected
+  default model.
+
+### Recommended next step
+
+Deploy with OpenAI vision enabled, run the three PDFs through the parent review screen,
+and confirm the section picker, exact source lines, conditional choices, and
+school-provided display at presentation width.
+
+## 2026-07-27 — Restore full vision model and group conditional branches
+
+### Objective
+
+Restore the higher-capability OpenAI extraction model with a realistic rendered-page
+timeout, and make mutually exclusive last-name supply branches one required parent
+choice rather than multiple cart requirements.
+
+### Work completed
+
+- Restored the default OpenAI text and vision model from `gpt-5.4-mini` to the prior
+  `gpt-5.6-sol` value.
+- Added a 120-second timeout used only for model calls containing rendered page or
+  image content. Text extraction and semantic matching retain the existing 30-second
+  request ceiling.
+- Added condition-group fields to the validated requirement and review schemas.
+- Tightened the vision prompt to inspect every adjacent last-name bag row and to
+  treat gallon A-G, quart H-P, and sandwich Q-Z as mutually exclusive branches.
+- Added deterministic grouping for extracted last-name ranges so all branches share
+  one parent-facing question.
+- Replaced per-row condition choices for grouped items with one review question:
+  “This list assigns bags by last name. Which applies?”
+- Added deterministic enforcement that exactly one grouped branch must be selected.
+  The unresolved-item override cannot allow zero or multiple branches into cart
+  scope.
+- Preserved unselected branches as visible, non-purchasable source evidence.
+
+### Decisions made
+
+- Chose the full 120-second end of the requested 90–120 second range because rendered
+  structured vision extraction legitimately exceeded 30 seconds on two reference
+  pages.
+- Kept the general model-client timeout at 30 seconds and applied the longer ceiling
+  per request only when input contains an image.
+- Kept conditional interpretation in extraction/review and did not change matching,
+  approval-gate, optimizer, package, tax, fee, or budget calculations.
+
+### Problems or limitations
+
+- The timing measurements cover document structure detection and selected-grade item
+  extraction. They exclude the time a parent spends choosing a section and do not
+  predict network variability in the deployed environment.
+- The New School full-model run returned two optional lines as uninterpreted rather
+  than guessing. They remain visible for parent review.
+- Streamlit remains unavailable on this Windows ARM64 machine, so the new review
+  control was verified through pure app helpers and pytest rather than a local
+  browser launch.
+
+### Files created or changed
+
+- Updated `agent/provider.py`, `agent/rules.py`, `agent/extract.py`,
+  `agent/schema.py`, `agent/review.py`, and `app.py`.
+- Updated `tests/test_provider.py`, `tests/test_extract.py`,
+  `tests/test_review.py`, and `tests/test_app.py`.
+- Updated `JOURNAL.md`.
+
+### Testing performed
+
+- Focused provider, extraction, review, and application tests: 73 passed.
+- Complete suite after the implementation: 200 passed in 2.50 seconds.
+- Live OpenAI `gpt-5.6-sol` selected-grade extraction:
+  - Machias Grade 4: 66.03 seconds; all A-G, H-P, and Q-Z bag branches read.
+  - New School Grade 4: 56.34 seconds.
+  - Milford Grade 5: 29.24 seconds.
+- Live structure detection:
+  - Machias: 7.08 seconds; eight selectable sections.
+  - New School: 10.24 seconds; six selectable grade sections.
+  - Milford: 23.90 seconds; ten primary sections and twenty translated duplicates.
+- Combined model-processing time by document:
+  - Machias: 73.11 seconds.
+  - New School: 66.58 seconds.
+  - Milford: 53.14 seconds.
+
+### Remaining work
+
+- Confirm the grouped radio control visually in the deployed Streamlit interface.
+- Recheck deployed latency during the five-minute presentation rehearsal because
+  hosted network and provider load can vary.
+
+### Recommended next step
+
+Run the Machias Grade 4 flow in the deployed app, select each last-name option once,
+and confirm that the summary always shows one purchased bag branch and two
+condition-not-applicable source lines.

@@ -2,6 +2,7 @@
 
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import httpx
@@ -15,7 +16,13 @@ from openai import (
 
 import agent.extract as extraction
 from agent.extract import _apply_security_filters
-from agent.schema import ExtractionEnvelope, Requirement
+from agent.schema import (
+    DocumentSection,
+    DocumentStructureEnvelope,
+    ExtractionEnvelope,
+    Requirement,
+)
+from agent.rules import VISION_MODEL_CALL_TIMEOUT_SECONDS
 
 
 def test_small_model_prompt_requires_calibrated_evidence_only_output() -> None:
@@ -31,6 +38,113 @@ def test_small_model_prompt_requires_calibrated_evidence_only_output() -> None:
     assert 'requirement_type="donation"' in instruction
     assert 'neither character="#2" nor size="standard"' in instruction
     assert "never stop or truncate raw_text at a quote" in instruction
+    assert "quart H-P" in instruction
+    assert "one mutually exclusive set" in instruction
+    assert "condition_group_id" in instruction
+
+
+def test_last_name_bag_branches_are_grouped_deterministically() -> None:
+    """All extracted last-name ranges become one mutually exclusive question."""
+
+    model_output = ExtractionEnvelope(
+        requirements=tuple(
+            Requirement(
+                req_id=req_id,
+                child_id="model-child",
+                raw_text=raw_text,
+                canonical_item="zip_top_bags",
+                quantity=1,
+                condition=condition,
+                source_section="Fourth Grade",
+                source_page=2,
+                extraction_confidence=1.0,
+            )
+            for req_id, raw_text, condition in (
+                (
+                    "gallon",
+                    "Ziploc gallon | 4th: Last Name A-G",
+                    "Last Name A-G",
+                ),
+                (
+                    "quart",
+                    "Ziploc quart | 4th: Last Name H-P",
+                    "Last Name H-P",
+                ),
+                (
+                    "sandwich",
+                    "Ziploc sandwich | 4th: Last Name Q-Z",
+                    "Last Name Q-Z",
+                ),
+            )
+        )
+    )
+
+    secured = extraction.apply_extraction_security_filters(
+        model_output,
+        "child-1",
+    )
+
+    assert len(secured.requirements) == 3
+    assert {
+        requirement.condition_group_id
+        for requirement in secured.requirements
+    } == {"last-name:child-1:2:fourth-grade:zip_top_bags"}
+    assert {
+        requirement.condition_question
+        for requirement in secured.requirements
+    } == {"This list assigns bags by last name. Which applies?"}
+    assert {
+        requirement.condition_option
+        for requirement in secured.requirements
+    } == {
+        "Ziploc gallon — Last Name A-G",
+        "Ziploc quart — Last Name H-P",
+        "Ziploc sandwich — Last Name Q-Z",
+    }
+
+
+def test_vision_extraction_uses_the_longer_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rendered-page extraction receives the vision-specific request ceiling."""
+
+    received: dict[str, object] = {}
+
+    def fake_request(*args: object, **kwargs: object) -> ExtractionEnvelope:
+        received.update(kwargs)
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="pencils",
+                    child_id="child-1",
+                    raw_text="12 pencils",
+                    canonical_item="pencils",
+                    quantity=12,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+
+    monkeypatch.setattr(
+        extraction,
+        "request_structured_output",
+        fake_request,
+    )
+
+    extraction._call_model(
+        object(),  # type: ignore[arg-type]
+        [
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,AA==",
+            }
+        ],
+        retry=False,
+    )
+
+    assert received["timeout_seconds"] == (
+        VISION_MODEL_CALL_TIMEOUT_SECONDS
+    )
 
 
 def test_raw_text_with_inch_quote_round_trips_without_truncation() -> None:
@@ -53,6 +167,71 @@ def test_raw_text_with_inch_quote_round_trips_without_truncation() -> None:
     )
 
     assert round_tripped.raw_text == raw_text
+
+
+def test_matrix_cell_unit_repairs_prevent_double_counting() -> None:
+    """FR-11: visible matrix units override a misleading row label."""
+
+    individual = Requirement(
+        req_id="matrix-crayons",
+        child_id="grade-4",
+        raw_text="Box of crayons | 4th: 24 crayons",
+        canonical_item="crayons",
+        quantity=24,
+        unit_type="box",
+        attributes={"count": 24},
+        extraction_confidence=1.0,
+    )
+    boxed = Requirement(
+        req_id="boxed-crayons",
+        child_id="grade-4",
+        raw_text=(
+            "1 Box 24 Crayola crayons | FOURTH GRADE: "
+            "1 Box 24 Crayola crayons"
+        ),
+        canonical_item="crayons",
+        quantity=24,
+        unit_type="box",
+        attributes={"count": 24},
+        extraction_confidence=1.0,
+    )
+
+    assert individual.quantity == 24
+    assert individual.unit_type == "each"
+    assert individual.attributes.count is None
+    assert individual.extraction_confidence == 0.69
+    assert boxed.quantity == 1
+    assert boxed.unit_type == "box"
+    assert boxed.attributes.count == 24
+    assert boxed.extraction_confidence == 0.69
+
+
+def test_subject_count_and_brand_word_do_not_invent_pack_or_material() -> None:
+    """FR-13: subject numbers and brand words stay out of literal attributes."""
+
+    notebook = Requirement(
+        req_id="notebook",
+        child_id="grade-4",
+        raw_text="1 3-Subject spiral notebook",
+        canonical_item="spiral_notebooks",
+        quantity=1,
+        attributes={"count": 3},
+        extraction_confidence=1.0,
+    )
+    pens = Requirement(
+        req_id="pens",
+        child_id="grade-4",
+        raw_text="2 Paper Mate Flair Pens Medium Black",
+        canonical_item="pens",
+        quantity=2,
+        attributes={"material": "paper"},
+        extraction_confidence=1.0,
+    )
+
+    assert notebook.attributes.count is None
+    assert pens.attributes.material is None
+    assert notebook.extraction_confidence == 0.69
+    assert pens.extraction_confidence == 0.69
 
 
 def test_source_line_repairs_model_truncation_at_inch_quote() -> None:
@@ -201,6 +380,32 @@ def test_required_low_confidence_review_remains_immediate() -> None:
         "Low-confidence extraction requires review: required item",
     )
     assert secured.deferred_review_reasons == ()
+
+
+def test_identical_model_reading_is_suppressed_before_quantity_math() -> None:
+    """BR-13: a repeated visual line cannot multiply the requested quantity."""
+
+    duplicate = Requirement(
+        req_id="duplicate-a",
+        child_id="model",
+        raw_text="Composition book | 5th: 1",
+        canonical_item="composition_notebooks",
+        quantity=1,
+        extraction_confidence=0.9,
+    )
+    envelope = ExtractionEnvelope(
+        requirements=(
+            duplicate,
+            duplicate.model_copy(update={"req_id": "duplicate-b"}),
+        )
+    )
+
+    secured = _apply_security_filters(envelope, "child-a")
+
+    assert len(secured.requirements) == 1
+    assert secured.skipped_lines == (
+        "Duplicate reading suppressed: Composition book | 5th: 1",
+    )
 
 
 def _status_error(
@@ -379,3 +584,211 @@ def test_repeatable_image_fixtures_build_multimodal_content(
         "input_text",
     ]
     assert content[1]["image_url"].startswith(expected_prefix)
+
+
+def test_pdf_pages_are_rendered_as_images_before_model_reading(
+    multipage_pdf_bytes: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FR-06: PDF layout reaches vision as one image block per page."""
+
+    def text_path_must_not_run(data: bytes) -> str:
+        del data
+        raise AssertionError("text extraction is fallback-only")
+
+    monkeypatch.setattr(extraction, "_pdf_text", text_path_must_not_run)
+
+    content = extraction._document_content(
+        multipage_pdf_bytes,
+        "application/pdf",
+        vision_model="vision-model",
+    )
+
+    assert [block["type"] for block in content] == [
+        "input_text",
+        "input_text",
+        "input_image",
+        "input_text",
+        "input_image",
+        "input_text",
+    ]
+    assert content[2]["image_url"].startswith("data:image/png;base64,")
+    assert content[4]["image_url"].startswith("data:image/png;base64,")
+    assert content[1]["text"] == "[PDF PAGE 1]"
+    assert content[3]["text"] == "[PDF PAGE 2]"
+
+
+def test_two_pdf_inputs_render_safely_in_parallel(
+    multipage_pdf_bytes: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FR-06: concurrent list intake never triggers a text-layout fallback."""
+
+    def text_path_must_not_run(data: bytes) -> str:
+        del data
+        raise AssertionError("parallel rendering must stay on the vision path")
+
+    monkeypatch.setattr(extraction, "_pdf_text", text_path_must_not_run)
+
+    def package_pdf(_: int) -> list[dict[str, object]]:
+        return extraction._document_content(
+            multipage_pdf_bytes,
+            "application/pdf",
+            vision_model="vision-model",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(package_pdf, range(2)))
+
+    assert all(
+        sum(block["type"] == "input_image" for block in content) == 2
+        for content in results
+    )
+
+
+def test_pdf_text_is_used_only_when_page_rendering_fails(
+    multipage_pdf_bytes: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FR-06: readable text remains a narrow PDF-render failure fallback."""
+
+    monkeypatch.setattr(
+        extraction,
+        "_render_pdf_pages",
+        lambda data: (_ for _ in ()).throw(RuntimeError("render failed")),
+    )
+    monkeypatch.setattr(
+        extraction,
+        "_pdf_text",
+        lambda data, page_numbers=(): "Grade 2\n12 pencils",
+    )
+
+    content = extraction._document_content(
+        multipage_pdf_bytes,
+        "application/pdf",
+        vision_model="vision-model",
+    )
+
+    assert [block["type"] for block in content] == ["input_text"]
+    assert "Grade 2\n12 pencils" in content[0]["text"]
+
+
+def test_pdf_requires_a_configured_vision_model(
+    multipage_pdf_bytes: bytes,
+) -> None:
+    """FR-06: PDF uploads fail clearly instead of losing visual layout."""
+
+    with pytest.raises(
+        extraction.ExtractionInputError,
+        match="LLM_VISION_MODEL is not configured",
+    ):
+        extraction._document_content(
+            multipage_pdf_bytes,
+            "application/pdf",
+            vision_model=None,
+        )
+
+
+def test_matrix_and_translated_sections_are_parent_selectable() -> None:
+    """FR-06: grade columns select independently and translations do not add."""
+
+    structure = DocumentStructureEnvelope(
+        layouts=("grade_matrix", "multilingual"),
+        languages=("English", "Spanish"),
+        sections=(
+            DocumentSection(
+                section_id="english-k",
+                label="English — Kindergarten column",
+                grades=("Kindergarten",),
+                page_numbers=(1,),
+                language="English",
+                column_label="K",
+            ),
+            DocumentSection(
+                section_id="english-1",
+                label="English — Grade 1 column",
+                grades=("Grade 1",),
+                page_numbers=(1,),
+                language="English",
+                column_label="1",
+            ),
+            DocumentSection(
+                section_id="spanish-k",
+                label="Spanish — Kindergarten column",
+                grades=("Kindergarten",),
+                page_numbers=(2,),
+                language="Spanish",
+                column_label="K",
+                duplicate_of_section_id="english-k",
+            ),
+        ),
+    )
+
+    selection = extraction.build_document_selection(
+        structure,
+        ("english-k",),
+    )
+
+    assert tuple(
+        section.section_id
+        for section in extraction.selectable_document_sections(structure)
+    ) == ("english-k", "english-1")
+    assert selection.selected_section_labels == (
+        "English — Kindergarten column",
+    )
+    assert selection.ignored_section_labels == (
+        "English — Grade 1 column",
+        "Spanish — Kindergarten column",
+    )
+    assert extraction.automatic_document_selection(structure) is None
+    assert selection.selected_page_numbers == (1,)
+    assert selection.selected_column_labels == ("K",)
+
+
+def test_one_grade_skips_parent_section_choice_but_names_translation() -> None:
+    """FR-06: one grade auto-selects once and still reports ignored copies."""
+
+    structure = DocumentStructureEnvelope(
+        layouts=("multilingual",),
+        languages=("English", "Spanish"),
+        sections=(
+            DocumentSection(
+                section_id="english",
+                label="Grade 2 — English",
+                grades=("Grade 2",),
+                language="English",
+            ),
+            DocumentSection(
+                section_id="spanish",
+                label="Grade 2 — Spanish",
+                grades=("Grade 2",),
+                language="Spanish",
+                duplicate_of_section_id="english",
+            ),
+        ),
+    )
+
+    selection = extraction.automatic_document_selection(structure)
+
+    assert selection is not None
+    assert selection.selected_section_ids == ("english",)
+    assert selection.selected_page_numbers == ()
+    assert selection.selected_column_labels == ()
+    assert selection.ignored_section_ids == ("spanish",)
+
+
+def test_selected_section_sends_only_its_pdf_pages(
+    multipage_pdf_bytes: bytes,
+) -> None:
+    """FR-06: item extraction does not resend ignored document pages."""
+
+    content = extraction._document_content(
+        multipage_pdf_bytes,
+        "application/pdf",
+        vision_model="vision-model",
+        page_numbers=(2,),
+    )
+
+    assert sum(block["type"] == "input_image" for block in content) == 1
+    assert any(block.get("text") == "[PDF PAGE 2]" for block in content)
+    assert not any(block.get("text") == "[PDF PAGE 1]" for block in content)

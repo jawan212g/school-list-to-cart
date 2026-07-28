@@ -6,14 +6,14 @@ from data.loader import load_catalog, load_stores
 
 
 def test_seeded_catalog_loads() -> None:
-    """The catalog contains the four stores and roughly 120 offers."""
+    """The expanded catalog contains four stores and broad real-list coverage."""
 
     stores = load_stores()
     offers = load_catalog()
 
     assert len(stores) == 4
-    assert 110 <= len(offers) <= 130
-    assert len({offer.category for offer in offers}) == 25
+    assert 150 <= len(offers) <= 175
+    assert len({offer.category for offer in offers}) == 35
     assert all(isinstance(offer.pack_price, int) for offer in offers)
     assert all(isinstance(offer.unit_price, int) for offer in offers)
 
@@ -90,8 +90,8 @@ def test_catalog_contains_required_pack_and_brand_choices() -> None:
     assert {"Value Basics", "Crayola"} <= brands_by_category["colored_pencils"]
 
 
-def test_catalog_attribute_evidence_and_known_size_gaps() -> None:
-    """Matching data records checkable evidence without inventing exact sizes."""
+def test_catalog_attribute_evidence_and_exact_school_sizes() -> None:
+    """Matching data records checkable evidence and common exact sizes."""
 
     offers = load_catalog()
     by_sku = {offer.sku: offer for offer in offers}
@@ -99,14 +99,59 @@ def test_catalog_attribute_evidence_and_known_size_gaps() -> None:
     assert by_sku["VD-PEN-TIC-024"].attributes["pre_sharpened"] is True
     assert by_sku["VD-PBX-VB-001"].attributes["length_inches"] == 8
     assert by_sku["VD-GLU-VB-006"].attributes["size_label"] == "large"
-    assert not any(
+    assert any(
         offer.category == "binders"
         and offer.attributes.get("capacity_inches") == 1.5
         for offer in offers
     )
-    assert not any(
+    assert any(
         offer.category == "dividers"
         and offer.attributes.get("tabs_per_set") == 5
+        for offer in offers
+    )
+
+
+def test_catalog_covers_categories_observed_in_real_district_lists() -> None:
+    """New visual-list categories have stocked choices without losing old ones."""
+
+    offers = tuple(
+        offer for offer in load_catalog() if offer.stock_qty > 0
+    )
+    categories = {offer.category for offer in offers}
+    requested = {
+        "play_dough",
+        "modeling_compound",
+        "watercolor_paints",
+        "dry_erase_markers",
+        "permanent_markers",
+        "sticky_notes",
+        "index_cards",
+        "hand_sanitizer",
+        "baby_wipes",
+        "water_bottles",
+        "pencil_sharpeners",
+        "pencil_pouches",
+        "spiral_notebooks",
+        "dividers",
+        "folders",
+        "binders",
+        "erasers",
+    }
+
+    assert requested <= categories
+    assert {
+        offer.attributes.get("style")
+        for offer in offers
+        if offer.category == "erasers"
+    } >= {"block", "cap", "kneaded"}
+    assert {
+        offer.attributes.get("capacity_inches")
+        for offer in offers
+        if offer.category == "binders"
+    } >= {1, 1.5, 2}
+    assert any(
+        offer.category == "folders"
+        and offer.attributes.get("material") == "plastic"
         for offer in offers
     )
 

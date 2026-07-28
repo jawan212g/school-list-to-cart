@@ -14,7 +14,14 @@ from agent.aggregate import UnitNeed
 from agent.match import StructuredSuitabilityJudge
 from agent.normalize import NormalizationResult, NormalizedRequirement
 from agent.pipeline import ListInput, PipelineResult, PipelineSession, run_pipeline
-from agent.schema import ExtractionEnvelope, Requirement
+from agent.schema import (
+    DocumentSelection,
+    DocumentSection,
+    DocumentStructureEnvelope,
+    ExtractionEnvelope,
+    Requirement,
+    SupplyItemReview,
+)
 from data.loader import Offer, Store
 
 
@@ -343,10 +350,19 @@ def test_upload_validation_checks_type_size_and_file_signature() -> None:
         app.validate_uploaded_document("list.exe", b"MZ")
 
 
-def test_upload_validation_rejects_image_without_vision_model(
+@pytest.mark.parametrize(
+    ("filename", "data"),
+    [
+        ("list.pdf", b"%PDF-1.7"),
+        ("list.png", b"\x89PNG\r\n\x1a\ndata"),
+    ],
+)
+def test_upload_validation_rejects_visual_input_without_vision_model(
     monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    data: bytes,
 ) -> None:
-    """Image uploads fail early when the active provider has no vision model."""
+    """PDF/image uploads fail early when the provider has no vision model."""
 
     monkeypatch.setitem(
         sys.modules,
@@ -365,10 +381,7 @@ def test_upload_validation_rejects_image_without_vision_model(
         ValueError,
         match="LLM_VISION_MODEL is not configured",
     ):
-        app.validate_uploaded_document(
-            "list.png",
-            b"\x89PNG\r\n\x1a\ndata",
-        )
+        app.validate_uploaded_document(filename, data)
 
 
 def test_radius_table_explains_pickup_scope_and_delivery_exception() -> None:
@@ -556,6 +569,9 @@ def test_wrong_list_grade_warns_before_cart_build() -> None:
         "manual_review_required",
         "review_reasons",
         "deferred_review_reasons",
+        "document_selection",
+        "uninterpreted_lines",
+        "skipped_lines",
     )
 
     matching_result = _real_pipeline_result("Grade 2")
@@ -624,6 +640,10 @@ def test_working_screen_renders_grade_warning_from_real_extraction(
                 "extracted_lists": result.extractions,
                 "extraction_errors": {},
                 "extraction_cache_ready": True,
+                "structure_cache_ready": True,
+                "document_structures": {},
+                "document_selections": {},
+                "structure_errors": {},
                 "list_identity_confirmed": False,
                 "result": None,
                 "approval_outcomes": {},
@@ -690,6 +710,201 @@ def test_working_screen_renders_grade_warning_from_real_extraction(
         )
     ]
     assert st.rerun_count == 0
+
+
+def test_review_editor_preserves_scope_provided_and_condition_fields() -> None:
+    """Real review models carry parent answers through the app boundary."""
+
+    item = SupplyItemReview(
+        review_id="child-1:bags",
+        req_id="bags",
+        child_id="child-1",
+        item_name="zip_top_bags",
+        required_quantity=1,
+        supply_scope="shared",
+        provided_by_school=False,
+        condition="Last Name A-G",
+        condition_applies=None,
+        source_section="Shared supplies",
+        source_page=2,
+        source_language="English",
+        source_text="Ziploc bags — Last Name A-G",
+        confidence=0.9,
+        review_status="pending",
+        issue_codes=("conditional_item",),
+    )
+    rows = app._review_editor_rows((item,), {"child-1": "Taylor"})
+    assert rows[0]["Condition applies"] == "Choose above"
+    rows[0]["Confirmed"] = True
+
+    parsed = app._review_items_from_editor(
+        rows,
+        (item,),
+        (
+            {
+                "child_id": "child-1",
+                "label": "Taylor",
+                "grade": "2",
+            },
+        ),
+    )
+    parsed = app.apply_conditional_answers(
+        parsed,
+        {"condition:child-1:bags": "no"},
+    )
+
+    assert parsed[0].supply_scope == "shared"
+    assert parsed[0].condition == "Last Name A-G"
+    assert parsed[0].condition_applies is False
+    assert parsed[0].is_purchasable is False
+    assert parsed[0].source_section == "Shared supplies"
+    assert parsed[0].source_page == 2
+    assert parsed[0].source_text == "Ziploc bags — Last Name A-G"
+
+
+def test_grade_section_defaults_and_selection_reach_real_extractor_contract() -> None:
+    """FR-06: structure choice happens before and scopes item extraction."""
+
+    structure = DocumentStructureEnvelope(
+        layouts=("grade_matrix",),
+        sections=(
+            DocumentSection(
+                section_id="grade-2",
+                label="Second Grade",
+                grades=("Grade 2",),
+                page_numbers=(1,),
+                column_label="SECOND GRADE",
+            ),
+            DocumentSection(
+                section_id="grade-5",
+                label="Fifth Grade",
+                grades=("Grade 5",),
+                page_numbers=(2,),
+                column_label="FIFTH GRADE",
+            ),
+        ),
+    )
+    selection = app.build_document_selection(structure, ("grade-2",))
+    received: list[DocumentSelection] = []
+
+    def extractor(
+        source: str,
+        **kwargs: object,
+    ) -> ExtractionEnvelope:
+        del source
+        received.append(
+            kwargs["section_selection"]  # type: ignore[arg-type]
+        )
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="pencils",
+                    child_id="child-1",
+                    raw_text="24 pencils | SECOND GRADE: 24",
+                    canonical_item="pencils",
+                    quantity=24,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+
+    extractions, errors = app._extract_list_inputs(
+        (ListInput(child_id="child-1", source="district list"),),
+        extractor=extractor,
+        selections={"child-1": selection},
+    )
+
+    assert app.section_picker_default_ids(structure, "2") == ("grade-2",)
+    assert errors == {}
+    assert tuple(extractions) == ("child-1",)
+    assert received == [selection]
+    assert received[0].selected_page_numbers == (1,)
+    assert received[0].selected_column_labels == ("SECOND GRADE",)
+    assert received[0].ignored_section_labels == ("Fifth Grade",)
+
+
+def test_summary_names_read_ignored_and_uninterpreted_source() -> None:
+    """Summary evidence states what was read, ignored, and not interpreted."""
+
+    result = _real_pipeline_result("Grade 2")
+    extraction = result.extractions["child-1"].model_copy(
+        update={
+            "document_selection": DocumentSelection(
+                selected_section_ids=("grade-2-en",),
+                selected_section_labels=("Grade 2 — English",),
+                ignored_section_ids=("grade-5", "grade-2-es"),
+                ignored_section_labels=(
+                    "Grade 5 — English",
+                    "Grade 2 — Spanish",
+                ),
+            ),
+            "uninterpreted_lines": (
+                "Bring an item for the class project if assigned.",
+            ),
+            "skipped_lines": (
+                "Repeated translation: Grade 2 — Spanish",
+            ),
+        }
+    )
+    updated = replace(
+        result,
+        extractions={"child-1": extraction},
+    )
+
+    scope_rows = app.document_scope_rows(
+        updated,
+        {"child-1": "Taylor"},
+    )
+    source_rows = app.source_interpretation_rows(
+        updated,
+        {"child-1": "Taylor"},
+    )
+    unread_rows = app.uninterpreted_source_rows(
+        updated,
+        {"child-1": "Taylor"},
+    )
+    skipped_rows = app.skipped_source_rows(
+        updated,
+        {"child-1": "Taylor"},
+    )
+
+    assert scope_rows == (
+        {
+            "For": "Taylor",
+            "Document section": "Grade 2 — English",
+            "Treatment": "Read",
+        },
+        {
+            "For": "Taylor",
+            "Document section": "Grade 5 — English",
+            "Treatment": "Not read",
+        },
+        {
+            "For": "Taylor",
+            "Document section": "Grade 2 — Spanish",
+            "Treatment": "Not read",
+        },
+    )
+    assert source_rows[0]["Exact source line"] == "1 pencil"
+    assert source_rows[0]["Status"] == "Read for the proposed cart"
+    assert unread_rows == (
+        {
+            "For": "Taylor",
+            "Source content": (
+                "Bring an item for the class project if assigned."
+            ),
+            "Treatment": "Could not interpret — not purchased",
+        },
+    )
+    assert skipped_rows == (
+        {
+            "For": "Taylor",
+            "Source content": (
+                "Repeated translation: Grade 2 — Spanish"
+            ),
+            "Treatment": "Deliberately skipped — not purchased",
+        },
+    )
 
 
 def test_child_display_uses_parent_label_not_internal_id() -> None:

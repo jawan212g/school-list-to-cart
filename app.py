@@ -35,7 +35,11 @@ from agent.decisions import Decision, DecisionLog
 from agent.demo import DEMO_LIST_TEXT, extract_demo_document
 from agent.extract import (
     MODEL_NAME,
+    automatic_document_selection,
+    build_document_selection,
     extract_document,
+    inspect_document_structure,
+    selectable_document_sections,
 )
 from agent.gate import ApprovalBatch, ApprovalInterrupt
 from agent.match import (
@@ -61,6 +65,8 @@ from agent.pipeline import (
     run_pipeline_from_confirmed_extractions,
 )
 from agent.review import (
+    apply_conditional_answers,
+    conditional_review_questions,
     organize_extractions,
     reviewed_envelopes,
     unresolved_required_items,
@@ -83,6 +89,9 @@ from agent.rules import (
     SUBSTITUTION_NONE,
 )
 from agent.schema import (
+    DocumentSection,
+    DocumentSelection,
+    DocumentStructureEnvelope,
     ExtractionEnvelope,
     SupplyItemReview,
     validate_extraction_envelope,
@@ -122,6 +131,7 @@ SCREEN_ORDER = (
     "intake",
     "lists",
     "working",
+    "sections",
     "review",
     "approval",
     "summary",
@@ -130,6 +140,7 @@ SCREEN_PHASES: Mapping[str, tuple[str, str]] = {
     "intake": ("1", "Upload and organize my list"),
     "lists": ("1", "Upload and organize my list"),
     "working": ("3", "Build my shopping plan"),
+    "sections": ("1", "Choose the part of the document to read"),
     "review": ("2", "Review extracted items"),
     "approval": ("4", "Approve final plan"),
     "summary": ("4", "Approve final plan"),
@@ -146,21 +157,31 @@ FULFILLMENT_OPTIONS: Mapping[str, str] = {
 }
 ITEM_DISPLAY_NAMES: Mapping[str, str] = {
     "backpacks": "Backpack",
+    "baby_wipes": "Baby wipes",
     "binders": "Binder",
     "colored_pencils": "Colored pencils",
     "composition_notebooks": "Composition notebook",
     "crayons": "Crayons",
     "dividers": "Dividers",
+    "dry_erase_markers": "Dry-erase markers",
     "glue_sticks": "Glue sticks",
     "headphones": "Headphones",
     "highlighters": "Highlighters",
+    "modeling_compound": "Modeling compound",
     "notebook_paper": "Notebook paper",
     "pencil_boxes": "Pencil box",
+    "pencil_pouches": "Pencil pouch",
+    "pencil_sharpeners": "Pencil sharpener",
     "pencils": "Pencils",
     "pens": "Pens",
+    "permanent_markers": "Permanent markers",
+    "play_dough": "Play dough",
     "rulers": "Ruler",
     "scissors": "Scissors",
+    "sticky_notes": "Sticky notes",
     "tissues": "Tissues",
+    "water_bottles": "Water bottle",
+    "watercolor_paints": "Watercolor paints",
 }
 ATTRIBUTE_DISPLAY_NAMES: Mapping[str, str] = {
     "acceptable_colors": "color",
@@ -326,7 +347,7 @@ WARM_COPY = CopySet(
     tagline=APP_TAGLINE,
     summary_heading="Your school plan is ready",
     headline_heading="The plan at a glance",
-    complete_status="Complete",
+    complete_status="Required items covered",
     attention_clear="Nothing needs your attention.",
 )
 PLAIN_COPY = CopySet(
@@ -334,7 +355,7 @@ PLAIN_COPY = CopySet(
     tagline="Review the shopping plan and any unresolved items.",
     summary_heading="Shopping plan",
     headline_heading="Plan status",
-    complete_status="Complete",
+    complete_status="Required items covered",
     attention_clear="Nothing needs your attention.",
 )
 
@@ -371,7 +392,7 @@ def progress_narration(
     if stage == "optimization":
         if completed:
             return "Checking package sizes, store fees, and the budget"
-        return "Comparing package sizes and complete store plans"
+        return "Comparing package sizes and single-store plans"
     if stage == "approval":
         return "Looking for anything that needs your decision"
     return "Building the shopping plan"
@@ -771,12 +792,13 @@ def validate_uploaded_document(
             data.decode("utf-8")
         except UnicodeDecodeError as error:
             raise ValueError("TXT uploads must use UTF-8 text.") from error
-    if suffix in {".jpg", ".jpeg", ".png"}:
+    if suffix in {".pdf", ".jpg", ".jpeg", ".png"}:
         diagnostic = get_provider_diagnostic()
         if diagnostic.vision_model is None:
             raise ValueError(
-                "Image uploads are unavailable because LLM_VISION_MODEL is "
-                "not configured. Upload a TXT or text-based PDF list instead."
+                "PDF and image uploads are unavailable because "
+                "LLM_VISION_MODEL is not configured. Configure a vision "
+                "model or upload a TXT or DOCX list."
             )
     return mime_type
 
@@ -1448,7 +1470,7 @@ def _budget_approval_content(
     if analysis.substitutions_reach_budget:
         message = (
             "Cheaper substitutions alone can reach the entered budget. "
-            "Current complete-cart landed cost: "
+            "Current required-cart landed cost: "
             f"{format_money(analysis.baseline_landed_cost_cents)}; current "
             f"shortfall: {format_money(analysis.original_shortfall_cents)}. "
             f"The listed substitutions save {format_money(substitution_saving)}."
@@ -1461,7 +1483,7 @@ def _budget_approval_content(
         )
         message = (
             "Cheaper substitutions alone cannot reach the entered budget. "
-            "Current complete-cart landed cost: "
+            "Current required-cart landed cost: "
             f"{format_money(analysis.baseline_landed_cost_cents)}; shortfall: "
             f"{format_money(analysis.original_shortfall_cents)}. The listed "
             f"substitutions save {format_money(substitution_saving)}, leaving "
@@ -1736,7 +1758,7 @@ def _approval_heading(
     if interrupt.kind == "brand_lock_break":
         return f"{item_name} — required brand is unavailable"
     if interrupt.kind == "budget_exceeded":
-        return "Budget — the complete required cart costs more"
+        return "Budget — the required-item cart costs more"
     if interrupt.kind == "low_confidence":
         return f"{item_name} — confirm the list interpretation"
     return f"{item_name} — required item is unavailable"
@@ -1776,7 +1798,7 @@ def _approval_message(
         )
     if interrupt.kind == "budget_exceeded":
         return (
-            "The complete required cart is over budget by "
+            "The required-item cart is over budget by "
             f"{format_money(result.proposed_cart.shortfall_cents)}."
         )
     return interrupt.message.replace("_", " ")
@@ -2515,8 +2537,8 @@ def build_text_summary(
         lines.extend(
             [
                 (
-                    "STATUS: INCOMPLETE — one or more required items or lists "
-                    "are not represented in this cart."
+                    "STATUS: REQUIRED ITEMS OR LISTS ARE MISSING — one or "
+                    "more are not represented in this cart."
                 ),
                 "",
             ]
@@ -2548,7 +2570,59 @@ def build_text_summary(
             )
         lines.append("")
     else:
-        lines.extend(["STATUS: COMPLETE", ""])
+        lines.extend(["STATUS: ALL REQUIRED ITEMS COVERED", ""])
+    lines.extend(
+        [
+            "HOW TO CHECK THIS PLAN",
+            (
+                "A language model read and interpreted the source lines below. "
+                "Quantities, package choices, prices, tax, fees, and totals were "
+                "calculated deterministically from confirmed items and the "
+                "simulated catalog."
+            ),
+            "",
+        ]
+    )
+    scope_rows = document_scope_rows(result, child_labels)
+    if scope_rows:
+        lines.append("DOCUMENT SECTIONS")
+        lines.extend(
+            (
+                f"  {row['For']} | {row['Treatment']} | "
+                f"{row['Document section']}"
+            )
+            for row in scope_rows
+        )
+        lines.append("")
+    lines.append("SOURCE LINES")
+    lines.extend(
+        (
+            f"  {row['For']} | {row['Interpreted as']} | "
+            f"{row['Status']} | {row['Exact source line']}"
+        )
+        for row in source_interpretation_rows(result, child_labels)
+    )
+    uninterpreted = uninterpreted_source_rows(result, child_labels)
+    if uninterpreted:
+        lines.append("SOURCE CONTENT NOT INTERPRETED")
+        lines.extend(
+            (
+                f"  {row['For']} | {row['Treatment']} | "
+                f"{row['Source content']}"
+            )
+            for row in uninterpreted
+        )
+    skipped = skipped_source_rows(result, child_labels)
+    if skipped:
+        lines.append("SOURCE CONTENT DELIBERATELY SKIPPED")
+        lines.extend(
+            (
+                f"  {row['For']} | {row['Treatment']} | "
+                f"{row['Source content']}"
+            )
+            for row in skipped
+        )
+    lines.append("")
     for plan in _plans(optimization):
         for order in plan.store_orders:
             store_name = stores_by_id.get(order.store_id)
@@ -2611,6 +2685,10 @@ def _initialize_state(st: Any) -> None:
         "child_count": 1,
         "intake": None,
         "list_inputs": (),
+        "document_structures": {},
+        "document_selections": {},
+        "structure_errors": {},
+        "structure_cache_ready": False,
         "extracted_lists": {},
         "extraction_errors": {},
         "extraction_cache_ready": False,
@@ -3084,6 +3162,10 @@ def _render_lists(st: Any) -> None:
         if st.button("Rebuild using the saved lists"):
             st.session_state["result"] = None
             st.session_state["list_identity_confirmed"] = False
+            st.session_state["document_structures"] = {}
+            st.session_state["document_selections"] = {}
+            st.session_state["structure_errors"] = {}
+            st.session_state["structure_cache_ready"] = False
             st.session_state["review_items"] = ()
             st.session_state["organized_list_confirmed"] = False
             st.session_state["progress_substep"] = "reading the lists"
@@ -3137,6 +3219,10 @@ def _render_lists(st: Any) -> None:
                 st.error(escape_streamlit_dollars(message))
             return
         st.session_state["list_inputs"] = list_inputs
+        st.session_state["document_structures"] = {}
+        st.session_state["document_selections"] = {}
+        st.session_state["structure_errors"] = {}
+        st.session_state["structure_cache_ready"] = False
         st.session_state["extracted_lists"] = {}
         st.session_state["extraction_errors"] = {}
         st.session_state["extraction_cache_ready"] = False
@@ -3174,10 +3260,161 @@ def _pipeline_session(intake: Mapping[str, Any]) -> PipelineSession:
     )
 
 
+def _demo_document_structure(
+    child: Mapping[str, Any],
+) -> DocumentStructureEnvelope:
+    """Return one deterministic section for the offline demonstration."""
+
+    grade = str(child.get("grade") or "").strip()
+    label = (
+        f"Grade {grade} supply list"
+        if grade
+        else f"{child.get('label', 'Selected entry')} supply list"
+    )
+    return DocumentStructureEnvelope(
+        document_title="Offline demonstration list",
+        layouts=("single_section",),
+        languages=("English",),
+        sections=(
+            DocumentSection(
+                section_id="demo-section",
+                label=label,
+                grades=((grade,) if grade else ()),
+                named_sections=("Required supplies",),
+                page_numbers=(1,),
+                language="English",
+            ),
+        ),
+    )
+
+
+def _inspect_list_inputs(
+    list_inputs: Sequence[ListInput],
+    children: Sequence[Mapping[str, Any]],
+    *,
+    demo_mode: bool = False,
+    inspector: Callable[..., DocumentStructureEnvelope] = (
+        inspect_document_structure
+    ),
+    progress_callback: (
+        Callable[[str, int, int, str], None] | None
+    ) = None,
+) -> tuple[
+    dict[str, DocumentStructureEnvelope],
+    dict[str, Exception],
+]:
+    """Inspect grades and named sections before item extraction (FR-06)."""
+
+    child_by_id = {
+        str(child["child_id"]): child for child in children
+    }
+    structures: dict[str, DocumentStructureEnvelope] = {}
+    errors: dict[str, Exception] = {}
+
+    def inspect_one(list_input: ListInput) -> DocumentStructureEnvelope:
+        if demo_mode:
+            return _demo_document_structure(
+                child_by_id[list_input.child_id]
+            )
+        return inspector(
+            list_input.source,
+            mime_type=list_input.mime_type,
+        )
+
+    with ThreadPoolExecutor(
+        max_workers=min(max(len(list_inputs), 1), MODEL_MAX_CONCURRENCY)
+    ) as executor:
+        futures = {
+            executor.submit(inspect_one, list_input): list_input
+            for list_input in list_inputs
+        }
+        done_count = 0
+        completed: dict[str, DocumentStructureEnvelope] = {}
+        for future in as_completed(futures):
+            list_input = futures[future]
+            done_count += 1
+            if progress_callback is not None:
+                progress_callback(
+                    "structure",
+                    done_count,
+                    len(list_inputs),
+                    (
+                        f"Found sections in {done_count} of "
+                        f"{len(list_inputs)} lists"
+                    ),
+                )
+            try:
+                completed[list_input.child_id] = future.result()
+            except Exception as error:
+                errors[list_input.child_id] = error
+        for list_input in list_inputs:
+            structure = completed.get(list_input.child_id)
+            if structure is not None:
+                structures[list_input.child_id] = structure
+    return structures, errors
+
+
+def document_section_rows(
+    structure: DocumentStructureEnvelope,
+) -> tuple[dict[str, str], ...]:
+    """Return parent-facing evidence for every detected section."""
+
+    return tuple(
+        {
+            "Section": section.label,
+            "Grades": _join_names(section.grades) or "Not stated",
+            "Teachers": _join_names(section.teachers) or "Not stated",
+            "Named parts": (
+                _join_names(section.named_sections) or "Not stated"
+            ),
+            "Pages": (
+                ", ".join(str(page) for page in section.page_numbers)
+                or "Not stated"
+            ),
+            "Language": section.language or "Not stated",
+            "Status": (
+                "Repeated translation"
+                if section.duplicate_of_section_id is not None
+                else "Available to select"
+            ),
+        }
+        for section in structure.sections
+    )
+
+
+def section_picker_default_ids(
+    structure: DocumentStructureEnvelope,
+    entered_grade: str,
+) -> tuple[str, ...]:
+    """Suggest matching grade sections without deciding for the parent."""
+
+    grade_key = re.sub(r"[^a-z0-9]+", "", entered_grade.casefold())
+    entered_numbers = tuple(re.findall(r"\d+", grade_key))
+    matches = tuple(
+        section.section_id
+        for section in selectable_document_sections(structure)
+        if grade_key
+        and any(
+            grade_key
+            in re.sub(r"[^a-z0-9]+", "", grade.casefold())
+            or re.sub(r"[^a-z0-9]+", "", grade.casefold())
+            in grade_key
+            or (
+                entered_numbers
+                and entered_numbers
+                == tuple(re.findall(r"\d+", grade.casefold()))
+            )
+            for grade in section.grades
+        )
+    )
+    return matches
+
+
 def _extract_list_inputs(
     list_inputs: Sequence[ListInput],
     *,
     extractor: Callable[..., ExtractionEnvelope] = extract_document,
+    selections: Mapping[str, DocumentSelection] | None = None,
     progress_callback: (
         Callable[[str, int, int, str], None] | None
     ) = None,
@@ -3190,13 +3427,20 @@ def _extract_list_inputs(
     extractions: dict[str, ExtractionEnvelope] = {}
     errors: dict[str, Exception] = {}
     completed: dict[str, ExtractionEnvelope] = {}
+    active_selections = selections or {}
 
     def extract_one(list_input: ListInput) -> ExtractionEnvelope:
+        options: dict[str, Any] = {
+            "child_id": list_input.child_id,
+            "mime_type": list_input.mime_type,
+        }
+        selection = active_selections.get(list_input.child_id)
+        if selection is not None:
+            options["section_selection"] = selection
         return validate_extraction_envelope(
             extractor(
                 list_input.source,
-                child_id=list_input.child_id,
-                mime_type=list_input.mime_type,
+                **options,
             )
         )
 
@@ -3424,10 +3668,30 @@ def _review_editor_rows(
                 item.required_attributes.get("other_details") or ""
             ),
             "Optional": item.optional,
+            "Supply use": item.supply_scope.title(),
+            "Provided by school": item.provided_by_school,
+            "Condition": item.condition or "",
+            "Condition applies": (
+                "Choose above"
+                if item.condition is not None
+                and item.condition_applies is None
+                else (
+                    "Yes"
+                    if item.condition_applies is True
+                    else (
+                        "No"
+                        if item.condition_applies is False
+                        else "Not conditional"
+                    )
+                )
+            ),
             "Already owned": item.already_owned,
             "Allow equivalents": item.allow_equivalents,
             "Notes": item.notes or "",
             "Source text": item.source_text,
+            "Source section": item.source_section or "",
+            "Source page": item.source_page,
+            "Source language": item.source_language or "",
             "Confidence": round(item.confidence, 2),
             "Needs attention": ", ".join(item.issue_codes),
             "Confirmed": item.review_status == "confirmed",
@@ -3495,6 +3759,16 @@ def _review_items_from_editor(
             if prior is not None
             else (("missing_quantity",) if quantity is None else ())
         )
+        condition = str(record.get("Condition") or "").strip() or None
+        condition_applies = (
+            prior.condition_applies if prior is not None else None
+        )
+        provided_by_school = bool(record.get("Provided by school"))
+        is_purchasable = (
+            (prior.is_purchasable if prior is not None else True)
+            and not provided_by_school
+            and not (condition is not None and condition_applies is False)
+        )
         parsed.append(
             SupplyItemReview(
                 review_id=review_id,
@@ -3517,6 +3791,37 @@ def _review_items_from_editor(
                     {"other_details": details} if details else {}
                 ),
                 optional=bool(record.get("Optional")),
+                is_purchasable=is_purchasable,
+                supply_scope=str(
+                    record.get("Supply use") or "Unspecified"
+                ).casefold(),  # type: ignore[arg-type]
+                provided_by_school=provided_by_school,
+                condition=condition,
+                condition_applies=condition_applies,
+                condition_group_id=(
+                    prior.condition_group_id
+                    if prior is not None
+                    else None
+                ),
+                condition_question=(
+                    prior.condition_question
+                    if prior is not None
+                    else None
+                ),
+                condition_option=(
+                    prior.condition_option
+                    if prior is not None
+                    else None
+                ),
+                source_section=(
+                    prior.source_section if prior is not None else None
+                ),
+                source_page=(
+                    prior.source_page if prior is not None else None
+                ),
+                source_language=(
+                    prior.source_language if prior is not None else None
+                ),
                 notes=str(record.get("Notes") or "").strip() or None,
                 source_text=(
                     prior.source_text
@@ -3543,6 +3848,148 @@ def _review_items_from_editor(
     return tuple(parsed)
 
 
+def _render_sections(st: Any) -> None:
+    """Let the parent choose among detected document sections (FR-06)."""
+
+    intake = st.session_state["intake"]
+    structures: Mapping[str, DocumentStructureEnvelope] = (
+        st.session_state["document_structures"]
+    )
+    if intake is None or not structures:
+        st.session_state["screen"] = "working"
+        st.rerun()
+    children = intake["children"]
+    child_by_id = {
+        str(child["child_id"]): child for child in children
+    }
+    selections = dict(st.session_state["document_selections"])
+
+    st.header("Choose the part of each document to read")
+    st.write(
+        "Some district files contain several grades, teachers, or translated "
+        "copies. Select only the sections that apply to this child. The next "
+        "screen will show the exact lines read from those sections."
+    )
+    if st.session_state["structure_errors"]:
+        st.error(
+            "The documents listed below could not be organized and will not "
+            "be included. Other lists can continue."
+        )
+        for child_id, error in st.session_state["structure_errors"].items():
+            child = child_by_id.get(child_id, {})
+            st.write(
+                escape_streamlit_dollars(
+                    f"{child.get('label', child_id)}: {error}"
+                )
+            )
+
+    pending_ids = tuple(
+        child_id
+        for child_id, structure in structures.items()
+        if automatic_document_selection(structure) is None
+        and child_id not in selections
+    )
+    selected_by_child: dict[str, tuple[str, ...]] = {}
+    with st.form("document_section_selection"):
+        for child_id, structure in structures.items():
+            child = child_by_id[child_id]
+            with st.container(border=True):
+                st.subheader(
+                    escape_streamlit_dollars(
+                        f"{child['label']} · entered as grade {child['grade']}"
+                    )
+                )
+                if structure.document_title:
+                    st.caption(
+                        escape_streamlit_dollars(
+                            f"Document: {structure.document_title}"
+                        )
+                    )
+                st.table(
+                    escape_streamlit_data(
+                        document_section_rows(structure)
+                    )
+                )
+                automatic = automatic_document_selection(structure)
+                if automatic is not None:
+                    selections[child_id] = automatic
+                    st.info(
+                        escape_streamlit_dollars(
+                            "One applicable list was detected. Reading: "
+                            + _join_names(
+                                automatic.selected_section_labels
+                            )
+                        )
+                    )
+                    if automatic.ignored_section_labels:
+                        st.caption(
+                            escape_streamlit_dollars(
+                                "Not reading: "
+                                + _join_names(
+                                    automatic.ignored_section_labels
+                                )
+                            )
+                        )
+                    continue
+                primary = selectable_document_sections(structure)
+                option_ids = tuple(
+                    section.section_id for section in primary
+                )
+                labels_by_id = {
+                    section.section_id: section.label
+                    for section in primary
+                }
+                current = selections.get(child_id)
+                default_ids = (
+                    tuple(current.selected_section_ids)
+                    if current is not None
+                    else section_picker_default_ids(
+                        structure,
+                        str(child["grade"]),
+                    )
+                )
+                selected_by_child[child_id] = tuple(
+                    st.multiselect(
+                        "Sections that apply",
+                        option_ids,
+                        default=default_ids,
+                        format_func=lambda section_id, labels=labels_by_id: (
+                            labels[section_id]
+                        ),
+                        key=f"document_sections_{child_id}",
+                    )
+                )
+                st.caption(
+                    "All unselected sections, including translated repeats, "
+                    "will be named as ignored in the review and summary."
+                )
+        submitted = st.form_submit_button(
+            "Read the selected sections",
+            type="primary",
+            use_container_width=True,
+        )
+    if submitted:
+        try:
+            for child_id in pending_ids:
+                selected_ids = selected_by_child.get(child_id, ())
+                selections[child_id] = build_document_selection(
+                    structures[child_id],
+                    selected_ids,
+                )
+        except ValueError as error:
+            st.session_state["ui_error_active"] = True
+            st.error(escape_streamlit_dollars(str(error)))
+            return
+        st.session_state["document_selections"] = selections
+        st.session_state["extraction_cache_ready"] = False
+        st.session_state["progress_substep"] = "reading selected sections"
+        st.session_state["screen"] = "working"
+        st.rerun()
+    if st.button("Back to lists"):
+        st.session_state["screen"] = "lists"
+        st.rerun()
+
+
 def _render_review(st: Any) -> None:
     """Render the mandatory editable extraction review stage (FR-12)."""
 
@@ -3562,6 +4009,37 @@ def _render_review(st: Any) -> None:
         "Check every item before shopping. Edit values, add missing rows, "
         "mark items already owned, or remove incorrect rows."
     )
+    for child_id, envelope in extractions.items():
+        selection = envelope.document_selection
+        if selection is None:
+            continue
+        st.info(
+            escape_streamlit_dollars(
+                f"{child_labels.get(child_id, child_id)} — read: "
+                f"{_join_names(selection.selected_section_labels)}"
+            )
+        )
+        if selection.ignored_section_labels:
+            st.caption(
+                escape_streamlit_dollars(
+                    "Not read: "
+                    + _join_names(selection.ignored_section_labels)
+                )
+            )
+        if envelope.uninterpreted_lines:
+            st.warning(
+                escape_streamlit_dollars(
+                    "Could not interpret: "
+                    + _join_names(envelope.uninterpreted_lines)
+                )
+            )
+        if envelope.skipped_lines:
+            st.info(
+                escape_streamlit_dollars(
+                    "Deliberately skipped: "
+                    + _join_names(envelope.skipped_lines)
+                )
+            )
     if st.session_state["extraction_errors"]:
         for child_id, error in st.session_state["extraction_errors"].items():
             st.warning(
@@ -3569,12 +4047,45 @@ def _render_review(st: Any) -> None:
                     f"{child_labels.get(child_id, child_id)}: {error}"
                 )
             )
-    attention_count = sum(bool(item.issue_codes) for item in items)
+    attention_count = len(
+        {
+            item.condition_group_id or item.review_id
+            for item in items
+            if item.issue_codes
+        }
+    )
     if attention_count:
         st.warning(
             f"{attention_count} item(s) contain ambiguity or low-confidence "
             "details. Review and explicitly confirm them."
         )
+    condition_answers: dict[str, str | None] = {}
+    questions = conditional_review_questions(items)
+    if questions:
+        st.subheader("Questions from the list")
+        for question in questions:
+            st.caption(
+                escape_streamlit_dollars(
+                    f"For {child_labels.get(question.child_id, question.child_id)}"
+                )
+            )
+            option_labels = {
+                option.value: option.label for option in question.options
+            }
+            option_values = tuple(option_labels)
+            selected_index = (
+                option_values.index(question.selected_value)
+                if question.selected_value in option_values
+                else None
+            )
+            condition_answers[question.question_id] = st.radio(
+                question.prompt,
+                options=option_values,
+                index=selected_index,
+                format_func=option_labels.__getitem__,
+                key=f"condition-question:{question.question_id}",
+            )
+            st.write("")
     editor_value = st.data_editor(
         _review_editor_rows(items, child_labels),
         num_rows="dynamic",
@@ -3585,8 +4096,12 @@ def _render_review(st: Any) -> None:
             "req_id",
             "child_id",
             "Source text",
+            "Source section",
+            "Source page",
+            "Source language",
             "Confidence",
             "Needs attention",
+            "Condition applies",
         ),
         column_config={
             "For": st.column_config.SelectboxColumn(
@@ -3613,6 +4128,11 @@ def _render_review(st: Any) -> None:
                 "Confidence",
                 format="%.2f",
             ),
+            "Supply use": st.column_config.SelectboxColumn(
+                "Supply use",
+                options=("Individual", "Shared", "Unspecified"),
+                required=True,
+            ),
         },
         key="organized_list_editor",
     )
@@ -3638,6 +4158,10 @@ def _render_review(st: Any) -> None:
                 editor_value,
                 items,
                 children,
+            )
+            reviewed = apply_conditional_answers(
+                reviewed,
+                condition_answers,
             )
             unresolved = unresolved_required_items(reviewed)
             if unresolved and not allow_unresolved:
@@ -3747,6 +4271,70 @@ def _render_working(st: Any) -> None:
         _route_pipeline_result(st, cached_result, child_labels)
         return
 
+    st.session_state.setdefault("document_structures", {})
+    st.session_state.setdefault("document_selections", {})
+    st.session_state.setdefault("structure_errors", {})
+    st.session_state.setdefault("structure_cache_ready", False)
+
+    if not st.session_state["structure_cache_ready"]:
+        st.header("Finding the right part of each list")
+        with st.status(
+            "Looking at grades, teachers, and document sections",
+            expanded=True,
+        ) as status:
+            status.write(
+                "Checking the document layout before reading any supply items."
+            )
+
+            def structure_progress(
+                stage: str,
+                completed: int,
+                total: int,
+                detail: str,
+            ) -> None:
+                del stage, detail
+                message = (
+                    f"Found the layout of {completed} of {total} lists"
+                )
+                status.update(label=message)
+                status.write(message)
+
+            structures, structure_errors = _inspect_list_inputs(
+                list_inputs,
+                intake["children"],
+                demo_mode=bool(intake.get("demo_mode")),
+                progress_callback=structure_progress,
+            )
+            selections: dict[str, DocumentSelection] = {}
+            for child_id, structure in structures.items():
+                automatic = automatic_document_selection(structure)
+                if automatic is not None:
+                    selections[child_id] = automatic
+            st.session_state["document_structures"] = structures
+            st.session_state["document_selections"] = selections
+            st.session_state["structure_errors"] = structure_errors
+            st.session_state["structure_cache_ready"] = True
+            st.session_state["ui_error_active"] = bool(structure_errors)
+            status.update(
+                label="Document sections identified",
+                state="complete",
+            )
+
+    structures = st.session_state["document_structures"]
+    selections = st.session_state["document_selections"]
+    needs_section_choice = any(
+        automatic_document_selection(structure) is None
+        and child_id not in selections
+        for child_id, structure in structures.items()
+    )
+    if needs_section_choice:
+        st.session_state["progress_substep"] = (
+            "choose the document section"
+        )
+        st.session_state["screen"] = "sections"
+        st.rerun()
+        return
+
     if not st.session_state["extraction_cache_ready"]:
         st.header("Reading the lists")
         with st.status("Reading the lists", expanded=True) as status:
@@ -3765,15 +4353,25 @@ def _render_working(st: Any) -> None:
                 status.update(label=message)
                 status.write(message)
 
+            readable_inputs = tuple(
+                list_input
+                for list_input in list_inputs
+                if list_input.child_id in structures
+            )
             extractions, extraction_errors = _extract_list_inputs(
-                list_inputs,
+                readable_inputs,
                 extractor=(
                     extract_demo_document
                     if bool(intake.get("demo_mode"))
                     else extract_document
                 ),
+                selections=selections,
                 progress_callback=extraction_progress,
             )
+            extraction_errors = {
+                **st.session_state["structure_errors"],
+                **extraction_errors,
+            }
             st.session_state["extracted_lists"] = extractions
             st.session_state["extraction_errors"] = extraction_errors
             st.session_state["extraction_cache_ready"] = True
@@ -5464,8 +6062,8 @@ def _render_self_sourced_items(
     if not selections:
         return
     st.warning(
-        "This shopping plan is incomplete. The required items below are not "
-        "included in the store cart."
+        "Required items are missing from this shopping plan. The items below "
+        "are not included in the store cart."
     )
     st.table(
         escape_streamlit_data([
@@ -5647,6 +6245,209 @@ def _render_assumptions_and_notes(
             )
 
 
+def source_interpretation_rows(
+    result: PipelineResult,
+    child_labels: Mapping[str, str],
+    review_items: Sequence[SupplyItemReview] = (),
+) -> tuple[dict[str, str], ...]:
+    """Expose exact list evidence and its cart treatment on the summary."""
+
+    unfulfillable_ids = {
+        source_id
+        for need_matches in result.matches.needs
+        if need_matches.unfulfillable
+        for source_id in need_matches.unit_need.source_requirement_ids
+    }
+    review_blocked_ids = {
+        source_id
+        for need_matches in result.matches.needs
+        if need_matches.requires_confidence_review
+        for source_id in need_matches.unit_need.source_requirement_ids
+    }
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for normalized in result.normalization.requirements:
+        requirement = normalized.source
+        key = (
+            requirement.child_id,
+            requirement.raw_text,
+            requirement.canonical_item,
+        )
+        seen.add(key)
+        if requirement.provided_by_school:
+            status = "Already provided by the school — not purchased"
+        elif (
+            requirement.condition is not None
+            and requirement.condition_applies is False
+        ):
+            status = "Condition does not apply — not purchased"
+        elif not requirement.is_purchasable:
+            status = "List note — not purchased"
+        elif requirement.req_id in unfulfillable_ids:
+            status = "No catalog product found"
+        elif requirement.req_id in review_blocked_ids:
+            status = "Product match needs parent review"
+        elif requirement.requirement_type == "donation":
+            status = "Classroom donation — outside the required cart"
+        elif requirement.requirement_type == "optional":
+            status = "Optional item — outside the required cart"
+        else:
+            status = "Read for the proposed cart"
+        rows.append(
+            {
+                "For": _child_display_label(
+                    requirement.child_id,
+                    child_labels,
+                ),
+                "Interpreted as": _item_display_name(
+                    requirement.canonical_item
+                ),
+                "Exact source line": requirement.raw_text,
+                "Use": requirement.supply_scope.title(),
+                "Section": requirement.source_section or "Not stated",
+                "Page": (
+                    str(requirement.source_page)
+                    if requirement.source_page is not None
+                    else "Not stated"
+                ),
+                "Status": status,
+            }
+        )
+    for item in review_items:
+        key = (item.child_id, item.source_text, item.item_name)
+        if key in seen or (
+            item.review_status != "deleted" and not item.already_owned
+        ):
+            continue
+        rows.append(
+            {
+                "For": _child_display_label(
+                    item.child_id,
+                    child_labels,
+                ),
+                "Interpreted as": _item_display_name(item.item_name),
+                "Exact source line": item.source_text,
+                "Use": item.supply_scope.title(),
+                "Section": item.source_section or "Not stated",
+                "Page": (
+                    str(item.source_page)
+                    if item.source_page is not None
+                    else "Not stated"
+                ),
+                "Status": (
+                    "Marked already owned — not purchased"
+                    if item.already_owned
+                    else "Removed during parent review"
+                ),
+            }
+        )
+    return tuple(rows)
+
+
+def document_scope_rows(
+    result: PipelineResult,
+    child_labels: Mapping[str, str],
+) -> tuple[dict[str, str], ...]:
+    """Name selected and ignored document sections without silence."""
+
+    rows: list[dict[str, str]] = []
+    for child_id, envelope in result.extractions.items():
+        selection = envelope.document_selection
+        if selection is None:
+            continue
+        child = _child_display_label(child_id, child_labels)
+        rows.extend(
+            {
+                "For": child,
+                "Document section": label,
+                "Treatment": "Read",
+            }
+            for label in selection.selected_section_labels
+        )
+        rows.extend(
+            {
+                "For": child,
+                "Document section": label,
+                "Treatment": "Not read",
+            }
+            for label in selection.ignored_section_labels
+        )
+    return tuple(rows)
+
+
+def uninterpreted_source_rows(
+    result: PipelineResult,
+    child_labels: Mapping[str, str],
+) -> tuple[dict[str, str], ...]:
+    """Name source content that the reading step could not interpret."""
+
+    return tuple(
+        {
+            "For": _child_display_label(child_id, child_labels),
+            "Source content": line,
+            "Treatment": "Could not interpret — not purchased",
+        }
+        for child_id, envelope in result.extractions.items()
+        for line in envelope.uninterpreted_lines
+    )
+
+
+def skipped_source_rows(
+    result: PipelineResult,
+    child_labels: Mapping[str, str],
+) -> tuple[dict[str, str], ...]:
+    """Name source content deliberately skipped by deterministic safeguards."""
+
+    return tuple(
+        {
+            "For": _child_display_label(child_id, child_labels),
+            "Source content": line,
+            "Treatment": "Deliberately skipped — not purchased",
+        }
+        for child_id, envelope in result.extractions.items()
+        for line in envelope.skipped_lines
+    )
+
+
+def _render_list_interpretation(
+    st: Any,
+    result: PipelineResult,
+    child_labels: Mapping[str, str],
+    review_items: Sequence[SupplyItemReview],
+) -> None:
+    """Separate model reading evidence from deterministic cart arithmetic."""
+
+    st.subheader("Check how the list was read")
+    st.write(
+        "A language model read and interpreted the supply list. Check the "
+        "exact source lines below. Quantities, package choices, prices, tax, "
+        "fees, and totals are then calculated by deterministic code from the "
+        "confirmed items and simulated catalog."
+    )
+    scopes = document_scope_rows(result, child_labels)
+    if scopes:
+        st.table(escape_streamlit_data(scopes))
+    st.table(
+        escape_streamlit_data(
+            source_interpretation_rows(
+                result,
+                child_labels,
+                review_items,
+            )
+        )
+    )
+    uninterpreted = uninterpreted_source_rows(result, child_labels)
+    if uninterpreted:
+        st.warning(
+            "Some source content could not be interpreted and was not added."
+        )
+        st.table(escape_streamlit_data(uninterpreted))
+    skipped = skipped_source_rows(result, child_labels)
+    if skipped:
+        st.info("Some source content was deliberately skipped and named below.")
+        st.table(escape_streamlit_data(skipped))
+
+
 def _render_summary_headline(
     st: Any,
     optimization: OptimizationResult,
@@ -5665,8 +6466,8 @@ def _render_summary_headline(
         )
     if not is_complete:
         st.error(
-            "This plan is incomplete because one or more required items are "
-            "not in the cart."
+            "Required items are missing because one or more are not in the "
+            "cart."
         )
 
     st.header(copy.summary_heading)
@@ -5688,7 +6489,7 @@ def _render_summary_headline(
         )
     columns[2].metric(
         "Plan status",
-        copy.complete_status if is_complete else "Incomplete",
+        copy.complete_status if is_complete else "Required items missing",
     )
 
 
@@ -5830,6 +6631,12 @@ def _render_summary(st: Any) -> None:
             child_labels,
             self_sourced_decisions,
         )
+    _render_list_interpretation(
+        st,
+        result,
+        child_labels,
+        tuple(st.session_state.get("review_items", ())),
+    )
     has_assumptions_or_notes = bool(
         result.normalization.display_only_requirements
         or any(
@@ -6059,8 +6866,8 @@ def _render_summary(st: Any) -> None:
     checkout_label = "Place simulated order"
     if not is_complete:
         st.warning(
-            "This checkout covers only the store-supplied items. Your overall "
-            "plan remains incomplete until every required item is obtained."
+            "This checkout covers only the store-supplied items. Required "
+            "items are still missing until they are obtained separately."
         )
         checkout_label = "Place partial simulated order"
     else:
@@ -6387,6 +7194,7 @@ def main() -> None:
         "intake": _render_intake,
         "lists": _render_lists,
         "working": _render_working,
+        "sections": _render_sections,
         "review": _render_review,
         "approval": _render_approval,
         "summary": _render_summary,

@@ -388,6 +388,32 @@ def test_low_confidence_display_only_line_never_interrupts_cart() -> None:
     assert "category_not_allowed" not in normalized.assumption_flags
 
 
+def test_district_supplied_item_is_visible_and_never_cart_eligible() -> None:
+    """FR-10: school-provided supplies remain evidence outside cart scope."""
+
+    provided = Requirement(
+        req_id="provided-crayons",
+        child_id="child",
+        raw_text="Crayons | DISTRICT WILL BE SUPPLYING: Crayons",
+        canonical_item="crayons",
+        quantity=1,
+        is_required=False,
+        is_purchasable=False,
+        requirement_type="optional",
+        provided_by_school=True,
+        source_section="DISTRICT WILL BE SUPPLYING:",
+        extraction_confidence=0.98,
+    )
+
+    normalized = normalize_requirement(provided)
+
+    assert normalized.is_cart_eligible is False
+    assert normalized.is_budget_eligible is False
+    assert normalized.is_display_only is True
+    assert normalized.source.provided_by_school is True
+    assert normalized.source.raw_text == provided.raw_text
+
+
 def test_any_color_creates_no_attribute_restriction() -> None:
     """FR-19: 'any color' cannot become a preference-dependent choice."""
 

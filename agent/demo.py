@@ -11,7 +11,7 @@ from pypdf import PdfReader
 
 from agent.extract import ExtractionInputError
 from agent.normalize import canonicalize_item_name
-from agent.schema import ExtractionEnvelope, Requirement
+from agent.schema import DocumentSelection, ExtractionEnvelope, Requirement
 
 
 DEMO_LIST_TEXT = """\
@@ -92,6 +92,7 @@ def extract_demo_document(
     child_id: str = "unassigned",
     mime_type: str | None = None,
     client: object | None = None,
+    section_selection: DocumentSelection | None = None,
 ) -> ExtractionEnvelope:
     """Extract a simple demo list deterministically without external services."""
 
@@ -143,4 +144,7 @@ def extract_demo_document(
         raise ExtractionInputError(
             "Offline demo mode could not identify readable school-supply items"
         )
-    return ExtractionEnvelope(requirements=tuple(requirements))
+    return ExtractionEnvelope(
+        requirements=tuple(requirements),
+        document_selection=section_selection,
+    )
