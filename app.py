@@ -144,6 +144,8 @@ INTAKE_ENTRY_VALUE_PREFIXES = (
 INTAKE_ENTRY_TYPE_TRACKER_PREFIX = "intake_previous_entity_type"
 INTAKE_ENTRY_GRADE_TRACKER_PREFIX = "intake_previous_grade"
 NAVIGATION_STATE_PREFIX = "navigation_saved::"
+INTAKE_WIDGET_STATE_PREFIX = "_intake_widget::"
+INTAKE_WIDGET_TOUCHED_PREFIX = "intake_widget_touched::"
 NAVIGATION_WIDGET_KEYS = frozenset(
     {
         "child_count",
@@ -3234,13 +3236,59 @@ class ListUploadDraft:
 def _is_navigation_widget_key(key: str) -> bool:
     """Return whether a widget value should survive screen navigation."""
 
-    if key.startswith(NAVIGATION_STATE_PREFIX):
+    if key.startswith(
+        (
+            NAVIGATION_STATE_PREFIX,
+            INTAKE_WIDGET_STATE_PREFIX,
+            INTAKE_WIDGET_TOUCHED_PREFIX,
+        )
+    ):
         return False
     return (
         key in NAVIGATION_WIDGET_KEYS
         or key.startswith(NAVIGATION_WIDGET_PREFIXES)
         or ":" in key
     )
+
+
+def intake_widget_key(durable_key: str) -> str:
+    """Return the temporary Streamlit key for a durable intake value."""
+
+    return INTAKE_WIDGET_STATE_PREFIX + durable_key
+
+
+def mount_intake_widget_value(
+    state: MutableMapping[str, Any],
+    durable_key: str,
+    default: Any,
+) -> str:
+    """Mount a widget from durable FR-01-FR-04 state.
+
+    Streamlit deletes a keyed widget value when the widget is not rendered.
+    Keeping the application value under ``durable_key`` and giving the widget
+    a separate temporary key preserves both user edits and untouched defaults
+    across conditional sections and banner navigation.
+    """
+
+    if durable_key not in state:
+        state[durable_key] = default
+    temporary_key = intake_widget_key(durable_key)
+    state[temporary_key] = state[durable_key]
+    return temporary_key
+
+
+def commit_intake_widget_value(durable_key: str) -> None:
+    """Copy one changed Streamlit widget value into durable intake state."""
+
+    import streamlit as st
+
+    temporary_key = intake_widget_key(durable_key)
+    if temporary_key not in st.session_state:
+        return
+    value = st.session_state[temporary_key]
+    st.session_state[durable_key] = value
+    st.session_state[NAVIGATION_STATE_PREFIX + durable_key] = value
+    st.session_state[INTAKE_WIDGET_TOUCHED_PREFIX + durable_key] = True
 
 
 def _intake_section_for_navigation_key(key: str) -> int | None:
@@ -3383,6 +3431,8 @@ def _delete_navigation_value(
 
     state.pop(key, None)
     state.pop(NAVIGATION_STATE_PREFIX + key, None)
+    state.pop(intake_widget_key(key), None)
+    state.pop(INTAKE_WIDGET_TOUCHED_PREFIX + key, None)
 
 
 def _remember_upload_draft(
@@ -3587,6 +3637,42 @@ def reset_intake_entry_after_type_change(
     else:
         state[tracker_key] = normalized_type
     return changed
+
+
+def entry_type_change_discards_details(
+    state: Mapping[str, Any],
+    index: int,
+) -> bool:
+    """Return whether an FR-05 type change will discard entered details."""
+
+    meaningful_prefixes = (
+        "child_label",
+        "student_name",
+        "teacher_name",
+        "child_grade",
+        "student_grade",
+        "classroom_grade",
+        "budget",
+        "list_upload",
+        "list_upload_draft",
+        "list_paste",
+    )
+    if any(
+        bool(state.get(f"{prefix}_{index}"))
+        for prefix in meaningful_prefixes
+    ):
+        return True
+    student_count = state.get(f"student_count_{index}")
+    count_was_edited = bool(
+        state.get(
+            INTAKE_WIDGET_TOUCHED_PREFIX + f"student_count_{index}",
+            False,
+        )
+    )
+    return (
+        student_count not in (None, "")
+        and (int(student_count) != 20 or count_was_edited)
+    )
 
 
 def clear_section_selection_after_grade_change(
@@ -3860,13 +3946,20 @@ def _navigation_button_columns(st: Any) -> tuple[Any, Any]:
 def _render_student_step(st: Any) -> None:
     """Render type-first FR-01/FR-05 intake with exit validation."""
 
+    child_count_widget_key = mount_intake_widget_value(
+        st.session_state,
+        "child_count",
+        1,
+    )
     student_count = int(
         st.number_input(
             "How many students or classrooms are you shopping for?",
             min_value=1,
             max_value=MAX_CHILDREN_PER_SESSION,
             step=1,
-            key="child_count",
+            key=child_count_widget_key,
+            on_change=commit_intake_widget_value,
+            args=("child_count",),
             help=(
                 f"A session can include up to {MAX_CHILDREN_PER_SESSION} "
                 "students or classroom groups."
@@ -3925,6 +4018,10 @@ def _render_student_step(st: Any) -> None:
             or st.session_state.get(f"teacher_name_{index}")
             or f"Student or classroom {index + 1}"
         ).strip()
+        discarded_entry_details = entry_type_change_discards_details(
+            st.session_state,
+            index,
+        )
         type_changed = reset_intake_entry_after_type_change(
             st.session_state,
             index,
@@ -3996,13 +4093,21 @@ def _render_student_step(st: Any) -> None:
                 )
                 + "**"
             )
+            entity_widget_key = mount_intake_widget_value(
+                st.session_state,
+                entity_key,
+                None,
+            )
             entity_type = st.radio(
                 "Who are you adding?",
                 ("Student", "Classroom"),
                 horizontal=True,
                 index=None,
-                key=entity_key,
+                key=entity_widget_key,
+                on_change=commit_intake_widget_value,
+                args=(entity_key,),
             )
+            st.session_state[entity_key] = entity_type
             if entity_type is None:
                 type_error = "Choose Student or Classroom."
                 validation_errors.append(
@@ -4032,21 +4137,37 @@ def _render_student_step(st: Any) -> None:
                 else student_name_key
             )
             st.session_state.setdefault(active_name_key, "")
+            active_name_widget_key = mount_intake_widget_value(
+                st.session_state,
+                active_name_key,
+                "",
+            )
             name = name_column.text_input(
                 name_label,
-                key=active_name_key,
+                key=active_name_widget_key,
+                on_change=commit_intake_widget_value,
+                args=(active_name_key,),
                 placeholder=name_placeholder,
             )
+            st.session_state[active_name_key] = name
             st.session_state[name_key] = name
             if active_grade_key is None:
                 raise RuntimeError("An entry type is required before grade")
+            active_grade_widget_key = mount_intake_widget_value(
+                st.session_state,
+                active_grade_key,
+                None,
+            )
             grade = grade_column.selectbox(
                 "Grade",
                 GRADE_OPTIONS,
                 index=None,
-                key=active_grade_key,
+                key=active_grade_widget_key,
+                on_change=commit_intake_widget_value,
+                args=(active_grade_key,),
                 placeholder="Select a grade",
             )
+            st.session_state[active_grade_key] = grade
             st.session_state[grade_key] = grade
             grade_text = "" if grade is None else str(grade)
             for notice in clear_section_selection_after_grade_change(
@@ -4056,7 +4177,7 @@ def _render_student_step(st: Any) -> None:
                 name.strip() or previous_entry_name,
             ):
                 st.info(escape_streamlit_dollars(notice))
-            if type_changed:
+            if type_changed and discarded_entry_details:
                 st.info(
                     escape_streamlit_dollars(
                         f"{previous_entry_name}'s previous entry details "
@@ -4088,12 +4209,19 @@ def _render_student_step(st: Any) -> None:
             if is_classroom:
                 count_key = f"student_count_{index}"
                 st.session_state.setdefault(count_key, 20)
+                count_widget_key = mount_intake_widget_value(
+                    st.session_state,
+                    count_key,
+                    20,
+                )
                 field_columns[2].number_input(
                     "Students in this classroom",
                     min_value=1,
                     max_value=MAX_CLASSROOM_STUDENTS,
                     step=1,
-                    key=count_key,
+                    key=count_widget_key,
+                    on_change=commit_intake_widget_value,
+                    args=(count_key,),
                     help=(
                         "Every quantity on the supply list will be multiplied "
                         "by this number."
@@ -4132,6 +4260,11 @@ def _render_budget_step(st: Any) -> None:
         "Choose one total, one amount for each student or classroom, or no "
         "set budget."
     )
+    budget_mode_widget_key = mount_intake_widget_value(
+        st.session_state,
+        "budget_mode_label",
+        "One combined budget",
+    )
     budget_mode_label = st.radio(
         "Budget setup",
         (
@@ -4140,8 +4273,11 @@ def _render_budget_step(st: Any) -> None:
             NO_SET_BUDGET_LABEL,
         ),
         horizontal=True,
-        key="budget_mode_label",
+        key=budget_mode_widget_key,
+        on_change=commit_intake_widget_value,
+        args=("budget_mode_label",),
     )
+    st.session_state["budget_mode_label"] = budget_mode_label
     prepare_budget_mode_drafts(
         st.session_state,
         str(budget_mode_label),
@@ -4152,13 +4288,21 @@ def _render_budget_step(st: Any) -> None:
     )
     budget_errors: list[str] = []
     if budget_mode_label == "One combined budget":
+        combined_budget_widget_key = mount_intake_widget_value(
+            st.session_state,
+            "combined_budget_text",
+            DEFAULT_BUDGET_TEXT,
+        )
         combined_budget = st.text_input(
             r"Combined budget (\$)",
-            key="combined_budget_text",
+            key=combined_budget_widget_key,
+            on_change=commit_intake_widget_value,
+            args=("combined_budget_text",),
             help=(
                 "Enter the total you want to spend, for example 75 or 85.50."
             ),
         )
+        st.session_state["combined_budget_text"] = combined_budget
         error = budget_entry_error(combined_budget)
         if error is not None:
             budget_errors.append(error)
@@ -4167,12 +4311,20 @@ def _render_budget_step(st: Any) -> None:
     elif budget_mode_label == "A budget for each student or classroom":
         for _, _, label, budget_key in budget_entry_fields(students):
             st.session_state.setdefault(budget_key, "75.00")
+            budget_widget_key = mount_intake_widget_value(
+                st.session_state,
+                budget_key,
+                "75.00",
+            )
             budget_text = st.text_input(
                 escape_streamlit_dollars(
                     f"{label} budget (\\$)"
                 ),
-                key=budget_key,
+                key=budget_widget_key,
+                on_change=commit_intake_widget_value,
+                args=(budget_key,),
             )
+            st.session_state[budget_key] = budget_text
             error = budget_entry_error(budget_text)
             if error is not None:
                 message = f"{label}: {error}"
@@ -4257,10 +4409,17 @@ def _render_preferences_step(st: Any) -> None:
         "Choose how you want the plan to balance cost, stores, and "
         "convenience."
     )
+    shopping_mode_widget_key = mount_intake_widget_value(
+        st.session_state,
+        "shopping_preference_label",
+        next(iter(SHOPPING_MODES)),
+    )
     mode_label = st.selectbox(
         "Shopping preferences",
         tuple(SHOPPING_MODES),
-        key="shopping_preference_label",
+        key=shopping_mode_widget_key,
+        on_change=commit_intake_widget_value,
+        args=("shopping_preference_label",),
         help=(
             "Lowest landed cost finds the cheapest full amount, including "
             "tax and pickup or delivery fees, and may use multiple stores. "
@@ -4272,6 +4431,7 @@ def _render_preferences_step(st: Any) -> None:
             "amount including tax and fees, never just the item subtotal."
         ),
     )
+    st.session_state["shopping_preference_label"] = mode_label
     shopping_mode = SHOPPING_MODES[mode_label]
     validation_attempted = bool(
         st.session_state.get("preferences_validation_attempted", False)
@@ -4282,13 +4442,20 @@ def _render_preferences_step(st: Any) -> None:
     preference_errors: list[str] = []
     if shopping_mode == "custom":
         store_options = tuple(store.name for store in stores)
+        selected_stores_widget_key = mount_intake_widget_value(
+            st.session_state,
+            "selected_store_names",
+            store_options,
+        )
         selected_names = st.multiselect(
             "Stores to consider",
             store_options,
-            default=store_options,
-            key="selected_store_names",
+            key=selected_stores_widget_key,
+            on_change=commit_intake_widget_value,
+            args=("selected_store_names",),
             help="Choose which fictional stores may appear in the plan.",
         )
+        st.session_state["selected_store_names"] = selected_names
         if not selected_names:
             message = "Choose at least one store to build a custom plan."
             preference_errors.append(message)
@@ -4305,27 +4472,41 @@ def _render_preferences_step(st: Any) -> None:
                 "Maximum number of stores",
                 min_value=1,
                 max_value=len(stores),
-                value=2,
                 step=1,
-                key="maximum_stores",
+                key=mount_intake_widget_value(
+                    st.session_state,
+                    "maximum_stores",
+                    2,
+                ),
+                on_change=commit_intake_widget_value,
+                args=("maximum_stores",),
                 help="The plan will not use more than this many stores.",
             )
         )
+        st.session_state["maximum_stores"] = max_stores
 
     with st.expander("Advanced shopping and tax options"):
         st.caption(
             "Adjust distance, pickup or delivery, and tax."
         )
+        fulfillment_widget_key = mount_intake_widget_value(
+            st.session_state,
+            "fulfillment_label",
+            next(iter(FULFILLMENT_OPTIONS)),
+        )
         fulfillment_label = st.selectbox(
             "Pickup or delivery preference",
             tuple(FULFILLMENT_OPTIONS),
-            key="fulfillment_label",
+            key=fulfillment_widget_key,
+            on_change=commit_intake_widget_value,
+            args=("fulfillment_label",),
             help=(
                 "Best available compares pickup and delivery. Pickup only "
                 "requires a trip within the selected radius. Delivery only "
                 "does not use the pickup radius."
             ),
         )
+        st.session_state["fulfillment_label"] = fulfillment_label
         fulfillment_preference = FULFILLMENT_OPTIONS[fulfillment_label]
         radius_disabled = update_pickup_radius_for_fulfillment(
             st.session_state,
@@ -4337,7 +4518,13 @@ def _render_preferences_step(st: Any) -> None:
                 min_value=0.0,
                 max_value=MAX_STORE_RADIUS_MILES,
                 step=0.5,
-                key="store_radius_miles",
+                key=mount_intake_widget_value(
+                    st.session_state,
+                    "store_radius_miles",
+                    DEFAULT_RADIUS_MILES,
+                ),
+                on_change=commit_intake_widget_value,
+                args=("store_radius_miles",),
                 help=(
                     "Limits pickup trips only. Delivery stores are always "
                     "available."
@@ -4345,6 +4532,7 @@ def _render_preferences_step(st: Any) -> None:
                 disabled=radius_disabled,
             )
         )
+        st.session_state["store_radius_miles"] = radius
         if radius_disabled:
             st.caption("Not needed for delivery.")
         st.caption(
@@ -4363,24 +4551,40 @@ def _render_preferences_step(st: Any) -> None:
             hide_index=True,
         )
 
+        state_widget_key = mount_intake_widget_value(
+            st.session_state,
+            "sales_tax_state",
+            DEFAULT_TAX_STATE_OPTION,
+        )
         state_name = st.selectbox(
             "State used for the tax estimate",
             tuple(STATE_GENERAL_SALES_TAX_PERCENT),
-            key="sales_tax_state",
+            key=state_widget_key,
+            on_change=commit_intake_widget_value,
+            args=("sales_tax_state",),
             help=(
                 "Prefills a general state sales-tax rate. City and county "
                 "rates are not estimated."
             ),
         )
+        st.session_state["sales_tax_state"] = state_name
         initialize_state_tax_prefill(st.session_state, state_name)
+        tax_widget_key = mount_intake_widget_value(
+            st.session_state,
+            "tax_rate_text",
+            STATE_GENERAL_SALES_TAX_PERCENT[DEFAULT_TAX_STATE_OPTION],
+        )
         tax_rate_text = st.text_input(
             "Sales tax rate override (%)",
-            key="tax_rate_text",
+            key=tax_widget_key,
+            on_change=commit_intake_widget_value,
+            args=("tax_rate_text",),
             help=(
                 "Optional. Keep the prefilled state rate, or enter a "
                 "different percentage if you know the rate you want used."
             ),
         )
+        st.session_state["tax_rate_text"] = tax_rate_text
         try:
             tax_percent_to_basis_points(tax_rate_text)
         except ValueError as error:
@@ -9323,6 +9527,9 @@ def _apply_custom_css(st: Any) -> None:
             font-family: "Trebuchet MS", "Segoe UI", sans-serif;
             letter-spacing: -0.02em;
             line-height: 1.2;
+        }
+        [data-testid="stHeaderActionElements"] {
+            display: none !important;
         }
         h1 {
             margin: 0 0 0.35rem !important;

@@ -1539,3 +1539,74 @@ the cart pipeline or business calculations.
 In the deployed app, enter a combined budget with an odd-cent split, switch between
 budget modes twice, jump to Students through the banner, then return to Shopping
 preferences and continue to Their lists.
+
+## 2026-07-28 - Bind intake values outside the Streamlit widget lifecycle
+
+### Objective
+
+Correct intake state that passed dictionary-based tests but was lost when real
+Streamlit widgets were conditionally unmounted and remounted.
+
+### Work completed
+
+- Reviewed Streamlit's documented widget cleanup behavior: a keyed widget that is
+  not rendered loses its widget key and returns as a new widget when remounted.
+- Replaced direct intake widget keys with Streamlit's recommended two-key pattern:
+  one temporary widget key and one durable application key copied through an
+  `on_change` callback.
+- Applied the durable binding to every prefilled intake control: entry count and
+  type, names, grades, classroom count, both budget modes, shopping mode, custom
+  stores and store count, fulfillment, radius, state, and tax.
+- Preserved combined and per-entry budget drafts across conditional unmounting while
+  the parent remains on Budget.
+- Preserved advanced Shopping preferences across section-banner navigation.
+- Committed untouched displayed defaults to durable state before Continue can read
+  them.
+- Limited the type-change notice to cases where a name, grade, changed classroom
+  count, budget, or list value was actually discarded.
+- Hid Streamlit's automatic heading-anchor action globally.
+- Reclassified the prior Streamlit-shaped banner test as a display-boundary unit
+  test rather than lifecycle evidence.
+- Added a separate `st.testing.v1.AppTest` suite that drives the real application
+  through widget reruns, cleanup, and remounting.
+
+### Decisions made
+
+- Used the documented temporary-widget/durable-value pattern instead of relying on
+  copied widget keys or a Streamlit-version-specific persistence parameter.
+- Kept the existing navigation snapshots as a compatibility layer, but made durable
+  values the source of truth for intake.
+- Did not change `requirements.txt`; the deployed environment already installs
+  Streamlit, while the supported local ARM64 environment intentionally does not.
+
+### Problems or limitations
+
+- The real Streamlit lifecycle tests are collected but skipped on this Windows
+  ARM64 machine because Streamlit is not installed. They must run in the deployed
+  x86 environment before the interactive behavior can be called verified.
+- No deployed URL is recorded in the repository, so this session could not perform
+  a browser check against the hosted application.
+
+### Files created or changed
+
+- Updated `app.py`, `tests/test_app.py`, and `JOURNAL.md`.
+- Added `tests/test_streamlit_lifecycle.py`.
+
+### Testing performed
+
+- Focused application and lifecycle selection: 65 passed, 1 skipped.
+- Complete local suite: 251 passed, 1 skipped in 5.44 seconds.
+- Python compilation and Git whitespace validation completed without errors.
+
+### Remaining work
+
+- Run `tests/test_streamlit_lifecycle.py` in an x86 environment with Streamlit
+  installed and confirm all four integration tests pass.
+- Repeat the reported interactions in the deployed app after the updated code is
+  deployed.
+
+### Recommended next step
+
+Run `python -m pytest -q tests/test_streamlit_lifecycle.py` in the deployment or CI
+environment, then manually confirm one Budget mode round-trip and one advanced
+preferences banner round-trip in the hosted app.

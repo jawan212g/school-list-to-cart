@@ -370,6 +370,46 @@ def test_switching_entry_type_clears_previous_fields(
     assert "navigation_saved::classroom_grade_0" not in state
 
 
+def test_empty_type_change_has_no_discarded_details_notice() -> None:
+    """FR-05: untouched defaults are not described as discarded details."""
+
+    empty_state: dict[str, object] = {
+        "child_label_1": "",
+        "student_name_1": "",
+        "teacher_name_1": "",
+        "student_grade_1": None,
+        "classroom_grade_1": None,
+        "student_count_1": 20,
+    }
+
+    assert app.entry_type_change_discards_details(empty_state, 1) is False
+    empty_state["teacher_name_1"] = "Ms. Rivera"
+    assert app.entry_type_change_discards_details(empty_state, 1) is True
+
+
+def test_intake_widget_defaults_live_outside_streamlit_widget_state() -> None:
+    """FR-03/FR-04: widget cleanup cannot delete a displayed default."""
+
+    state: dict[str, object] = {}
+    temporary_key = app.mount_intake_widget_value(
+        state,
+        "combined_budget_text",
+        app.DEFAULT_BUDGET_TEXT,
+    )
+    assert temporary_key == app.intake_widget_key("combined_budget_text")
+    assert state["combined_budget_text"] == "150.00"
+    assert state[temporary_key] == "150.00"
+
+    state.pop(temporary_key)
+    app.mount_intake_widget_value(
+        state,
+        "combined_budget_text",
+        "",
+    )
+    assert state["combined_budget_text"] == "150.00"
+    assert state[temporary_key] == "150.00"
+
+
 def test_backward_intake_navigation_preserves_all_section_values() -> None:
     """FR-01–FR-04: Back reviews prior values instead of resetting them."""
 
@@ -541,8 +581,8 @@ def test_banner_navigation_preserves_every_completed_stage_value() -> None:
         )
 
 
-def test_banner_jump_back_then_forward_reaches_lists() -> None:
-    """FR-01-FR-04: banner review never blocks the normal forward path."""
+def test_preferences_renderer_builds_intake_from_durable_values() -> None:
+    """FR-03/FR-04: the display boundary builds intake from durable values."""
 
     class RerunSignal(Exception):
         pass
@@ -657,22 +697,6 @@ def test_banner_jump_back_then_forward_reaches_lists() -> None:
             raise RerunSignal
 
     state = PreferencesStreamlit.session_state
-    app.preserve_navigation_state(state)
-    app.navigate_intake_step(state, 2)
-    app.navigate_intake_step(state, 3)
-    app.preserve_navigation_state(state)
-    app.navigate_intake_step(state, 1)
-    state["combined_budget_text"] = ""
-    state["shopping_preference_label"] = ""
-    state["store_radius_miles"] = 0.0
-    state["tax_rate_text"] = ""
-    app.restore_intake_section_values(state, 2, 1)
-    assert state["combined_budget_text"] == "85.50"
-    app.navigate_intake_step(state, 3)
-    app.restore_intake_section_values(state, 3, 1)
-    assert state["shopping_preference_label"] == "Lowest landed cost"
-    assert state["store_radius_miles"] == 10.0
-    assert state["tax_rate_text"] == "7.0"
 
     with pytest.raises(RerunSignal):
         app._render_preferences_step(PreferencesStreamlit())
@@ -1047,9 +1071,11 @@ def test_budget_step_renders_one_field_for_every_intake_entry() -> None:
     app._render_budget_step(BudgetStreamlit())
 
     assert tuple(key for _, key in rendered_fields) == (
-        "budget_0",
-        "budget_1",
+        app.intake_widget_key("budget_0"),
+        app.intake_widget_key("budget_1"),
     )
+    assert BudgetStreamlit.session_state["budget_0"] == "75.00"
+    assert BudgetStreamlit.session_state["budget_1"] == "75.00"
     assert "Maya budget" in rendered_fields[0][0]
     assert "Ms. Rivera budget" in rendered_fields[1][0]
     assert app.budget_entry_fields(
@@ -1115,7 +1141,8 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert "GRADE_OPTIONS" in student_source
     assert "Select a grade" in student_source
     assert "Who are you adding?" in student_source
-    assert "key=active_grade_key" in student_source
+    assert "key=active_grade_widget_key" in student_source
+    assert "commit_intake_widget_value" in student_source
     assert "Students in this classroom" in student_source
     assert (
         "Every quantity on the supply list will be multiplied "
@@ -1235,6 +1262,8 @@ def test_visual_system_keeps_notebook_pattern_behind_opaque_cards() -> None:
     assert "@media (max-width: 700px)" in css_source
     assert 'button[kind="primary"] *' in css_source
     assert "color: #ffffff !important" in css_source
+    assert '[data-testid="stheaderactionelements"]' in css_source
+    assert "display: none !important" in css_source
 
 
 def test_landing_keeps_context_in_one_collapsed_explainer() -> None:
