@@ -11,21 +11,27 @@ from decimal import Decimal
 from typing import Callable, Literal, Protocol
 
 from openai import OpenAI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agent.aggregate import UnitNeed
+from agent.provider import (
+    ProviderConfig,
+    StructuredOutputError,
+    create_model_client,
+    default_openai_config,
+    get_provider_config,
+    request_structured_output,
+)
 from agent.store_scope import (
     FulfillmentPreference,
     store_supports_fulfillment,
 )
-from agent.extract import MODEL_NAME, create_model_client
 from agent.rules import (
     ATTRIBUTE_SENSITIVE_FIELDS,
     CONFIDENCE_FLOOR,
     MAXIMUM_MATCH_CONFIDENCE,
     MINIMUM_MATCH_CONFIDENCE,
     MODEL_CALL_MAX_RETRIES,
-    MODEL_CALL_TIMEOUT_SECONDS,
     MODEL_MAX_CONCURRENCY,
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
@@ -185,9 +191,18 @@ class OpenAISuitabilityJudge:
         self,
         client: OpenAI | None = None,
         *,
+        provider_config: ProviderConfig | None = None,
         progress_callback: Callable[[str, int, int, str], None] | None = None,
     ) -> None:
-        self._client = client or create_model_client()
+        self._provider_config = (
+            provider_config
+            or (
+                default_openai_config()
+                if client is not None
+                else get_provider_config()
+            )
+        )
+        self._client = client or create_model_client(self._provider_config)
         self._progress_callback = progress_callback
 
     def _call_batch(
@@ -218,33 +233,25 @@ class OpenAISuitabilityJudge:
             payload,
             ensure_ascii=False,
         ).replace("<", "\\u003c").replace(">", "\\u003e")
-        with_options = getattr(self._client, "with_options", None)
-        client = (
-            with_options(
-                timeout=MODEL_CALL_TIMEOUT_SECONDS,
-                max_retries=MODEL_CALL_MAX_RETRIES,
-            )
-            if callable(with_options)
-            else self._client
-        )
         for validation_attempt in range(MODEL_CALL_MAX_RETRIES + 1):
-            response = client.responses.parse(
-                model=MODEL_NAME,
-                instructions=MATCH_SYSTEM_INSTRUCTION,
-                input=(
-                    f"{MATCH_DATA_START}\n"
-                    f"{serialized_payload}\n"
-                    f"{MATCH_DATA_END}"
-                ),
-                text_format=SuitabilityEnvelope,
-                reasoning={"effort": "low"},
-                store=False,
-            )
-            parsed = response.output_parsed
-            if parsed is not None:
-                return SuitabilityEnvelope.model_validate(parsed).decisions
-            if validation_attempt == MODEL_CALL_MAX_RETRIES:
-                return ()
+            try:
+                parsed = request_structured_output(
+                    self._client,
+                    self._provider_config,
+                    model=self._provider_config.text_model,
+                    instructions=MATCH_SYSTEM_INSTRUCTION,
+                    content=(
+                        f"{MATCH_DATA_START}\n"
+                        f"{serialized_payload}\n"
+                        f"{MATCH_DATA_END}"
+                    ),
+                    schema=SuitabilityEnvelope,
+                )
+            except (StructuredOutputError, ValidationError):
+                if validation_attempt == MODEL_CALL_MAX_RETRIES:
+                    return ()
+                continue
+            return SuitabilityEnvelope.model_validate(parsed).decisions
         return ()
 
     def judge(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
@@ -342,6 +343,34 @@ def test_upload_validation_checks_type_size_and_file_signature() -> None:
         app.validate_uploaded_document("list.exe", b"MZ")
 
 
+def test_upload_validation_rejects_image_without_vision_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Image uploads fail early when the active provider has no vision model."""
+
+    monkeypatch.setitem(
+        sys.modules,
+        "streamlit",
+        SimpleNamespace(
+            secrets={
+                "LLM_BASE_URL": "https://hub.kelley.iu.edu/llmapi/v1",
+                "LLM_API_KEY": "test-key",
+                "LLM_TEXT_MODEL": "gpt-oss-20b",
+            }
+        ),
+    )
+    monkeypatch.delenv("LLM_VISION_MODEL", raising=False)
+
+    with pytest.raises(
+        ValueError,
+        match="LLM_VISION_MODEL is not configured",
+    ):
+        app.validate_uploaded_document(
+            "list.png",
+            b"\x89PNG\r\n\x1a\ndata",
+        )
+
+
 def test_radius_table_explains_pickup_scope_and_delivery_exception() -> None:
     """FR-04: intake scope is visible and delivery ignores pickup distance."""
 
@@ -394,20 +423,61 @@ def test_radius_table_explains_pickup_scope_and_delivery_exception() -> None:
 def test_openai_probe_makes_one_minimal_model_lookup() -> None:
     """Development diagnostic checks the configured model exactly once."""
 
-    calls: list[str] = []
+    calls = 0
 
     class Models:
-        def retrieve(self, model_name: str) -> object:
-            calls.append(model_name)
-            return object()
+        def list(self) -> object:
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(
+                data=(SimpleNamespace(id=app.MODEL_NAME),)
+            )
 
     success, message = app.probe_openai_connection(
         SimpleNamespace(models=Models())
     )
 
     assert success is True
-    assert calls == [app.MODEL_NAME]
+    assert calls == 1
     assert app.MODEL_NAME in message
+
+
+def test_connection_probe_uses_configured_provider_models() -> None:
+    """The diagnostic checks Kelley text and vision models in one call."""
+
+    calls = 0
+
+    class Models:
+        def list(self) -> object:
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(
+                data=(
+                    SimpleNamespace(id="gpt-oss-20b"),
+                    SimpleNamespace(id="gemma-4-31B-it"),
+                )
+            )
+
+    config = app.ProviderConfig(
+        provider_name="Kelley GPT API",
+        base_url="https://hub.kelley.iu.edu/llmapi/v1",
+        api_key="test-key",
+        api_key_source="environment",
+        credential_name="LLM_API_KEY",
+        text_model="gpt-oss-20b",
+        vision_model="gemma-4-31B-it",
+    )
+    success, message = app.probe_openai_connection(
+        SimpleNamespace(models=Models()),
+        config,
+    )
+
+    assert success is True
+    assert calls == 1
+    assert message == (
+        "Kelley GPT API connection succeeded. "
+        "Text model gpt-oss-20b is available."
+    )
 
 
 def test_openai_probe_reports_the_exact_failure(
@@ -416,13 +486,11 @@ def test_openai_probe_reports_the_exact_failure(
     """Development diagnostic preserves the exception type and message."""
 
     class Models:
-        def retrieve(self, model_name: str) -> object:
+        def list(self) -> object:
             try:
                 raise OSError("DNS lookup failed")
             except OSError as cause:
-                raise RuntimeError(
-                    f"network blocked for {model_name}"
-                ) from cause
+                raise RuntimeError("network blocked for model list") from cause
 
     success, message = app.probe_openai_connection(
         SimpleNamespace(models=Models())
@@ -430,7 +498,7 @@ def test_openai_probe_reports_the_exact_failure(
 
     assert success is False
     assert message == (
-        f"RuntimeError: network blocked for {app.MODEL_NAME} | "
+        "RuntimeError: network blocked for model list | "
         "caused by OSError: DNS lookup failed"
     )
     assert "network blocked" in caplog.text

@@ -199,6 +199,110 @@ def test_e06_e07_nonpurchasable_lines_remain_display_only() -> None:
     )
 
 
+def test_nonpurchasable_required_output_is_corrected_and_never_interrupts() -> None:
+    """FR-10: a model cannot make a display-only reminder required."""
+
+    reminder = _requirement(
+        "Reminder: label everything.",
+        "non_purchasable",
+        1,
+        is_required=True,
+        is_purchasable=False,
+        requirement_type="required",
+        extraction_confidence=0.0,
+    )
+    normalized = normalize_requirement(reminder)
+
+    assert reminder.is_required is False
+    assert reminder.requirement_type == "optional"
+    assert reminder.quantity_max is None
+    assert normalized.is_display_only is True
+    assert normalized.is_budget_eligible is False
+    assert normalized.manual_review_required is False
+    assert normalized.review_deferred is False
+
+
+def test_non_range_quantity_max_is_always_null() -> None:
+    """FR-11: quantity_max is populated only for an explicit range."""
+
+    single_quantity = _requirement(
+        "12 pencils",
+        "pencils",
+        12,
+        quantity_is_range=False,
+        quantity_max=12,
+    )
+
+    assert single_quantity.quantity_max is None
+
+
+def test_source_evidence_corrects_wrong_category_and_attribute_fields() -> None:
+    """BR-11: source-proven model repairs are explicit low-confidence output."""
+
+    composition = Requirement(
+        req_id="composition",
+        child_id="grade2",
+        raw_text="2 wide-ruled composition notebooks",
+        canonical_item="binders",
+        quantity=2,
+        attributes={"style": "wide-ruled"},
+        extraction_confidence=0.9,
+    )
+    binder = Requirement(
+        req_id="binder",
+        child_id="grade5",
+        raw_text="1 three-ring binder, 1.5 inch",
+        canonical_item="binders",
+        quantity=1,
+        attributes={
+            "style": "three-ring",
+            "other_details": "1.5 inch",
+        },
+        extraction_confidence=1.0,
+    )
+    pencils = Requirement(
+        req_id="pencils",
+        child_id="grade5",
+        raw_text="36 #2 pencils (any brand)",
+        canonical_item="pencils",
+        quantity=36,
+        attributes={"character": "#2", "size": "standard"},
+        extraction_confidence=1.0,
+    )
+    colored_pencils = Requirement(
+        req_id="colored",
+        child_id="grade5",
+        raw_text="1 pack colored pencils, 12 count",
+        canonical_item="colored_pencils",
+        quantity=1,
+        unit_type="pack",
+        attributes={
+            "style": "colored",
+            "other_details": "12 count",
+        },
+        extraction_confidence=1.0,
+    )
+
+    assert composition.canonical_item == "composition_notebooks"
+    assert composition.attributes.ruling == "wide-ruled"
+    assert composition.attributes.style is None
+    assert composition.extraction_confidence == 0.69
+
+    assert binder.attributes.connector == "three-ring"
+    assert binder.attributes.size == "1.5 inch"
+    assert binder.attributes.style is None
+    assert binder.extraction_confidence == 0.69
+
+    assert pencils.attributes.character is None
+    assert pencils.attributes.size is None
+    assert pencils.attributes.other_details == "#2"
+    assert pencils.extraction_confidence == 0.69
+
+    assert colored_pencils.attributes.count == 12
+    assert colored_pencils.attributes.style is None
+    assert colored_pencils.extraction_confidence == 0.69
+
+
 def test_optional_and_donation_items_stay_out_of_base_budget() -> None:
     """FR-09: optional items remain available as add-ons, not base needs."""
 

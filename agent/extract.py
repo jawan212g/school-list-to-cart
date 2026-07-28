@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import base64
 import logging
-import os
 import re
-from dataclasses import dataclass
+from html import unescape
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -25,10 +24,21 @@ from pypdf import PdfReader
 from agent.rules import (
     ALLOWED_CATEGORIES,
     CONFIDENCE_FLOOR,
+    CORRECTED_EXTRACTION_CONFIDENCE,
     MAX_UPLOAD_BYTES,
-    MODEL_CALL_MAX_RETRIES,
-    MODEL_CALL_TIMEOUT_SECONDS,
     NON_PURCHASABLE_CATEGORY,
+)
+from agent.provider import (
+    DEFAULT_OPENAI_MODEL,
+    ProviderConfig,
+    ProviderConfigurationError,
+    ProviderDiagnostic,
+    StructuredOutputError,
+    create_model_client as _create_model_client,
+    default_openai_config,
+    get_provider_config,
+    get_provider_diagnostic,
+    request_structured_output,
 )
 from agent.schema import (
     ExtractionEnvelope,
@@ -38,7 +48,7 @@ from agent.schema import (
 
 
 LOGGER = logging.getLogger(__name__)
-MODEL_NAME = "gpt-5.6-sol"
+MODEL_NAME = DEFAULT_OPENAI_MODEL
 
 DATA_BLOCK_START = "<school_supply_document untrusted_data=\"true\">"
 DATA_BLOCK_END = "</school_supply_document>"
@@ -108,16 +118,38 @@ Extraction rules:
   {ALLOWED_CATEGORY_TEXT}
 - For fees, labeling reminders, family photos, and similar display-only lines, use
   canonical_item="{NON_PURCHASABLE_CATEGORY}" and is_purchasable=false.
-- Preserve the original line in raw_text.
-- Set quantity to the lower bound of a range and quantity_max to its upper bound.
+- Preserve the complete original line in raw_text, character for character. Keep
+  quotation marks such as the inch mark in `8"` by escaping them correctly in
+  JSON; never stop or truncate raw_text at a quote.
+- Set quantity to the lower bound of an explicit range and quantity_max to its
+  upper bound. When the source is not a range, quantity_is_range=false and
+  quantity_max=null. Never copy quantity into quantity_max for a single value.
 - Use unit_type each, pack, box, or ream. Do not invent a missing pack count;
   omit the count attribute so deterministic normalization can flag its assumption.
-- Preserve explicit brand locks and exclusions. Generic brand language is not a
-  brand lock.
-- requirement_type is required, optional, or donation. is_required is true only
-  for required.
-- Put product details such as acceptable colors, size, count, ruling, tab count,
-  or tip style in attributes.
+- Preserve every explicit brand lock and every exclusion or prohibition, including
+  exclusions inside parentheses or attached to a line for another item. For
+  `12 black or blue pens (no mechanical pencils)`, acceptable_colors is
+  ["black", "blue"] and exclusions contains "mechanical pencils". Generic brand
+  language is not a brand lock.
+- Section headings apply to the lines below them until the next heading. Items
+  beneath a heading such as `CLASSROOM DONATIONS — optional` have
+  requirement_type="donation" and is_required=false. An `Optional wish list`
+  has requirement_type="optional". Non-purchasable reminders, fees, and notes
+  always have is_required=false and never use requirement_type="required".
+- Put only details explicitly stated on that list line in attributes. Never add
+  typical, standard, default, or inferred product qualities. The word "standard"
+  may appear in an attribute only when the source actually says "standard".
+- Use character only for a named or pictured character/theme, not for pencil lead
+  grade. `#2 pencils` has neither character="#2" nor size="standard"; `#2 lead`
+  may be retained in other_details. Use tip_style for blunt-tip or pointed-tip
+  wording. Use material only when the material itself is stated, such as plastic.
+- Attribute field mapping is literal: `wide-ruled` goes in ruling, never style;
+  `three-ring` goes in connector; `1.5 inch` goes in size; `12 count` goes in
+  count. The word `colored` in the category `colored pencils` is not a style.
+  The word `large` in `large glue sticks` goes in size.
+- Example: `1 plastic pencil box (approx. 8" — no oversized boxes)` keeps that
+  entire raw_text, has material="plastic", size="approx. 8 inches", and includes
+  "oversized boxes" in exclusions.
 - Store every acceptable color as a separate value in acceptable_colors. For
   example, "black or blue" becomes ["black", "blue"]. These are equally valid
   alternatives, not a preferred color and a substitution. "Any color" means no
@@ -125,7 +157,16 @@ Extraction rules:
 - Use style only for an explicitly requested product style. Do not put unit words
   such as "pair", category names, #2 lead grade, or excluded styles in style.
   Excluded styles belong only in exclusions.
-- Assign a confidence from 0 through 1 to every line. Do not guess when uncertain.
+- Assign confidence to the accuracy of the complete Requirement, not merely to
+  recognizing the item. Use the scale rather than defaulting to 1.0:
+  * 1.0 only when the line is clear and every populated field is directly stated.
+  * 0.90 when the item and quantity are clear but one non-critical interpretation,
+    such as section scope or normalized wording, is mildly uncertain.
+  * 0.75 when unit type, exclusion attachment, or an attribute is genuinely
+    ambiguous but the chosen interpretation is more likely than alternatives.
+  * 0.65 or lower when quantity, canonical item, required/donation status, or text
+    damaged by OCR cannot be resolved confidently. This must route to review.
+  Any invented field, lost text, or guessed value means confidence cannot be 1.0.
 - Always leave manual_review_required false and both review-reason collections
   empty. Deterministic code applies the confidence gate after validation.
 """.strip()
@@ -135,7 +176,7 @@ class ExtractionInputError(ValueError):
     """Raised when the supplied document type or content is unsupported."""
 
 
-class ExtractionConfigurationError(RuntimeError):
+class ExtractionConfigurationError(ProviderConfigurationError):
     """Raised when no OpenAI API key is available."""
 
 
@@ -143,89 +184,32 @@ class ExtractionValidationError(ValueError):
     """Raised when the model response has no parsed structured payload."""
 
 
+class EmptyExtractionError(RuntimeError):
+    """Raised when a non-empty document yields no extracted requirements."""
+
+
 class ExtractionServiceError(RuntimeError):
     """Raised with an actionable message when the OpenAI request fails."""
 
 
-@dataclass(frozen=True)
-class APIKeyDiagnostic:
-    """Safe credential metadata for the development-only intake diagnostic."""
-
-    found: bool
-    source: str | None
-    masked_key: str | None
+APIKeyDiagnostic = ProviderDiagnostic
 
 
-def _resolve_api_key() -> tuple[str, str]:
-    try:
-        import streamlit as st
-    except ModuleNotFoundError:
-        secret_key = None
-    else:
-        try:
-            secret_key = st.secrets["OPENAI_API_KEY"]
-        except Exception:
-            secret_key = None
-
-    if secret_key:
-        return str(secret_key), "st.secrets"
-
-    environment_key = os.getenv("OPENAI_API_KEY")
-    if environment_key:
-        return environment_key, "environment"
-    raise ExtractionConfigurationError(
-        "OPENAI_API_KEY is missing from Streamlit secrets and the environment"
-    )
-
-
-def _get_api_key() -> str:
-    return _resolve_api_key()[0]
-
-
-def _mask_api_key(api_key: str) -> str:
-    if len(api_key) <= 12:
-        return "<configured; too short to preview safely>"
-    return f"{api_key[:8]}...{api_key[-4:]}"
-
-
-def get_api_key_diagnostic() -> APIKeyDiagnostic:
+def get_api_key_diagnostic() -> ProviderDiagnostic:
     """Return source and a safe partial key without exposing the secret."""
 
-    try:
-        api_key, source = _resolve_api_key()
-    except ExtractionConfigurationError:
-        return APIKeyDiagnostic(
-            found=False,
-            source=None,
-            masked_key=None,
-        )
-    return APIKeyDiagnostic(
-        found=True,
-        source=source,
-        masked_key=_mask_api_key(api_key),
-    )
+    return get_provider_diagnostic()
 
 
-def create_model_client() -> OpenAI:
+def create_model_client(
+    config: ProviderConfig | None = None,
+) -> OpenAI:
     """Create the shared model client without exposing its API key."""
 
-    return OpenAI(
-        api_key=_get_api_key(),
-        timeout=MODEL_CALL_TIMEOUT_SECONDS,
-        max_retries=MODEL_CALL_MAX_RETRIES,
-    )
-
-
-def _configured_model_client(client: OpenAI) -> OpenAI:
-    """Apply the same timeout and retry policy to caller-supplied clients."""
-
-    with_options = getattr(client, "with_options", None)
-    if not callable(with_options):
-        return client
-    return with_options(
-        timeout=MODEL_CALL_TIMEOUT_SECONDS,
-        max_retries=MODEL_CALL_MAX_RETRIES,
-    )
+    try:
+        return _create_model_client(config)
+    except ProviderConfigurationError as error:
+        raise ExtractionConfigurationError(str(error)) from error
 
 
 def _validate_file(path: Path) -> None:
@@ -322,7 +306,12 @@ def _image_content(data: bytes, mime_type: str) -> list[dict[str, Any]]:
     ]
 
 
-def _bytes_content(data: bytes, mime_type: str) -> list[dict[str, Any]]:
+def _bytes_content(
+    data: bytes,
+    mime_type: str,
+    *,
+    vision_model: str | None = MODEL_NAME,
+) -> list[dict[str, Any]]:
     if mime_type not in {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/pdf",
@@ -354,10 +343,20 @@ def _bytes_content(data: bytes, mime_type: str) -> list[dict[str, Any]]:
     if mime_type == "image/jpeg":
         if not data.startswith(b"\xff\xd8\xff"):
             raise ExtractionInputError("The uploaded content is not a valid JPG")
+        if vision_model is None:
+            raise ExtractionInputError(
+                "Image uploads are unavailable because LLM_VISION_MODEL is "
+                "not configured. Upload a TXT or text-based PDF list instead."
+            )
         return _image_content(data, mime_type)
     if mime_type == "image/png":
         if not data.startswith(b"\x89PNG\r\n\x1a\n"):
             raise ExtractionInputError("The uploaded content is not a valid PNG")
+        if vision_model is None:
+            raise ExtractionInputError(
+                "Image uploads are unavailable because LLM_VISION_MODEL is "
+                "not configured. Upload a TXT or text-based PDF list instead."
+            )
         return _image_content(data, mime_type)
     if mime_type == "text/plain":
         if b"\x00" in data:
@@ -383,11 +382,17 @@ def _existing_path(source: str | Path) -> Path | None:
 def _document_content(
     source: str | Path | bytes,
     mime_type: str | None,
+    *,
+    vision_model: str | None = MODEL_NAME,
 ) -> list[dict[str, Any]]:
     if isinstance(source, bytes):
         if mime_type is None:
             raise ExtractionInputError("mime_type is required for byte input")
-        return _bytes_content(source, mime_type)
+        return _bytes_content(
+            source,
+            mime_type,
+            vision_model=vision_model,
+        )
 
     path = _existing_path(source)
     if path is None:
@@ -403,22 +408,99 @@ def _document_content(
     data = path.read_bytes()
     suffix = path.suffix.casefold()
     if suffix == ".pdf":
-        return _bytes_content(data, "application/pdf")
+        return _bytes_content(
+            data,
+            "application/pdf",
+            vision_model=vision_model,
+        )
     if suffix == ".docx":
         return _bytes_content(
             data,
             "application/vnd.openxmlformats-officedocument."
             "wordprocessingml.document",
+            vision_model=vision_model,
         )
     if suffix in IMAGE_MIME_TYPES:
-        return _bytes_content(data, IMAGE_MIME_TYPES[suffix])
-    return _bytes_content(data, "text/plain")
+        return _bytes_content(
+            data,
+            IMAGE_MIME_TYPES[suffix],
+            vision_model=vision_model,
+        )
+    return _bytes_content(
+        data,
+        "text/plain",
+        vision_model=vision_model,
+    )
+
+
+def _source_lines(
+    content: list[dict[str, Any]],
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    for item in content:
+        if item.get("type") != "input_text":
+            continue
+        for line in str(item.get("text", "")).splitlines():
+            cleaned = re.sub(r"^\s*[-*•]\s+", "", line).strip()
+            if (
+                cleaned
+                and cleaned not in {DATA_BLOCK_START, DATA_BLOCK_END}
+                and not cleaned.startswith("[IMAGE DATA")
+                and not cleaned.startswith("[END IMAGE DATA")
+            ):
+                lines.append(cleaned)
+    return tuple(lines)
+
+
+def _raw_text_match_key(value: str) -> str:
+    """Normalize transport-only punctuation changes for source-line matching."""
+
+    return " ".join(
+        re.sub(r"[^\w]+", " ", unescape(value).casefold()).split()
+    )
+
+
+def _restore_complete_raw_text(
+    envelope: ExtractionEnvelope,
+    content: list[dict[str, Any]],
+) -> ExtractionEnvelope:
+    """Restore raw_text from one provably matching source line."""
+
+    source_lines = _source_lines(content)
+    restored: list[Requirement] = []
+    for requirement in envelope.requirements:
+        raw_text = requirement.raw_text.strip()
+        match_key = _raw_text_match_key(raw_text)
+        candidates = tuple(
+            line
+            for line in source_lines
+            if (
+                line.casefold().startswith(raw_text.casefold())
+                or _raw_text_match_key(line) == match_key
+            )
+            and line != raw_text
+        )
+        if len(candidates) == 1:
+            restored.append(
+                requirement.model_copy(
+                    update={
+                        "raw_text": candidates[0],
+                        "extraction_confidence": float(
+                            CORRECTED_EXTRACTION_CONFIDENCE
+                        ),
+                    }
+                )
+            )
+        else:
+            restored.append(requirement)
+    return envelope.model_copy(update={"requirements": tuple(restored)})
 
 
 def _call_model(
     client: OpenAI,
     content: list[dict[str, Any]],
     retry: bool,
+    provider_config: ProviderConfig | None = None,
 ) -> ExtractionEnvelope:
     instructions = SYSTEM_INSTRUCTION
     if retry:
@@ -427,19 +509,27 @@ def _call_model(
             "The prior response failed schema validation. Return only a complete "
             "response matching every schema field and constraint."
         )
-    response = _configured_model_client(client).responses.parse(
-        model=MODEL_NAME,
-        instructions=instructions,
-        input=[{"role": "user", "content": content}],
-        text_format=ExtractionEnvelope,
-        reasoning={"effort": "low"},
-        store=False,
+    active_config = provider_config or default_openai_config()
+    model = (
+        active_config.vision_model
+        if any(item["type"] == "input_image" for item in content)
+        else active_config.text_model
     )
-    parsed = response.output_parsed
-    if parsed is None:
+    if model is None:
         raise ExtractionValidationError(
-            "The model returned no schema-validated extraction"
+            "Image extraction requires LLM_VISION_MODEL"
         )
+    try:
+        parsed = request_structured_output(
+            client,
+            active_config,
+            model=model,
+            instructions=instructions,
+            content=content,
+            schema=ExtractionEnvelope,
+        )
+    except StructuredOutputError as error:
+        raise ExtractionValidationError(str(error)) from error
     return validate_extraction_envelope(parsed)
 
 
@@ -447,47 +537,74 @@ def _call_model_with_service_errors(
     client: OpenAI,
     content: list[dict[str, Any]],
     retry: bool,
+    provider_config: ProviderConfig | None = None,
 ) -> ExtractionEnvelope:
+    provider_name = (
+        provider_config.provider_name
+        if provider_config is not None
+        else "OpenAI"
+    )
+    base_url = (
+        provider_config.display_base_url
+        if provider_config is not None
+        else "https://api.openai.com/v1"
+    )
+    credential_name = (
+        provider_config.credential_name
+        if provider_config is not None
+        else "OPENAI_API_KEY"
+    )
     try:
-        return _call_model(client, content, retry)
+        return _call_model(
+            client,
+            content,
+            retry,
+            provider_config,
+        )
     except AuthenticationError as error:
         LOGGER.exception(
-            "OpenAI extraction authentication failure: %r",
+            "%s extraction authentication failure: %r",
+            provider_name,
             error,
         )
         raise ExtractionServiceError(
-            "OpenAI authentication failed. Verify OPENAI_API_KEY in "
+            f"{provider_name} authentication failed. Verify "
+            f"{credential_name} in "
             "Streamlit Cloud App settings > Secrets, save the setting, and "
             "restart the app."
         ) from error
     except RateLimitError as error:
         LOGGER.exception(
-            "OpenAI extraction rate-limit failure: %r",
+            "%s extraction rate-limit failure: %r",
+            provider_name,
             error,
         )
         raise ExtractionServiceError(
-            "OpenAI rate limit or quota was reached. Check the API project's "
-            "usage, billing, and rate limits, then retry."
+            f"{provider_name} rate limit or quota was reached. Check the "
+            "provider account's usage and rate limits, then retry."
         ) from error
     except APIConnectionError as error:
         LOGGER.exception(
-            "OpenAI extraction connection failure: %r",
+            "%s extraction connection failure at %s: %r",
+            provider_name,
+            base_url,
             error,
         )
         raise ExtractionServiceError(
-            "Streamlit Cloud could not connect to OpenAI. Retry once, then "
-            "check OpenAI service status and the Streamlit logs for the "
-            "underlying network error."
+            f"Streamlit Cloud could not connect to {provider_name} at "
+            f"{base_url}. Retry once, then check the endpoint and Streamlit "
+            "logs for the underlying network error."
         ) from error
     except BadRequestError as error:
         LOGGER.exception(
-            "OpenAI extraction bad-request failure: %r",
+            "%s extraction bad-request failure: %r",
+            provider_name,
             error,
         )
         raise ExtractionServiceError(
-            "OpenAI rejected the extraction request. Verify that the "
-            "configured model is available to this API project, then inspect "
-            "the Streamlit logs for the request details."
+            f"{provider_name} rejected the extraction request. Verify that "
+            "the configured model and strict JSON schema output are supported, "
+            "then inspect the Streamlit logs for the request details."
         ) from error
 
 
@@ -610,23 +727,51 @@ def apply_extraction_security_filters(
 _apply_security_filters = apply_extraction_security_filters
 
 
+def require_extracted_requirements(
+    envelope: ExtractionEnvelope,
+) -> ExtractionEnvelope:
+    """Reject a silent empty extraction so E-33 can exclude that list."""
+
+    if envelope.requirements:
+        return envelope
+    raise EmptyExtractionError(
+        "No supply requirements were found in this non-empty list. "
+        "This list was not included in the plan. Check that the correct "
+        "file or pasted list was provided, then try again."
+    )
+
+
 def extract_document(
     source: str | Path | bytes,
     *,
     child_id: str = "unassigned",
     mime_type: str | None = None,
     client: OpenAI | None = None,
+    provider_config: ProviderConfig | None = None,
 ) -> ExtractionEnvelope:
     """Extract and validate text, PDF, JPG, or PNG input (FR-06–FR-13)."""
 
-    content = _document_content(source, mime_type)
-    active_client = client or create_model_client()
+    active_config = (
+        provider_config
+        or (
+            default_openai_config()
+            if client is not None
+            else get_provider_config()
+        )
+    )
+    content = _document_content(
+        source,
+        mime_type,
+        vision_model=active_config.vision_model,
+    )
+    active_client = client or create_model_client(active_config)
 
     try:
         envelope = _call_model_with_service_errors(
             active_client,
             content,
             retry=False,
+            provider_config=active_config,
         )
     except (ExtractionValidationError, ValidationError):
         try:
@@ -634,9 +779,10 @@ def extract_document(
                 active_client,
                 content,
                 retry=True,
+                provider_config=active_config,
             )
         except (ExtractionValidationError, ValidationError):
-            return ExtractionEnvelope(
+            envelope = ExtractionEnvelope(
                 requirements=(),
                 manual_review_required=True,
                 review_reasons=(
@@ -645,4 +791,6 @@ def extract_document(
                 deferred_review_reasons=(),
             )
 
-    return apply_extraction_security_filters(envelope, child_id)
+    envelope = _restore_complete_raw_text(envelope, content)
+    secured = apply_extraction_security_filters(envelope, child_id)
+    return require_extracted_requirements(secured)

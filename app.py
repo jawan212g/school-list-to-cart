@@ -35,9 +35,7 @@ from agent.decisions import Decision, DecisionLog
 from agent.demo import DEMO_LIST_TEXT, extract_demo_document
 from agent.extract import (
     MODEL_NAME,
-    create_model_client,
     extract_document,
-    get_api_key_diagnostic,
 )
 from agent.gate import ApprovalBatch, ApprovalInterrupt
 from agent.match import (
@@ -66,6 +64,13 @@ from agent.review import (
     organize_extractions,
     reviewed_envelopes,
     unresolved_required_items,
+)
+from agent.provider import (
+    ProviderConfig,
+    create_model_client,
+    default_openai_config,
+    get_provider_config,
+    get_provider_diagnostic,
 )
 from agent.rules import (
     ALLOWED_CATEGORIES,
@@ -685,21 +690,54 @@ def _exact_exception_message(error: BaseException) -> str:
     return " | caused by ".join(parts)
 
 
-def probe_openai_connection(client: Any | None = None) -> tuple[bool, str]:
-    """Make one minimal model-availability call for deployment diagnostics."""
+def probe_openai_connection(
+    client: Any | None = None,
+    provider_config: ProviderConfig | None = None,
+) -> tuple[bool, str]:
+    """Make one minimal call against the configured provider endpoint."""
 
     try:
-        active_client = client or create_model_client()
-        active_client.models.retrieve(MODEL_NAME)
+        active_config = (
+            provider_config
+            or (
+                default_openai_config()
+                if client is not None
+                else get_provider_config()
+            )
+        )
+        active_client = client or create_model_client(active_config)
+        response = active_client.models.list()
+        available_models = {
+            str(model.id)
+            for model in getattr(response, "data", ())
+            if getattr(model, "id", None)
+        }
+        configured_models = {
+            active_config.text_model,
+            *(
+                ()
+                if active_config.vision_model is None
+                else (active_config.vision_model,)
+            ),
+        }
+        missing_models = configured_models - available_models
+        if missing_models:
+            missing = ", ".join(sorted(missing_models))
+            raise RuntimeError(
+                f"Configured model not listed by the endpoint: {missing}"
+            )
     except Exception as error:
         LOGGER.exception(
-            "OpenAI development diagnostic failed: %r",
+            "Model-provider development diagnostic failed: %r",
             error,
         )
         return False, _exact_exception_message(error)
     return (
         True,
-        f"OpenAI connection succeeded and {MODEL_NAME} is available.",
+        (
+            f"{active_config.provider_name} connection succeeded. "
+            f"Text model {active_config.text_model} is available."
+        ),
     )
 
 
@@ -733,6 +771,13 @@ def validate_uploaded_document(
             data.decode("utf-8")
         except UnicodeDecodeError as error:
             raise ValueError("TXT uploads must use UTF-8 text.") from error
+    if suffix in {".jpg", ".jpeg", ".png"}:
+        diagnostic = get_provider_diagnostic()
+        if diagnostic.vision_model is None:
+            raise ValueError(
+                "Image uploads are unavailable because LLM_VISION_MODEL is "
+                "not configured. Upload a TXT or text-based PDF list instead."
+            )
     return mime_type
 
 
@@ -2631,8 +2676,18 @@ def _screen_progress(
 
 
 def _render_development_diagnostic(st: Any) -> None:
-    with st.expander("Development use: OpenAI connection diagnostic"):
-        diagnostic = get_api_key_diagnostic()
+    with st.expander("Development use: model connection diagnostic"):
+        diagnostic = get_provider_diagnostic()
+        st.write(
+            escape_streamlit_dollars(
+                f"Active provider: {diagnostic.provider_name}"
+            )
+        )
+        st.write(
+            escape_streamlit_dollars(
+                f"Base URL: {diagnostic.base_url}"
+            )
+        )
         st.write(
             escape_streamlit_dollars(
                 f"API key found: {'Yes' if diagnostic.found else 'No'}"
@@ -2640,7 +2695,9 @@ def _render_development_diagnostic(st: Any) -> None:
         )
         st.write(
             escape_streamlit_dollars(
-                f"Credential source: {diagnostic.source or 'None'}"
+                "Credential: "
+                f"{diagnostic.credential_name} from "
+                f"{diagnostic.source or 'no source'}"
             )
         )
         st.write(
@@ -2651,16 +2708,28 @@ def _render_development_diagnostic(st: Any) -> None:
         )
         st.write(
             escape_streamlit_dollars(
-                f"Configured model: {MODEL_NAME}"
+                f"Text model: {diagnostic.text_model or 'Not configured'}"
             )
         )
+        st.write(
+            escape_streamlit_dollars(
+                "Vision model: "
+                f"{diagnostic.vision_model or 'Not configured — images rejected'}"
+            )
+        )
+        if diagnostic.configuration_error is not None:
+            st.error(
+                escape_streamlit_dollars(
+                    f"Configuration: {diagnostic.configuration_error}"
+                )
+            )
         st.caption(
             "The preview contains only the first 8 and last 4 characters. "
             "The full key is never displayed."
         )
         if st.button(
-            "Test OpenAI connection",
-            key="development_openai_connection_test",
+            "Test configured endpoint",
+            key="development_model_connection_test",
         ):
             success, message = probe_openai_connection()
             if success:

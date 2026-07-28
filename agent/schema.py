@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from agent.rules import (
+    ALLOWED_CATEGORIES,
+    CANONICAL_ITEM_ALIASES,
+    CORRECTED_EXTRACTION_CONFIDENCE,
+)
 
 
 UnitType = Literal["each", "pack", "box", "ream"]
@@ -15,6 +23,136 @@ AttributeValue = str | int | float | bool | tuple[str, ...] | None
 UNRESTRICTED_COLOR_VALUES = frozenset(
     {"any", "any color", "any colors", "assorted", "no preference"}
 )
+ATTRIBUTE_TEXT_PATTERN = re.compile(r"[^a-z0-9#.]+")
+ATTRIBUTE_MATERIALS = frozenset(
+    {"cardboard", "fabric", "metal", "paper", "plastic", "wood"}
+)
+RULING_VALUES = {
+    "wide ruled": "wide-ruled",
+    "college ruled": "college-ruled",
+}
+
+
+def _evidence_text(value: object) -> str:
+    return " ".join(
+        ATTRIBUTE_TEXT_PATTERN.sub(" ", str(value).casefold()).split()
+    )
+
+
+def _main_item_text(raw_text: str) -> str:
+    return raw_text.split("(", 1)[0]
+
+
+def _canonical_item_from_raw(raw_text: str) -> str | None:
+    normalized_raw = f"_{_evidence_text(_main_item_text(raw_text)).replace(' ', '_')}_"
+    aliases = {
+        **{category: category for category in ALLOWED_CATEGORIES},
+        **CANONICAL_ITEM_ALIASES,
+    }
+    candidates = [
+        (len(alias), canonical_item)
+        for alias, canonical_item in aliases.items()
+        if f"_{_evidence_text(alias).replace(' ', '_')}_" in normalized_raw
+    ]
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def _correct_attribute_fields(
+    raw_text: str,
+    canonical_item: str,
+    attributes: Mapping[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    corrected = dict(attributes)
+    changed = False
+    raw_evidence = _evidence_text(raw_text)
+
+    if corrected.get("character") == "#2":
+        corrected["character"] = None
+        corrected["other_details"] = corrected.get("other_details") or "#2"
+        changed = True
+    if (
+        corrected.get("size") == "standard"
+        and "standard" not in raw_evidence.split()
+    ):
+        corrected["size"] = None
+        changed = True
+
+    style = _evidence_text(corrected.get("style") or "")
+    for evidence, ruling in RULING_VALUES.items():
+        if evidence not in raw_evidence:
+            continue
+        if corrected.get("ruling") is None:
+            corrected["ruling"] = ruling
+            changed = True
+        if style == evidence:
+            corrected["style"] = None
+            changed = True
+
+    if "three ring" in raw_evidence:
+        if corrected.get("connector") is None:
+            corrected["connector"] = "three-ring"
+            changed = True
+        if style == "three ring":
+            corrected["style"] = None
+            changed = True
+
+    if (
+        canonical_item == "colored_pencils"
+        and style == "colored"
+    ):
+        corrected["style"] = None
+        changed = True
+
+    count_match = re.search(r"\b(\d+)\s*count\b", raw_evidence)
+    if count_match is not None and corrected.get("count") is None:
+        corrected["count"] = int(count_match.group(1))
+        changed = True
+
+    if "blunt tip" in raw_evidence:
+        if corrected.get("tip_style") is None:
+            corrected["tip_style"] = "blunt"
+            changed = True
+        if style == "blunt tip":
+            corrected["style"] = None
+            changed = True
+
+    if (
+        canonical_item == "glue_sticks"
+        and "large" in raw_evidence.split()
+        and corrected.get("size") is None
+    ):
+        corrected["size"] = "large"
+        changed = True
+
+    size_match = re.search(
+        r"\b(\d+(?:\.\d+)?)\s*(?:inch(?:es)?|[\"″])",
+        raw_text.casefold(),
+    )
+    if size_match is not None and corrected.get("size") is None:
+        size_value = f"{size_match.group(1)} inch"
+        if "approx" in raw_text.casefold():
+            size_value = f"approx. {size_value}"
+        corrected["size"] = size_value
+        changed = True
+
+    for material in ATTRIBUTE_MATERIALS:
+        if material in raw_evidence.split():
+            if corrected.get("material") is None:
+                corrected["material"] = material
+                changed = True
+            break
+    material = corrected.get("material")
+    if (
+        isinstance(material, str)
+        and _evidence_text(material) not in raw_evidence.split()
+    ):
+        corrected["material"] = None
+        changed = True
+
+    return corrected, changed
 
 
 class RequirementAttributes(BaseModel):
@@ -77,6 +215,57 @@ class Requirement(BaseModel):
         default_factory=RequirementAttributes
     )
     extraction_confidence: float = Field(ge=0, le=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def enforce_objective_extraction_invariants(
+        cls,
+        value: Any,
+    ) -> Any:
+        """Enforce FR-09–FR-11 invariants independent of model quality."""
+
+        if not isinstance(value, Mapping):
+            return value
+        normalized = dict(value)
+        if normalized.get("quantity_is_range") is not True:
+            normalized["quantity_max"] = None
+        if normalized.get("is_purchasable") is False:
+            normalized["is_required"] = False
+            if normalized.get("requirement_type", "required") == "required":
+                normalized["requirement_type"] = "optional"
+        raw_text = str(normalized.get("raw_text", ""))
+        canonical_item = str(normalized.get("canonical_item", ""))
+        corrected = False
+        detected_item = _canonical_item_from_raw(raw_text)
+        if (
+            detected_item is not None
+            and canonical_item != detected_item
+            and canonical_item != "non_purchasable"
+        ):
+            canonical_item = detected_item
+            normalized["canonical_item"] = detected_item
+            corrected = True
+        attributes = normalized.get("attributes")
+        if isinstance(attributes, Mapping):
+            corrected_attributes, attributes_changed = (
+                _correct_attribute_fields(
+                    raw_text,
+                    canonical_item,
+                    attributes,
+                )
+            )
+            normalized["attributes"] = corrected_attributes
+            corrected = corrected or attributes_changed
+        confidence = normalized.get("extraction_confidence")
+        if (
+            corrected
+            and confidence is not None
+            and Decimal(str(confidence)) > CORRECTED_EXTRACTION_CONFIDENCE
+        ):
+            normalized["extraction_confidence"] = (
+                CORRECTED_EXTRACTION_CONFIDENCE
+            )
+        return normalized
 
     @model_validator(mode="after")
     def validate_requirement_consistency(self) -> Self:

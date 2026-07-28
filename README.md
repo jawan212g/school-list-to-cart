@@ -37,6 +37,14 @@ copy .streamlit\secrets.toml.example .streamlit\secrets.toml
 streamlit run app.py
 ```
 
+The default configuration uses OpenAI with `OPENAI_API_KEY` and the app's existing
+text-and-vision model. To use an OpenAI-compatible provider such as IU's Kelley GPT
+API, configure `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_TEXT_MODEL` in Streamlit
+secrets or environment variables. Configure `LLM_VISION_MODEL` only when that
+endpoint has a verified image-capable model; otherwise the app rejects JPG and PNG
+lists with a clear message. Streamlit secrets take precedence over environment
+variables.
+
 ## Tests
 
 ```

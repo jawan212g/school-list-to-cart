@@ -19,6 +19,7 @@ from agent.decisions import Decision, DecisionLog
 from agent.extract import (
     apply_extraction_security_filters,
     extract_document,
+    require_extracted_requirements,
 )
 from agent.gate import (
     ApprovalBatch,
@@ -377,11 +378,13 @@ def run_pipeline(
     completed_envelopes: dict[str, ExtractionEnvelope] = {}
 
     def extract_one(list_input: ListInput) -> ExtractionEnvelope:
-        return extractor(
-            list_input.source,
-            child_id=list_input.child_id,
-            mime_type=list_input.mime_type,
-            client=model_client,
+        return require_extracted_requirements(
+            extractor(
+                list_input.source,
+                child_id=list_input.child_id,
+                mime_type=list_input.mime_type,
+                client=model_client,
+            )
         )
 
     futures = {}

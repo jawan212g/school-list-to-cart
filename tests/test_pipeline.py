@@ -165,6 +165,88 @@ def test_confirmed_extraction_boundary_builds_without_reextracting() -> None:
     assert result.proposed_cart.plan.lines[0].sku == "PENCILS-2"
 
 
+def test_nonpurchasable_reminder_cannot_make_plan_incomplete() -> None:
+    """FR-10: an incorrectly required reminder stays outside plan completeness."""
+
+    def extractor(
+        source: str,
+        *,
+        child_id: str,
+        mime_type: str | None,
+        client: object,
+    ) -> ExtractionEnvelope:
+        del source, mime_type, client
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="pencils",
+                    child_id=child_id,
+                    raw_text="1 pencil",
+                    canonical_item="pencils",
+                    quantity=1,
+                    extraction_confidence=1.0,
+                ),
+                Requirement.model_validate(
+                    {
+                        "req_id": "label-reminder",
+                        "child_id": child_id,
+                        "raw_text": "Reminder: label everything.",
+                        "canonical_item": "non_purchasable",
+                        "quantity": 1,
+                        "is_required": True,
+                        "is_purchasable": False,
+                        "requirement_type": "required",
+                        "extraction_confidence": 0.0,
+                    }
+                ),
+            )
+        )
+
+    store = Store(
+        store_id="S",
+        name="Store",
+        distance_miles=1.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=0,
+        delivery_minimum=0,
+        tax_applies=False,
+    )
+    offer = Offer(
+        sku="PENCIL",
+        store_id="S",
+        brand="Generic",
+        title="One pencil",
+        category="pencils",
+        pack_size=1,
+        unit_price=100,
+        pack_price=100,
+        stock_qty=1,
+        is_returnable=True,
+        attributes={},
+    )
+    result = run_pipeline(
+        PipelineSession(
+            session_id="display-only-reminder",
+            children=("child",),
+            budget_total=500,
+            fulfillment_pref="pickup",
+            tax_basis_points=0,
+        ),
+        [ListInput(child_id="child", source="list")],
+        stores=[store],
+        offers=[offer],
+        suitability_judge=StructuredSuitabilityJudge(),
+        extractor=extractor,
+    )
+
+    display_only = result.normalization.display_only_requirements
+    assert len(display_only) == 1
+    assert display_only[0].source.is_required is False
+    assert result.proposed_cart.is_complete is True
+    assert result.approval_flags == ()
+
+
 def test_pipeline_reports_required_item_with_no_equivalent() -> None:
     """E-12: a missing required catalog category returns an approval flag."""
 
@@ -295,6 +377,86 @@ def test_e33_one_failed_extraction_does_not_block_the_other_list() -> None:
     assert tuple(result.extractions) == ("good",)
     assert result.extraction_failures == {
         "bad": "ValueError: Unreadable document"
+    }
+
+
+def test_e33_empty_extraction_is_explicit_and_other_list_continues() -> None:
+    """E-33: a silent empty model response fails only its source list."""
+
+    def empty_for_one_child(
+        source: str,
+        *,
+        child_id: str,
+        mime_type: str | None,
+        client: object,
+    ) -> ExtractionEnvelope:
+        del mime_type, client
+        if source == "empty-result":
+            return ExtractionEnvelope(requirements=())
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="pencils",
+                    child_id=child_id,
+                    raw_text="1 pencil",
+                    canonical_item="pencils",
+                    quantity=1,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+
+    store = Store(
+        store_id="S",
+        name="Store",
+        distance_miles=1.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=0,
+        delivery_minimum=0,
+        tax_applies=False,
+    )
+    offer = Offer(
+        sku="PENCIL",
+        store_id="S",
+        brand="Generic",
+        title="Pencil",
+        category="pencils",
+        pack_size=1,
+        unit_price=100,
+        pack_price=100,
+        stock_qty=1,
+        is_returnable=True,
+        attributes={},
+    )
+
+    result = run_pipeline(
+        PipelineSession(
+            session_id="empty-extraction",
+            children=("good", "missing"),
+            budget_total=1_000,
+            fulfillment_pref="pickup",
+            tax_basis_points=0,
+        ),
+        (
+            ListInput(child_id="good", source="one pencil"),
+            ListInput(child_id="missing", source="empty-result"),
+        ),
+        stores=(store,),
+        offers=(offer,),
+        suitability_judge=StructuredSuitabilityJudge(),
+        extractor=empty_for_one_child,
+    )
+
+    assert result.proposed_cart.landed_cost == 100
+    assert tuple(result.extractions) == ("good",)
+    assert result.extraction_failures == {
+        "missing": (
+            "EmptyExtractionError: No supply requirements were found in this "
+            "non-empty list. This list was not included in the plan. Check "
+            "that the correct file or pasted list was provided, then try "
+            "again."
+        )
     }
 
 

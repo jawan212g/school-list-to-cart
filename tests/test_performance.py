@@ -18,7 +18,7 @@ from agent.rules import (
     MODEL_CALL_MAX_RETRIES,
     MODEL_CALL_TIMEOUT_SECONDS,
 )
-from agent.schema import ExtractionEnvelope
+from agent.schema import ExtractionEnvelope, Requirement
 from data.loader import Offer, Store
 
 
@@ -77,9 +77,23 @@ def test_two_list_extractions_run_concurrently() -> None:
         mime_type: str | None,
         client: object | None,
     ) -> ExtractionEnvelope:
-        del source, child_id, mime_type, client
+        del source, mime_type, client
         barrier.wait(timeout=1)
-        return ExtractionEnvelope(requirements=())
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="display-note",
+                    child_id=child_id,
+                    raw_text="Label all supplies",
+                    canonical_item="non_purchasable",
+                    quantity=1,
+                    is_required=False,
+                    is_purchasable=False,
+                    requirement_type="optional",
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
 
     progress_events: list[tuple[str, int, int]] = []
     result = run_pipeline(

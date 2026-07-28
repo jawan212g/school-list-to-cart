@@ -18,6 +18,121 @@ from agent.extract import _apply_security_filters
 from agent.schema import ExtractionEnvelope, Requirement
 
 
+def test_small_model_prompt_requires_calibrated_evidence_only_output() -> None:
+    """FR-09/FR-12/FR-13: the prompt addresses observed small-model defects."""
+
+    instruction = extraction.SYSTEM_INSTRUCTION
+
+    assert "1.0 only when" in instruction
+    assert "0.65 or lower" in instruction
+    assert "Any invented field, lost text, or guessed value" in instruction
+    assert "quantity_max=null" in instruction
+    assert "no mechanical pencils" in instruction
+    assert 'requirement_type="donation"' in instruction
+    assert 'neither character="#2" nor size="standard"' in instruction
+    assert "never stop or truncate raw_text at a quote" in instruction
+
+
+def test_raw_text_with_inch_quote_round_trips_without_truncation() -> None:
+    """FR-07: quote characters remain intact through schema JSON validation."""
+
+    raw_text = '1 plastic pencil box (approx. 8" — no oversized boxes)'
+    requirement = Requirement(
+        req_id="pencil-box",
+        child_id="grade2",
+        raw_text=raw_text,
+        canonical_item="pencil_boxes",
+        quantity=1,
+        exclusions=("oversized boxes",),
+        attributes={"material": "plastic", "size": "approx. 8 inches"},
+        extraction_confidence=1.0,
+    )
+
+    round_tripped = Requirement.model_validate_json(
+        requirement.model_dump_json()
+    )
+
+    assert round_tripped.raw_text == raw_text
+
+
+def test_source_line_repairs_model_truncation_at_inch_quote() -> None:
+    """FR-07/BR-11: source-proven text repair lowers confidence for review."""
+
+    complete = '1 plastic pencil box (approx. 8" — no oversized boxes)'
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="pencil-box",
+                child_id="grade2",
+                raw_text="1 plastic pencil box (approx. 8",
+                canonical_item="pencil_boxes",
+                quantity=1,
+                extraction_confidence=0.9,
+            ),
+        )
+    )
+
+    restored = extraction._restore_complete_raw_text(
+        envelope,
+        extraction._text_content(complete),
+    )
+
+    assert restored.requirements[0].raw_text == complete
+    assert restored.requirements[0].extraction_confidence == 0.69
+
+
+def test_source_line_restores_html_encoded_quote_and_changed_dash() -> None:
+    """FR-07: transport-altered punctuation is restored from the source."""
+
+    complete = '1 plastic pencil box (approx. 8" — no oversized boxes)'
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="pencil-box",
+                child_id="grade2",
+                raw_text=(
+                    "1 plastic pencil box "
+                    "(approx. 8&#34; � no oversized boxes)"
+                ),
+                canonical_item="pencil_boxes",
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    restored = extraction._restore_complete_raw_text(
+        envelope,
+        extraction._text_content(complete),
+    )
+
+    assert restored.requirements[0].raw_text == complete
+    assert restored.requirements[0].extraction_confidence == 0.69
+
+
+def test_nonempty_document_with_empty_model_result_fails_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E-33: a schema-valid empty response cannot silently erase a list."""
+
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: ExtractionEnvelope(requirements=()),
+    )
+
+    with pytest.raises(
+        extraction.EmptyExtractionError,
+        match="No supply requirements were found",
+    ):
+        extraction.extract_document(
+            "12 pencils",
+            child_id="child",
+            mime_type="text/plain",
+            client=object(),  # type: ignore[arg-type]
+        )
+
+
 def _requirement(
     *,
     req_id: str,
