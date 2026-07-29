@@ -55,6 +55,32 @@ def test_organize_extractions_sorts_and_preserves_source_text() -> None:
     assert all(row.review_status == "pending" for row in rows)
 
 
+def test_unnamed_no_substitutes_routes_to_production_review() -> None:
+    """BR-69: a strict generic line asks the parent instead of inventing a brand."""
+
+    requirement = Requirement(
+        req_id="tissues",
+        child_id="child-1",
+        raw_text="Tissues, no substitutes",
+        canonical_item="tissues",
+        quantity=1,
+        extraction_confidence=1.0,
+    )
+
+    (row,) = organize_extractions(
+        {"child-1": ExtractionEnvelope(requirements=(requirement,))}
+    )
+    (group,) = review_flag_groups((row,))
+
+    assert row.brand is None
+    assert row.brand_required is False
+    assert row.issue_codes == ("brand_requirement_without_named_brand",)
+    assert group.messages == (
+        "The list says not to substitute, but it does not name a brand. "
+        "Check what must stay exact.",
+    )
+
+
 def test_required_rows_must_be_confirmed_before_planning() -> None:
     rows = organize_extractions(
         {

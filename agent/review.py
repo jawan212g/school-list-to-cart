@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from agent.rules import (
+    AMBIGUOUS_UNNAMED_BRAND_REQUIREMENT_ISSUE,
     CLEAR_EXTRACTION_CONFIDENCE,
     CONFIDENCE_FLOOR,
     ITEM_FULFILLMENT_PREFERENCE_DEFAULT,
@@ -13,6 +14,7 @@ from agent.rules import (
     PACKAGE_QUANTITY_STATE_DEFAULT,
     STANDARD_CONTAINER_CONTENT_COUNTS,
     STANDARD_PACK_COUNTS,
+    unnamed_brand_requirement_needs_review,
 )
 from agent.schema import (
     ExtractionEnvelope,
@@ -184,6 +186,11 @@ def review_issue_explanations(
             messages.append(
                 "The item name could not be interpreted clearly."
             )
+        elif issue == AMBIGUOUS_UNNAMED_BRAND_REQUIREMENT_ISSUE:
+            messages.append(
+                "The list says not to substitute, but it does not name a "
+                "brand. Check what must stay exact."
+            )
         else:
             messages.append(
                 issue.replace("_", " ").capitalize() + "."
@@ -343,6 +350,8 @@ def _review_issues(requirement: Requirement) -> tuple[str, ...]:
             issues.append("ambiguous_package_size")
     if requirement.is_purchasable and not requirement.canonical_item:
         issues.append("ambiguous_item")
+    if unnamed_brand_requirement_needs_review(requirement.raw_text):
+        issues.append(AMBIGUOUS_UNNAMED_BRAND_REQUIREMENT_ISSUE)
     if (
         requirement.condition is not None
         and requirement.condition_applies is None

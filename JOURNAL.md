@@ -2873,3 +2873,248 @@ extra rerun.
 Deploy and click Budget to Shopping preferences once while watching the button
 row; the Shopping-preferences screen should paint directly with “Continue to
 the lists.”
+
+## 2026-07-29 - Lists rationale in parent language
+
+### Objective
+
+Replace internal merge rationale with concise parent-facing explanations while
+leaving requirement preselection logic unchanged.
+
+### Work completed
+
+- Replaced the deterministic quantity, identity, and parent-override rationale
+  templates in `agent/rules.py` with the approved wording.
+- Amended BR-55 so plausible annual maximums remain internal BR-40 inputs and
+  are no longer shown as figures or described as working limits.
+- Removed the threshold information icon and its popover from the Lists
+  conflict card.
+- Removed the redundant processing caption inside “More detail · same product
+  or different products.”
+- Used each requirement's actual source section and stated value in the
+  different-product rationale.
+- Expanded abbreviated source section names to the unique full label from the
+  parent-confirmed document selection in quantity options.
+- Added a production-renderer test covering all six rationale outcomes, the
+  absence of the removed disclosures, and full section labels.
+
+### Decisions made
+
+- BR-40 and BR-47 calculations and thresholds were not changed.
+- The plausible annual maximum table remains unsourced prototype data. It
+  should eventually be grounded in real district list data before use beyond
+  this demonstration.
+
+### Files changed
+
+- `agent/rules.py`
+- `agent/requirement_merge.py`
+- `app.py`
+- `tests/test_app.py`
+- `tests/test_requirement_merge.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused Lists and merge suite: 140 passed.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 366 passed, 1 skipped in
+  3.28 seconds.
+
+### Problems or limitations
+
+- Streamlit remains unavailable on this Windows ARM64 machine, so the updated
+  copy and removed popover still require deployed visual confirmation.
+
+### Recommended next step
+
+Deploy the Lists conflict card and verify the full section labels and concise
+rationale at desktop and phone widths.
+
+## 2026-07-29 - Personalize screen vertical navigation and density
+
+### Objective
+
+Replace the long Personalize page with a summary and per-student vertical
+navigation while keeping all counts and decisions on the existing BR-52 state.
+
+### Work completed
+
+- Added a left-side Summary/student tab strip with decision-count badges only
+  for students who still need a choice.
+- Rebuilt Summary around the remaining decision count, existing default
+  controls, one per-student count table, and item-name jump controls.
+- Reordered each student view so decisions come first, settled cart items use
+  one compact line, unavailable items share one collapsed section and one
+  document source control, and missing items remain student-scoped.
+- Routed item jumps through one callback that stores both the destination
+  student tab and a stable item scroll target.
+- Applied the BR-46 display transform to unavailable, uninterpreted, skipped,
+  and teacher-note source text while retaining exact source evidence in the
+  source popover.
+- Reworded source scope and skipped-content labels, and omitted page wording
+  for a one-page typed list.
+- Added BR-65 plus a deterministic extraction safeguard so an explicit
+  “Three-Ring Binder with Dividers” line retains both purchasable items when a
+  model omits one component.
+
+### Decisions made
+
+- The compound-line safeguard does not make another model call. A component
+  restored deterministically is marked below full confidence so the parent can
+  verify it.
+- Settled cart rows retain editing controls behind “More detail,” but do not
+  repeat source controls.
+- Exact source popovers continue to show the unchanged audit line, including
+  original delimiters; ordinary parent-facing item labels do not.
+
+### Files changed
+
+- `agent/rules.py`
+- `agent/extract.py`
+- `app.py`
+- `tests/test_extract.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused extraction, review, and app suite: 162 passed.
+- Full suite before the final typed-list wording assertion: 368 passed, 1
+  skipped.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 machine, so the responsive
+  visual layout still needs confirmation in the deployed environment.
+
+### Recommended next step
+
+Deploy the Personalize screen and visually confirm the left navigation with
+ten students at desktop and phone widths.
+
+## 2026-07-29 - Deterministic brand and item recognition
+
+### Objective
+
+Make audited brand-only and known item-synonym lines resolve reproducibly from
+their source wording without depending on a model-proposed category or brand.
+
+### Work completed
+
+- Added BR-66's deterministic brand table, including common plural and
+  punctuation variants, with canonical brand spelling and implied item type.
+- Added BR-67's item-synonym table for single-subject notebooks and loose
+  notebook paper rulings, including graph paper.
+- Added a production-boundary recovery pass for recognized source lines omitted
+  entirely by model output.
+- Changed schema validation so deterministic source recognition overrides a
+  missing or conflicting model category and cleans malformed known-brand hints.
+- Added BR-68 source-derived none, preferred, and required brand strength.
+- Added BR-69 review routing for strict no-substitute wording that names no
+  brand.
+- Added BR-70 reconciliation so a recognized purchasable requirement removes a
+  spurious unavailable record for the same item and source while preserving a
+  genuinely different unavailable component.
+- Narrowed graph-paper recognition so a graph-paper composition notebook
+  remains a composition notebook with a graph ruling.
+
+### Decisions made
+
+- Graph paper uses the existing `notebook_paper` canonical item with
+  `ruling="graph"`. The seeded catalog has no exact graph-paper offer.
+- Preferred brands remain presentation-only in this block. `brand_hint` was
+  deliberately not added to `UnitNeed`, aggregation, matching, or optimization.
+- All configured brand-to-item mappings were explicitly supplied by the
+  requested audit; none were guessed.
+
+### Files changed
+
+- `agent/rules.py`
+- `agent/schema.py`
+- `agent/extract.py`
+- `agent/review.py`
+- `tests/test_extract.py`
+- `tests/test_review.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused extraction, review, normalization, and matching suite: 113 passed.
+- Focused extraction, review, and requirement-merge regression suite after
+  narrowing graph-paper recognition: 124 passed.
+- Kelley GPT API `gpt-oss-20b` live audit: the same 15 lines produced identical
+  canonical items and brand states in two final-code runs.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 398 passed, 1 skipped in
+  2.96 seconds.
+
+### Problems or limitations
+
+- Preferred brands still do not affect matching because `brand_hint` is not
+  carried into `UnitNeed`; this was explicitly deferred.
+- Loose graph paper is representable, but the seeded catalog does not contain
+  an exact graph-paper offer.
+- Streamlit remains unavailable on this Windows ARM64 machine, so its existing
+  real-AppTest skip remains.
+
+### Recommended next step
+
+Decide the separate matching policy for preferred brands before carrying
+`brand_hint` into aggregation or offer ranking.
+
+## 2026-07-29 - Setup budget defaults scale by covered students
+
+### Objective
+
+Replace the flat Setup budget starting value with an exact per-student value
+that accounts for classroom size without overwriting a parent's edits.
+
+### Work completed
+
+- Added BR-71's $75-per-covered-student starting value as integer cents.
+- Updated the production Budget screen so a combined starting value uses all
+  covered students and each individual starting value uses its own entry count.
+- Kept untouched starting values synchronized with roster and classroom-size
+  changes.
+- Preserved parent-entered values, including values carried across budget-mode
+  switches.
+- Added production-renderer coverage for one student, two students, a
+  10-student classroom, a mixed session, and recalculation before versus after
+  a parent edit.
+- Added a real Streamlit lifecycle test for classroom-size changes; it remains
+  part of the existing x86-only test module.
+
+### Decisions made
+
+- A displayed starting value remains application-controlled until its widget
+  change callback records a parent edit. After that, roster changes do not
+  overwrite it.
+- BR-33 was not changed. Shared classroom supplies avoid multiplication only
+  when extraction marks them `shared`; unspecified scope still uses the
+  conservative per-student multiplier.
+
+### Files changed
+
+- `agent/rules.py`
+- `app.py`
+- `tests/test_app.py`
+- `tests/test_streamlit_lifecycle.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused app and aggregation suite: 110 passed, 1 skipped.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 400 passed, 1 skipped in
+  3.04 seconds.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 machine, so its real
+  lifecycle module remains skipped locally and runs in the deployed x86
+  environment.
+- BR-33 depends on extraction assigning `supply_scope="shared"` correctly;
+  unspecified classroom items still scale by class size.
+
+### Recommended next step
+
+Visually verify a classroom entry in the deployed app, including changing its
+size before and after editing the budget.

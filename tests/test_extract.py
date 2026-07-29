@@ -17,6 +17,7 @@ from openai import (
 import agent.extract as extraction
 from agent.extract import _apply_security_filters
 from agent.schema import (
+    CatalogUnavailableItem,
     DocumentSection,
     DocumentStructureEnvelope,
     ExtractionEnvelope,
@@ -75,6 +76,348 @@ def test_understood_out_of_catalog_item_keeps_source_evidence() -> None:
     assert unavailable.source_line == "1 roll Scotch tape"
     assert unavailable.section_name == "5th Grade"
     assert unavailable.page_number == 2
+
+
+def test_compound_binder_and_dividers_line_keeps_both_requirements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-65: production extraction repairs an omitted explicit component."""
+
+    source_line = "1 Three-Ring Binder with Dividers"
+    model_output = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="dividers",
+                child_id="model-child",
+                raw_text=source_line,
+                canonical_item="dividers",
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: model_output,
+    )
+
+    result = extraction.extract_document(
+        source_line,
+        child_id="child-1",
+        mime_type="text/plain",
+        client=object(),  # type: ignore[arg-type]
+    )
+
+    assert tuple(
+        requirement.canonical_item
+        for requirement in result.requirements
+    ) == ("dividers", "binders")
+    assert all(
+        requirement.raw_text == source_line
+        for requirement in result.requirements
+    )
+    binder = next(
+        requirement
+        for requirement in result.requirements
+        if requirement.canonical_item == "binders"
+    )
+    assert binder.attributes.connector == "three-ring"
+    assert result.manual_review_required is True
+
+
+@pytest.mark.parametrize(
+    ("source_line", "expected_items", "expected_brand"),
+    (
+        ("1 box of Kleenex", ("tissues",), "Kleenex"),
+        ("2 packs of Post-Its", ("sticky_notes",), "Post-It"),
+        ("Ziplocs, gallon size", ("zip_top_bags",), "Ziploc"),
+        ("Clorox wipes", ("disinfecting_wipes",), "Clorox"),
+        ("Sharpies, black", ("permanent_markers",), "Sharpie"),
+        ("Crayola crayons, 24 count", ("crayons",), "Crayola"),
+        ("Expo markers", ("dry_erase_markers",), "Expo"),
+        ("Purell", ("hand_sanitizer",), "Purell"),
+        ("Elmer's glue sticks", ("glue_sticks",), "Elmer's"),
+        ("Ticonderoga #2", ("pencils",), "Ticonderoga"),
+        ("Fiskars, pointed tip", ("scissors",), "Fiskars"),
+        ("5 Single-Subject Notebooks", ("spiral_notebooks",), None),
+        (
+            "1 Package of College-Ruled Paper",
+            ("notebook_paper",),
+            None,
+        ),
+        ("1 Pack of Graph Paper", ("notebook_paper",), None),
+        (
+            "1 Three-Ring Binder with Dividers",
+            ("binders", "dividers"),
+            None,
+        ),
+    ),
+)
+def test_production_extraction_restores_deterministically_recognized_items(
+    monkeypatch: pytest.MonkeyPatch,
+    source_line: str,
+    expected_items: tuple[str, ...],
+    expected_brand: str | None,
+) -> None:
+    """BR-65â€“BR-67: production extraction does not need a model category."""
+
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: ExtractionEnvelope(requirements=()),
+    )
+
+    result = extraction.extract_document(
+        source_line,
+        child_id="child-1",
+        mime_type="text/plain",
+        client=object(),  # type: ignore[arg-type]
+    )
+
+    assert tuple(
+        requirement.canonical_item
+        for requirement in result.requirements
+    ) == expected_items
+    assert {
+        requirement.brand_hint
+        for requirement in result.requirements
+    } == {expected_brand}
+    assert all(
+        requirement.brand_lock is None
+        for requirement in result.requirements
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_line", "expected_item"),
+    (
+        ("1 Wide-Ruled Paper", "notebook_paper"),
+        ("1 Loose-Leaf Paper", "notebook_paper"),
+    ),
+)
+def test_production_extraction_restores_paper_synonyms(
+    monkeypatch: pytest.MonkeyPatch,
+    source_line: str,
+    expected_item: str,
+) -> None:
+    """BR-67: additional paper wording reaches the production category."""
+
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: ExtractionEnvelope(requirements=()),
+    )
+
+    result = extraction.extract_document(
+        source_line,
+        child_id="child-1",
+        mime_type="text/plain",
+        client=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.requirements[0].canonical_item == expected_item
+
+
+@pytest.mark.parametrize(
+    ("source_line", "expected_item", "expected_hint", "expected_lock"),
+    (
+        ("24 pencils", "pencils", None, None),
+        (
+            "24 Ticonderoga pencils",
+            "pencils",
+            "Ticonderoga",
+            None,
+        ),
+        (
+            "24 pencils (Ticonderoga preferred)",
+            "pencils",
+            "Ticonderoga",
+            None,
+        ),
+        (
+            "Glue sticks (Elmer's)",
+            "glue_sticks",
+            "Elmer's",
+            None,
+        ),
+        (
+            "Scissors - pointed tip (Fiskars are best)",
+            "scissors",
+            "Fiskars",
+            None,
+        ),
+        (
+            "24 Ticonderoga pencils, brand required",
+            "pencils",
+            "Ticonderoga",
+            "Ticonderoga",
+        ),
+        ("Tissues, no substitutes", "tissues", None, None),
+    ),
+)
+def test_production_extraction_derives_brand_strength_from_source(
+    monkeypatch: pytest.MonkeyPatch,
+    source_line: str,
+    expected_item: str,
+    expected_hint: str | None,
+    expected_lock: str | None,
+) -> None:
+    """BR-68/BR-69: source wording wins over an absent model brand."""
+
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: ExtractionEnvelope(requirements=()),
+    )
+
+    result = extraction.extract_document(
+        source_line,
+        child_id="child-1",
+        mime_type="text/plain",
+        client=object(),  # type: ignore[arg-type]
+    )
+    requirement = result.requirements[0]
+
+    assert requirement.canonical_item == expected_item
+    assert requirement.brand_hint == expected_hint
+    assert requirement.brand_lock == expected_lock
+
+
+def test_production_extraction_removes_spurious_unavailable_brand_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-70: one recognized line cannot be bought and unavailable at once."""
+
+    source_line = "Ticonderoga #2"
+    model_output = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="pencils",
+                child_id="model-child",
+                raw_text=source_line,
+                canonical_item="pencils",
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        ),
+        catalog_unavailable_items=(
+            CatalogUnavailableItem(
+                child_id="model-child",
+                item_name=source_line,
+                source_line=source_line,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: model_output,
+    )
+
+    result = extraction.extract_document(
+        source_line,
+        child_id="child-1",
+        mime_type="text/plain",
+        client=object(),  # type: ignore[arg-type]
+    )
+
+    assert tuple(
+        requirement.canonical_item
+        for requirement in result.requirements
+    ) == ("pencils",)
+    assert result.catalog_unavailable_items == ()
+
+
+@pytest.mark.parametrize(
+    ("source_line", "model_item", "expected_item"),
+    (
+        ("Expo markers", "markers", "dry_erase_markers"),
+        (
+            "5 Single-Subject Notebooks",
+            "composition_notebooks",
+            "spiral_notebooks",
+        ),
+    ),
+)
+def test_production_extraction_overrides_wrong_model_category(
+    monkeypatch: pytest.MonkeyPatch,
+    source_line: str,
+    model_item: str,
+    expected_item: str,
+) -> None:
+    """BR-66/BR-67: deterministic identity overrides a wrong model category."""
+
+    model_output = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="wrong-category",
+                child_id="model-child",
+                raw_text=source_line,
+                canonical_item=model_item,
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: model_output,
+    )
+
+    result = extraction.extract_document(
+        source_line,
+        child_id="child-1",
+        mime_type="text/plain",
+        client=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.requirements[0].canonical_item == expected_item
+
+
+def test_unavailable_reconciliation_keeps_distinct_compound_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-70: recognizing one component does not hide a different gap."""
+
+    source_line = "1 box of Kleenex and 1 calculator"
+    model_output = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="tissues",
+                child_id="model-child",
+                raw_text=source_line,
+                canonical_item="tissues",
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        ),
+        catalog_unavailable_items=(
+            CatalogUnavailableItem(
+                child_id="model-child",
+                item_name="calculator",
+                source_line=source_line,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: model_output,
+    )
+
+    result = extraction.extract_document(
+        source_line,
+        child_id="child-1",
+        mime_type="text/plain",
+        client=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.requirements[0].canonical_item == "tissues"
+    assert tuple(
+        item.item_name for item in result.catalog_unavailable_items
+    ) == ("calculator",)
 
 
 def test_last_name_bag_branches_are_grouped_deterministically() -> None:
@@ -379,7 +722,7 @@ def test_nonempty_document_with_empty_model_result_fails_extraction(
         match="No supply requirements were found",
     ):
         extraction.extract_document(
-            "12 pencils",
+            "1 scientific calculator",
             child_id="child",
             mime_type="text/plain",
             client=object(),  # type: ignore[arg-type]

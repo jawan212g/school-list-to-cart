@@ -41,6 +41,9 @@ OPTIONAL_ITEM_HEADROOM_BYPASSED_WITHOUT_BUDGET = True
 # so optional items may be offered after required coverage is complete.
 MINIMUM_BUDGET_CENTS = 1  # E-37: zero and negative budgets are invalid.
 MAX_CHILDREN_PER_SESSION = 10  # E-38: reasonable live-session child limit.
+STARTING_BUDGET_CENTS_PER_STUDENT = 7_500
+# BR-71: untouched Setup budget fields start at $75 per covered student;
+# classroom entries use their stated student count.
 
 OVERAGE_PERCENT = 50  # BR-06: relative package overage ceiling.
 PERCENT_DENOMINATOR = 100  # BR-06: integer percentage scale.
@@ -183,9 +186,9 @@ PLAUSIBLE_ANNUAL_MAXIMUM_FALLBACK = 12
 # BR-40: combine same-student source quantities when their sum is no more
 # than the canonical item's plausible annual maximum; otherwise select the
 # largest single source amount. Unlisted school supplies use the fallback.
-# These values are unsourced working assumptions created for the prototype,
-# not published student-consumption statistics. They require review before
-# any use beyond this demonstration.
+# These values are unsourced prototype inputs, not published
+# student-consumption statistics. They require review before any use beyond
+# this demonstration.
 
 SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS = 30
 # BR-41 amended: source controls keep document labels within a typical table
@@ -232,16 +235,6 @@ SINGLE_INSTANCE_REQUIREMENT_ITEMS = frozenset(
         "water_bottles",
     }
 )
-SINGLE_INSTANCE_ITEM_LABELS = {
-    "backpacks": "backpack",
-    "headphones": "set of headphones",
-    "pencil_boxes": "pencil box",
-    "pencil_pouches": "pencil pouch",
-    "pencil_sharpeners": "pencil sharpener",
-    "rulers": "ruler",
-    "scissors": "pair of scissors",
-    "water_bottles": "water bottle",
-}
 # BR-47: a reusable single-instance item defaults to the largest quantity from
 # one source, never the sum of repeated mentions. The combined choice remains
 # available to the parent.
@@ -253,12 +246,12 @@ PERSONALIZE_DECISION_DETAIL_LABEL = "More detail"
 
 PERSONALIZE_SUMMARY_COLUMNS = (
     "Student",
-    "Items in cart",
-    "Need a decision",
+    "In cart",
+    "Needs a decision",
     "Excluded",
 )
-# BR-52: Personalize begins with one student summary. The summary counts and
-# each student's ordered item section consume the same deterministic state.
+# BR-52 amended: Personalize summary and vertical student tabs consume one
+# deterministic per-student state for cart, decision, and exclusion counts.
 
 PERSONALIZE_SOURCE_CONTROL_REASONS = frozenset(
     {"assumption", "uncertain"}
@@ -275,13 +268,9 @@ PACKAGE_EXTRAS_AVOID_LABEL = (
 # BR-54: package preference uses parent intent, and is not shown for reusable
 # single-instance goods where a pack-size preference has no useful meaning.
 
-QUANTITY_WORKING_ASSUMPTION_HELP = (
-    "This number helps the app decide whether to preselect the combined "
-    "quantity. It is the app's own working assumption, not a published "
-    "statistic. You can choose another option or enter your own quantity."
-)
-# BR-55: any plausible-maximum figure is disclosed as an unsourced working
-# assumption beside the rationale that uses it.
+# BR-55 amended: plausible annual maximums remain internal inputs to the
+# deterministic BR-40 preselection. Parent-facing rationale never surfaces
+# the threshold values or describes them as working limits.
 
 EXCLUDED_REQUIREMENT_QUANTITY = 0
 MINIMUM_ACTIVE_REQUIREMENT_QUANTITY = 1
@@ -349,6 +338,13 @@ PASTED_SOURCE_LINES_PER_PAGE = 48
 # BR-64: pasted text is retained byte-for-byte as session provenance and
 # deterministically paginated into text-backed source pages without wrapping
 # or rewriting its lines. Every downstream source control uses those pages.
+
+EXPLICIT_COMPOUND_REQUIREMENT_COMPONENTS = {
+    "three-ring binder with dividers": ("binders", "dividers"),
+}
+# BR-65: an explicit source line naming two separately purchasable catalog
+# items produces one source-backed requirement for each item. A deterministic
+# completeness repair is marked for parent review rather than hidden.
 
 PARENT_BOOLEAN_ATTRIBUTE_LABELS = {
     "sharpened": {
@@ -628,31 +624,27 @@ def quantity_preselection_rationale(
     canonical_item: str,
     item_name: str,
     combined_quantity: int,
-    plausible_annual_maximum: int,
+    largest_quantity: int,
     selected_action: Literal["total", "largest"],
 ) -> str:
     """Generate BR-40/BR-47/BR-48's parent-facing quantity rationale."""
 
     if canonical_item in SINGLE_INSTANCE_REQUIREMENT_ITEMS:
-        single_item_name = SINGLE_INSTANCE_ITEM_LABELS[canonical_item]
         return (
-            f"This app treats a {single_item_name} as one reusable item. "
-            "When more than one part of a list mentions it, the largest "
-            "single amount is preselected instead of adding the amounts."
+            f"{item_name.capitalize()} are usually reused rather than used "
+            "up, so we've preselected one instead of adding both requests "
+            "together."
         )
     if selected_action == "total":
         return (
-            f"{item_name.capitalize()} are used up over time, so requests in "
-            "separate parts of the list may both apply. Added together, they "
-            f"come to {combined_quantity}. This app's working limit for "
-            f"combining this item is {plausible_annual_maximum} for one "
-            "student, so the combined amount is preselected."
+            f"Both parts of the list ask for {item_name}, and {item_name} "
+            "get used up, so we've added the amounts together. Change it if "
+            "that's more than you need."
         )
     return (
-        f"Adding the amounts would make {combined_quantity} {item_name}, above "
-        f"this app's working limit of {plausible_annual_maximum} for one "
-        "student. The lines may repeat the same need, so the largest single "
-        "amount is preselected."
+        f"Adding both amounts would come to {combined_quantity} {item_name}, "
+        "which looked like more than one student would need, so we've "
+        f"preselected the larger single request of {largest_quantity} instead."
     )
 
 
@@ -677,59 +669,39 @@ def product_identity_rationale(
         "different_products",
         "ambiguous",
     ],
-    differences: Sequence[tuple[str, Sequence[str]]],
+    item_name: str,
+    source_values: Sequence[tuple[str, str]],
 ) -> str:
     """Generate BR-43/BR-45's default product-identity rationale."""
 
-    if conflict_type == "ambiguous":
-        return (
-            "The descriptions use different wording, but the list does not "
-            "name a product detail that settles whether they are the same "
-            "product."
-        )
-    if conflict_type == "quantity_only":
-        return (
-            "The wording points to the same product; no stated detail requires "
-            "separate products."
-        )
-    for field_name, values in differences:
-        normalized_values = tuple(
-            value.replace("-", " ") for value in values
-        )
-        if field_name == "ruling" and {
-            value.casefold() for value in normalized_values
-        } == {"graph", "lined"}:
-            return (
-                "Graph paper and lined paper are used for different work, "
-                "so the list may be asking for both products."
-            )
-        if len(normalized_values) >= 2:
-            joined_values = (
-                f"{normalized_values[0]} and {normalized_values[1]}"
-                if len(normalized_values) == 2
-                else ", ".join(normalized_values[:-1])
-                + f", and {normalized_values[-1]}"
-            )
-            detail_name = PARENT_ATTRIBUTE_NAMES.get(
-                field_name,
-                field_name.replace("_", " "),
-            )
-            return (
-                f"The list names {joined_values} for {detail_name}. Those "
-                "details suggest the list may be asking for different "
-                "products."
-            )
+    if conflict_type != "different_products":
+        return "Both lines describe the same thing, just worded differently."
+    first_source, first_value = source_values[0]
+    second_source, second_value = source_values[1]
     return (
-        "The two lines name different product details, which suggests the "
-        "list may be asking for different products."
+        f"{first_source} asks for {first_value} and {second_source} asks for "
+        f"{second_value}. Those are different {item_name}, so we've kept them "
+        "separate."
     )
 
 
 def same_product_override_rationale(
     source_name: str,
-    retained_details: Sequence[str],
 ) -> str:
     """Explain BR-44's source-backed result after a parent override."""
+
+    return (
+        "You said these are the same product, so we've used the description "
+        f"from {source_name}. Change it below if you'd rather use the other "
+        "one."
+    )
+
+
+def personalize_same_product_override_rationale(
+    source_name: str,
+    retained_details: Sequence[str],
+) -> str:
+    """Keep BR-49's existing Personalize outcome outside Lists copy."""
 
     detail_text = (
         "; ".join(retained_details)
@@ -895,6 +867,56 @@ CANONICAL_ITEM_ALIASES = {
     "pencil_case": "pencil_pouches",
 }  # Deterministic canonical-name aliases for FR-11.
 
+DETERMINISTIC_BRAND_ITEMS = {
+    "kleenex": ("Kleenex", "tissues"),
+    "kleenexes": ("Kleenex", "tissues"),
+    "post it": ("Post-It", "sticky_notes"),
+    "post its": ("Post-It", "sticky_notes"),
+    "ziploc": ("Ziploc", "zip_top_bags"),
+    "ziplocs": ("Ziploc", "zip_top_bags"),
+    "clorox": ("Clorox", "disinfecting_wipes"),
+    "sharpie": ("Sharpie", "permanent_markers"),
+    "sharpies": ("Sharpie", "permanent_markers"),
+    "expo": ("Expo", "dry_erase_markers"),
+    "crayola": ("Crayola", "crayons"),
+    "purell": ("Purell", "hand_sanitizer"),
+    "elmer": ("Elmer's", "glue_sticks"),
+    "elmers": ("Elmer's", "glue_sticks"),
+    "ticonderoga": ("Ticonderoga", "pencils"),
+    "fiskars": ("Fiskars", "scissors"),
+}
+# BR-66: recognized brand wording deterministically supplies canonical brand
+# spelling and the product category implied by that brand.
+
+DETERMINISTIC_ITEM_SYNONYMS = {
+    "single subject notebook": "spiral_notebooks",
+    "single subject notebooks": "spiral_notebooks",
+    "college ruled paper": "notebook_paper",
+    "wide ruled paper": "notebook_paper",
+    "loose leaf paper": "notebook_paper",
+    "graph paper": "notebook_paper",
+}
+# BR-67: these source phrases override a missing or conflicting model category.
+# Loose graph paper uses notebook_paper with its graph ruling attribute; the
+# seeded catalog currently has no exact graph-paper offer.
+
+BRAND_STRENGTH_NONE = "none"
+BRAND_STRENGTH_PREFERRED = "preferred"
+BRAND_STRENGTH_REQUIRED = "required"
+# BR-68: brand strength is derived from source wording after deterministic
+# brand recognition, never from the model's chosen brand-strength field.
+
+AMBIGUOUS_UNNAMED_BRAND_REQUIREMENT_ISSUE = (
+    "brand_requirement_without_named_brand"
+)
+# BR-69: explicit no-substitute wording without a recognized brand is a
+# parent-review question, not an invented brand lock.
+
+CATALOG_UNAVAILABLE_RECONCILES_WITH_ACCEPTED_REQUIREMENT = True
+# BR-70: a model-proposed unavailable record is removed when deterministic
+# recognition proves that its named item is an accepted requirement from the
+# same source line. Distinct unavailable components remain visible.
+
 STANDARD_PACK_COUNTS = {
     "pencils": 12,
     "glue_sticks": 4,
@@ -955,6 +977,152 @@ CATEGORY_IMPLIED_ATTRIBUTE_TERMS = {
 }  # BR-13: redundant free-text attributes must not split identical needs.
 
 
+def _recognition_text(value: str) -> str:
+    """Normalize punctuation without losing source-word boundaries."""
+
+    return " ".join(
+        re.sub(r"[^a-z0-9]+", " ", value.casefold()).split()
+    )
+
+
+def recognized_brand_from_source(
+    source_line: str,
+) -> tuple[str, str] | None:
+    """Return BR-66's canonical brand and implied category from source text."""
+
+    source = f" {_recognition_text(source_line)} "
+    matches = tuple(
+        (alias, identity)
+        for alias, identity in DETERMINISTIC_BRAND_ITEMS.items()
+        if f" {alias} " in source
+    )
+    if not matches:
+        return None
+    _, identity = max(matches, key=lambda match: len(match[0]))
+    return identity
+
+
+def canonical_items_from_source(source_line: str) -> tuple[str, ...]:
+    """Return deterministic BR-65/BR-66/BR-67 source categories."""
+
+    source = _recognition_text(source_line)
+    compound = tuple(
+        categories
+        for phrase, categories in EXPLICIT_COMPOUND_REQUIREMENT_COMPONENTS.items()
+        if _recognition_text(phrase) in source
+    )
+    if compound:
+        return tuple(dict.fromkeys(compound[0]))
+
+    synonym_matches = tuple(
+        (phrase, canonical_item)
+        for phrase, canonical_item in DETERMINISTIC_ITEM_SYNONYMS.items()
+        if f" {phrase} " in f" {source} "
+        and not (
+            phrase == "graph paper"
+            and any(
+                notebook_phrase in source
+                for notebook_phrase in (
+                    "composition book",
+                    "composition notebook",
+                    "spiral notebook",
+                )
+            )
+        )
+    )
+    if synonym_matches:
+        _, canonical_item = max(
+            synonym_matches,
+            key=lambda match: len(match[0]),
+        )
+        return (canonical_item,)
+
+    brand = recognized_brand_from_source(source_line)
+    if brand is not None:
+        return (brand[1],)
+
+    aliases = {
+        **{category: category for category in ALLOWED_CATEGORIES},
+        **CANONICAL_ITEM_ALIASES,
+    }
+    alias_matches = tuple(
+        (alias, canonical_item)
+        for alias, canonical_item in aliases.items()
+        if (
+            f" {_recognition_text(alias)} "
+            in f" {source} "
+        )
+    )
+    if not alias_matches:
+        return ()
+    _, canonical_item = max(
+        alias_matches,
+        key=lambda match: len(_recognition_text(match[0])),
+    )
+    return (canonical_item,)
+
+
+def canonical_item_from_source(source_line: str) -> str | None:
+    """Return one deterministic source category when the line is not compound."""
+
+    items = canonical_items_from_source(source_line)
+    return items[0] if len(items) == 1 else None
+
+
+def source_brand_strength(
+    source_line: str,
+) -> Literal["none", "preferred", "required"]:
+    """Classify BR-68 from source evidence and a recognized brand."""
+
+    if recognized_brand_from_source(source_line) is None:
+        return BRAND_STRENGTH_NONE
+    source = source_line.casefold()
+    if (
+        any(signal in source for signal in EXACT_BRAND_REQUIREMENT_SIGNALS)
+        or "must be" in source
+    ):
+        return BRAND_STRENGTH_REQUIRED
+    return BRAND_STRENGTH_PREFERRED
+
+
+def unnamed_brand_requirement_needs_review(source_line: str) -> bool:
+    """Return BR-69's unresolved strict-brand condition."""
+
+    source = source_line.casefold()
+    return (
+        recognized_brand_from_source(source_line) is None
+        and (
+            any(
+                signal in source
+                for signal in EXACT_BRAND_REQUIREMENT_SIGNALS
+            )
+            or "must be" in source
+        )
+    )
+
+
+def deterministic_source_quantity(source_line: str) -> int:
+    """Read a leading quantity for a deterministically restored source item."""
+
+    match = re.match(r"^\s*(\d+)\b", source_line)
+    return int(match.group(1)) if match is not None else 1
+
+
+def deterministic_source_unit(
+    source_line: str,
+) -> Literal["each", "pack", "box", "ream"]:
+    """Read the explicitly named source container without package arithmetic."""
+
+    source = _recognition_text(source_line)
+    if re.match(r"^\d+\s+(?:box|boxes)\b", source):
+        return "box"
+    if re.match(r"^\d+\s+(?:pack|packs|package|packages)\b", source):
+        return "pack"
+    if re.match(r"^\d+\s+(?:ream|reams)\b", source):
+        return "ream"
+    return "each"
+
+
 def explicit_package_count(source_line: str) -> int | None:
     """Return only a package count stated in a BR-23 source form."""
 
@@ -969,12 +1137,18 @@ def required_brand_from_source(
     source_line: str,
     proposed_brand: str | None,
 ) -> str | None:
-    """Apply BR-24 to a model-proposed brand lock."""
+    """Apply BR-24/BR-68 using deterministic source recognition first."""
 
-    if proposed_brand is None or not proposed_brand.strip():
+    recognized = recognized_brand_from_source(source_line)
+    if recognized is not None:
+        brand = recognized[0]
+    elif proposed_brand is not None and proposed_brand.strip():
+        brand = proposed_brand.strip()
+        if _recognition_text(brand) not in _recognition_text(source_line):
+            return None
+    else:
         return None
     source = source_line.casefold()
-    brand = proposed_brand.strip()
     brand_text = brand.casefold()
     explicit = any(
         signal in source for signal in EXACT_BRAND_REQUIREMENT_SIGNALS
@@ -998,12 +1172,27 @@ def preferred_brand_from_source(
     source_line: str,
     proposed_brand: str | None,
 ) -> str | None:
-    """Retain a BR-24 preferred brand without turning it into a lock."""
+    """Return BR-24/BR-68's source-backed brand without creating a lock."""
 
+    recognized = recognized_brand_from_source(source_line)
+    if recognized is not None:
+        return recognized[0]
     source = source_line.casefold()
     if not any(signal in source for signal in BRAND_PREFERENCE_SIGNALS):
-        return None
-    if proposed_brand is not None and proposed_brand.strip():
+        if (
+            proposed_brand is None
+            or not proposed_brand.strip()
+            or _recognition_text(proposed_brand)
+            not in _recognition_text(source_line)
+        ):
+            return None
+        return proposed_brand.strip()
+    if (
+        proposed_brand is not None
+        and proposed_brand.strip()
+        and _recognition_text(proposed_brand)
+        in _recognition_text(source_line)
+    ):
         return proposed_brand.strip()
     match = BRAND_PREFERENCE_PATTERN.search(source_line)
     if match is None:

@@ -10,15 +10,14 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from agent.rules import (
-    ALLOWED_CATEGORIES,
     AMBIGUOUS_PRODUCT_DESCRIPTORS,
-    CANONICAL_ITEM_ALIASES,
     CORRECTED_EXTRACTION_CONFIDENCE,
     ITEM_FULFILLMENT_PREFERENCE_DEFAULT,
     NONPAGINATED_SOURCE_PAGE,
     NOTEBOOK_REGULAR_RULING,
     PACKAGE_QUANTITY_STATE_DEFAULT,
     QUANTITY_ONLY_SOURCE_LINE_PATTERN,
+    canonical_item_from_source,
     explicit_package_count,
     preferred_brand_from_source,
     required_brand_from_source,
@@ -73,20 +72,7 @@ def _main_item_text(raw_text: str) -> str:
 
 
 def _canonical_item_from_raw(raw_text: str) -> str | None:
-    normalized_raw = f"_{_evidence_text(_main_item_text(raw_text)).replace(' ', '_')}_"
-    aliases = {
-        **{category: category for category in ALLOWED_CATEGORIES},
-        **CANONICAL_ITEM_ALIASES,
-    }
-    candidates = [
-        (len(alias), canonical_item)
-        for alias, canonical_item in aliases.items()
-        if f"_{_evidence_text(alias).replace(' ', '_')}_" in normalized_raw
-    ]
-    if not candidates:
-        return None
-    candidates.sort(reverse=True)
-    return candidates[0][1]
+    return canonical_item_from_source(_main_item_text(raw_text))
 
 
 def _correct_attribute_fields(
@@ -401,26 +387,25 @@ class Requirement(BaseModel):
                 _evidence_text(raw_text),
             )
         )
-        proposed_brand = (
-            str(normalized["brand_lock"])
-            if normalized.get("brand_lock") is not None
-            else None
+        proposed_brand = next(
+            (
+                str(value)
+                for value in (
+                    normalized.get("brand_lock"),
+                    normalized.get("brand_hint"),
+                )
+                if value is not None and str(value).strip()
+            ),
+            None,
         )
-        brand_hint = (
-            str(normalized["brand_hint"])
-            if normalized.get("brand_hint") is not None
-            else preferred_brand_from_source(raw_text, proposed_brand)
+        brand_hint = preferred_brand_from_source(
+            raw_text,
+            proposed_brand,
         )
-        if (
-            brand_hint is None
-            and proposed_brand is not None
-            and proposed_brand.casefold() in raw_text.casefold()
-        ):
-            brand_hint = proposed_brand
         normalized["brand_hint"] = brand_hint
         normalized["brand_lock"] = required_brand_from_source(
             raw_text,
-            proposed_brand,
+            brand_hint or proposed_brand,
         )
         canonical_item = str(normalized.get("canonical_item", ""))
         corrected = False

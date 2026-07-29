@@ -31,7 +31,6 @@ from agent.rules import (
     SYSTEM_DECISION_RECONCILED_BRAND,
     SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
     SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX,
-    PARENT_ATTRIBUTE_NAMES,
     parent_attribute_value,
     product_identity_rationale,
     requirement_quantity_default,
@@ -194,25 +193,45 @@ def _descriptions_need_identity_question(
     return len(set(descriptions)) > 1
 
 
-def _decision_differences(
+def _decision_source_values(
     decision: RequirementItemDecision,
-) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """Return source-backed product differences for deterministic rationale."""
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Return two source/value pairs for deterministic parent rationale."""
 
-    return tuple(
-        (
-            constraint.field_name,
-            tuple(
-                parent_attribute_value(
-                    constraint.field_name,
-                    option.value,
-                )
-                for option in constraint.options
-                if option.value not in (None, "", (), [])
-            ),
+    for constraint in decision.constraint_interrupts:
+        options = tuple(
+            option
+            for option in constraint.options
+            if option.value not in (None, "", (), [])
         )
-        for constraint in decision.constraint_interrupts
-        if constraint.field_name != "ambiguous_descriptor"
+        if (
+            constraint.field_name == "ambiguous_descriptor"
+            or len(options) < 2
+        ):
+            continue
+        pairs: list[tuple[str, str]] = []
+        for index, option in enumerate(options[:2], start=1):
+            source = option.sources[0] if option.sources else None
+            source_name = (
+                source.section_name
+                if source is not None and source.section_name
+                else source.document_name
+                if source is not None and source.document_name
+                else f"Source {index}"
+            )
+            pairs.append(
+                (
+                    source_name,
+                    parent_attribute_value(
+                        constraint.field_name,
+                        option.value,
+                    ),
+                )
+            )
+        return pairs[0], pairs[1]
+    return (
+        ("Source 1", "one version"),
+        ("Source 2", "another version"),
     )
 
 
@@ -259,7 +278,8 @@ def resolve_item_decision_state(
         rationale=(
             product_identity_rationale(
                 decision.conflict_type,
-                _decision_differences(decision),
+                decision.canonical_item.replace("_", " "),
+                _decision_source_values(decision),
             )
             if is_preselected
             else None
@@ -287,15 +307,7 @@ def same_product_override_notice(
         if source is not None and source.document_name
         else "the first list section"
     )
-    details = tuple(
-        f"{PARENT_ATTRIBUTE_NAMES.get(field_name, field_name.replace('_', ' '))}: "
-        f"{parent_attribute_value(field_name, value)}"
-        for field_name, value in retained.attributes.model_dump(
-            exclude_none=True
-        ).items()
-        if field_name in PRODUCT_DEFINING_ATTRIBUTE_FIELDS
-    )
-    return same_product_override_rationale(source_name, details)
+    return same_product_override_rationale(source_name)
 
 
 def item_decisions(

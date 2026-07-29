@@ -413,8 +413,8 @@ def test_intake_widget_defaults_live_outside_streamlit_widget_state() -> None:
         app.DEFAULT_BUDGET_TEXT,
     )
     assert temporary_key == app.intake_widget_key("combined_budget_text")
-    assert state["combined_budget_text"] == "150.00"
-    assert state[temporary_key] == "150.00"
+    assert state["combined_budget_text"] == "75.00"
+    assert state[temporary_key] == "75.00"
 
     state.pop(temporary_key)
     app.mount_intake_widget_value(
@@ -422,8 +422,8 @@ def test_intake_widget_defaults_live_outside_streamlit_widget_state() -> None:
         "combined_budget_text",
         "",
     )
-    assert state["combined_budget_text"] == "150.00"
-    assert state[temporary_key] == "150.00"
+    assert state["combined_budget_text"] == "75.00"
+    assert state[temporary_key] == "75.00"
 
 
 def test_backward_intake_navigation_preserves_all_section_values() -> None:
@@ -745,6 +745,7 @@ def test_budget_screen_buttons_render_before_callback_validation() -> None:
             "budget_mode_label": "One combined budget",
             "previous_budget_mode_label": "One combined budget",
             "combined_budget_text": "0",
+            "intake_widget_touched::combined_budget_text": True,
             "budget_validation_attempted": False,
             "budget_validation_errors": {},
         }
@@ -1225,7 +1226,7 @@ def test_budget_step_renders_one_field_for_every_intake_entry() -> None:
         app.intake_widget_key("budget_1"),
     )
     assert BudgetStreamlit.session_state["budget_0"] == "75.00"
-    assert BudgetStreamlit.session_state["budget_1"] == "75.00"
+    assert BudgetStreamlit.session_state["budget_1"] == "1,500.00"
     assert "Maya budget" in rendered_fields[0][0]
     assert "Ms. Rivera budget" in rendered_fields[1][0]
     assert app.budget_entry_fields(
@@ -1237,6 +1238,209 @@ def test_budget_step_renders_one_field_for_every_intake_entry() -> None:
         (0, "child-1", "Maya", "budget_0"),
         (1, "child-2", "Ms. Rivera", "budget_1"),
     )
+
+
+def test_budget_screen_scales_untouched_starting_values_by_student_count() -> None:
+    """BR-71: the production Budget screen scales only untouched defaults."""
+
+    class ButtonColumn:
+        @staticmethod
+        def button(*args: object, **kwargs: object) -> bool:
+            del args, kwargs
+            return False
+
+    class BudgetStreamlit:
+        session_state: dict[str, object] = {}
+
+        @staticmethod
+        def caption(value: str) -> None:
+            del value
+
+        @classmethod
+        def radio(
+            cls,
+            label: str,
+            options: tuple[str, ...],
+            **kwargs: object,
+        ) -> str:
+            del label, options, kwargs
+            return str(cls.session_state["budget_mode_label"])
+
+        @classmethod
+        def text_input(
+            cls,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            return str(cls.session_state[key])
+
+        @staticmethod
+        def info(value: str) -> None:
+            del value
+
+        @staticmethod
+        def error(value: str) -> None:
+            del value
+
+        @staticmethod
+        def columns(
+            specification: object,
+        ) -> tuple[ButtonColumn, ButtonColumn]:
+            assert specification == 2
+            return ButtonColumn(), ButtonColumn()
+
+    combined_cases = (
+        (
+            {
+                "child_count": 1,
+                "entity_type_0": "Student",
+                "child_label_0": "Maya",
+                "child_grade_0": "Grade 2",
+            },
+            "75.00",
+        ),
+        (
+            {
+                "child_count": 2,
+                "entity_type_0": "Student",
+                "child_label_0": "Maya",
+                "child_grade_0": "Grade 2",
+                "entity_type_1": "Student",
+                "child_label_1": "Noah",
+                "child_grade_1": "Grade 5",
+            },
+            "150.00",
+        ),
+        (
+            {
+                "child_count": 1,
+                "entity_type_0": "Classroom",
+                "child_label_0": "Ms. Rivera",
+                "child_grade_0": "Grade 3",
+                "student_count_0": 10,
+            },
+            "750.00",
+        ),
+        (
+            {
+                "child_count": 2,
+                "entity_type_0": "Student",
+                "child_label_0": "Maya",
+                "child_grade_0": "Grade 2",
+                "entity_type_1": "Classroom",
+                "child_label_1": "Ms. Rivera",
+                "child_grade_1": "Grade 3",
+                "student_count_1": 10,
+            },
+            "825.00",
+        ),
+    )
+    for entry_state, expected in combined_cases:
+        BudgetStreamlit.session_state = {
+            **entry_state,
+            "budget_mode_label": "One combined budget",
+            "previous_budget_mode_label": "One combined budget",
+            "budget_validation_attempted": False,
+            "budget_validation_errors": {},
+        }
+        app._render_budget_step(BudgetStreamlit())
+        assert (
+            BudgetStreamlit.session_state["combined_budget_text"] == expected
+        )
+
+    BudgetStreamlit.session_state = {
+        **combined_cases[-1][0],
+        "budget_mode_label": "A budget for each student or classroom",
+        "previous_budget_mode_label": (
+            "A budget for each student or classroom"
+        ),
+        "budget_validation_attempted": False,
+        "budget_validation_errors": {},
+    }
+    app._render_budget_step(BudgetStreamlit())
+    assert BudgetStreamlit.session_state["budget_0"] == "75.00"
+    assert BudgetStreamlit.session_state["budget_1"] == "750.00"
+
+
+def test_budget_screen_recalculates_defaults_but_preserves_parent_edits() -> None:
+    """BR-71: roster edits cannot overwrite a parent-controlled budget."""
+
+    class ButtonColumn:
+        @staticmethod
+        def button(*args: object, **kwargs: object) -> bool:
+            del args, kwargs
+            return False
+
+    class BudgetStreamlit:
+        session_state: dict[str, object] = {
+            "child_count": 1,
+            "entity_type_0": "Classroom",
+            "child_label_0": "Ms. Rivera",
+            "child_grade_0": "Grade 3",
+            "student_count_0": 10,
+            "budget_mode_label": "One combined budget",
+            "previous_budget_mode_label": "One combined budget",
+            "budget_validation_attempted": False,
+            "budget_validation_errors": {},
+        }
+
+        @staticmethod
+        def caption(value: str) -> None:
+            del value
+
+        @classmethod
+        def radio(
+            cls,
+            label: str,
+            options: tuple[str, ...],
+            **kwargs: object,
+        ) -> str:
+            del label, options, kwargs
+            return str(cls.session_state["budget_mode_label"])
+
+        @classmethod
+        def text_input(
+            cls,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            return str(cls.session_state[key])
+
+        @staticmethod
+        def info(value: str) -> None:
+            del value
+
+        @staticmethod
+        def error(value: str) -> None:
+            del value
+
+        @staticmethod
+        def columns(
+            specification: object,
+        ) -> tuple[ButtonColumn, ButtonColumn]:
+            assert specification == 2
+            return ButtonColumn(), ButtonColumn()
+
+    app._render_budget_step(BudgetStreamlit())
+    assert BudgetStreamlit.session_state["combined_budget_text"] == "750.00"
+
+    BudgetStreamlit.session_state["student_count_0"] = 12
+    app._render_budget_step(BudgetStreamlit())
+    assert BudgetStreamlit.session_state["combined_budget_text"] == "900.00"
+
+    BudgetStreamlit.session_state["combined_budget_text"] = "800.00"
+    BudgetStreamlit.session_state[
+        "intake_widget_touched::combined_budget_text"
+    ] = True
+    BudgetStreamlit.session_state["student_count_0"] = 15
+    app._render_budget_step(BudgetStreamlit())
+    assert BudgetStreamlit.session_state["combined_budget_text"] == "800.00"
 
 
 def test_no_budget_intake_has_no_ceiling_or_allocations() -> None:
@@ -2460,7 +2664,10 @@ def test_personalize_screen_groups_sources_in_student_summary() -> None:
     assert "data_editor" not in source
     assert "Personalize what goes in your cart" in source
     assert "_personalize_source_summary" in source
-    assert "Items for your cart" in source
+    assert "Decisions needed" in source
+    assert "In your cart" in source
+    assert "Not available from these stores" not in source
+    assert "_render_personalize_unavailable" in source
     assert "Products and prices come next" in source
     assert "Confirm the readings" not in source
     assert "Notes from the teacher" in source
@@ -2504,6 +2711,7 @@ def test_personalize_summary_and_marked_section_share_production_state() -> None
         def __init__(self) -> None:
             self.session_state: dict[str, object] = {}
             self.rows: list[list[list[str]]] = []
+            self.messages: list[str] = []
 
         def columns(self, spec: object) -> tuple[SummaryColumn, ...]:
             count = len(spec)  # type: ignore[arg-type]
@@ -2516,6 +2724,20 @@ def test_personalize_summary_and_marked_section_share_production_state() -> None
 
         def rerun(self) -> None:
             raise AssertionError("No summary control was clicked")
+
+        def warning(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def success(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def markdown(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del kwargs
+            self.messages.append(label)
+            return False
 
     rows = (
         SupplyItemReview(
@@ -2562,7 +2784,11 @@ def test_personalize_summary_and_marked_section_share_production_state() -> None
     )
     recorder = SummaryRecorder()
 
-    app._render_personalize_summary(recorder, sections)
+    app._render_personalize_summary(
+        recorder,
+        sections,
+        {row.review_id: row for row in rows},
+    )
 
     section = sections[0]
     assert section.item_count == 2
@@ -2571,7 +2797,175 @@ def test_personalize_summary_and_marked_section_share_production_state() -> None
     assert section.anchored_flag_groups[0].row_ids == ("flagged",)
     assert recorder.rows[1][0] == ["Jawan"]
     assert recorder.rows[1][1:4] == [["2"], ["1"], ["1"]]
-    assert recorder.rows[1][5] == ["Approve defaults"]
+    assert recorder.rows[1][4] == ["Approve defaults"]
+
+
+def test_personalize_screen_tabs_counts_and_item_jump_use_live_state() -> None:
+    """BR-52: the production screen shares counts and navigates to one item."""
+
+    rows = (
+        SupplyItemReview(
+            review_id="clear",
+            req_id="clear",
+            child_id="child-1",
+            item_name="pencils",
+            required_quantity=12,
+            source_text="12 pencils",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="flagged",
+            req_id="flagged",
+            child_id="child-1",
+            item_name="notebook_paper",
+            required_quantity=1,
+            unit="pack",
+            package_quantity_state="assumed",
+            package_size=150,
+            issue_codes=("ambiguous_package_size",),
+            source_text="1 pack notebook paper",
+            confidence=0.8,
+        ),
+        SupplyItemReview(
+            review_id="owned",
+            req_id="owned",
+            child_id="child-1",
+            item_name="backpacks",
+            required_quantity=0,
+            already_owned=True,
+            source_text="1 backpack",
+            confidence=1.0,
+        ),
+    )
+    (group,) = review_flag_groups(rows)
+    state: dict[str, object] = {
+        "intake": {
+            "children": (
+                {"child_id": "child-1", "label": "Jawan"},
+            )
+        },
+        "extracted_lists": {"child-1": ExtractionEnvelope()},
+        "review_items": rows,
+        "parent_added_review_items": (),
+        "extraction_errors": {},
+        "list_inputs": (),
+        "personalize_active_tab": "summary",
+    }
+
+    class ReviewScreenRecorder:
+        def __init__(self, clicked_label: str | None = None) -> None:
+            self.session_state = state
+            self.clicked_label = clicked_label
+            self.clicked = False
+            self.messages: list[str] = []
+            self.writes: list[str] = []
+            self.buttons: list[str] = []
+            self.tab_labels: tuple[str, ...] = ()
+
+        def __enter__(self) -> "ReviewScreenRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def columns(
+            self,
+            spec: object,
+            **kwargs: object,
+        ) -> tuple["ReviewScreenRecorder", ...]:
+            del kwargs
+            count = spec if isinstance(spec, int) else len(spec)
+            return tuple(self for _ in range(count))
+
+        def container(self, **kwargs: object) -> "ReviewScreenRecorder":
+            del kwargs
+            return self
+
+        def header(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def subheader(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def caption(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del kwargs
+            self.messages.append(str(value))
+
+        def warning(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def success(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def error(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def write(self, value: object) -> None:
+            self.writes.append(str(value))
+
+        def radio(
+            self,
+            label: str,
+            options: tuple[str, ...],
+            *,
+            key: str,
+            format_func: object | None = None,
+            **kwargs: object,
+        ) -> str:
+            del kwargs
+            if format_func is not None:
+                self.tab_labels = tuple(
+                    format_func(option) for option in options  # type: ignore[operator]
+                )
+            self.session_state.setdefault(key, options[0])
+            return str(self.session_state[key])
+
+        def button(
+            self,
+            label: str,
+            *,
+            on_click: object | None = None,
+            args: tuple[object, ...] = (),
+            **kwargs: object,
+        ) -> bool:
+            del kwargs
+            self.buttons.append(label)
+            should_click = (
+                not self.clicked and label == self.clicked_label
+            )
+            if should_click:
+                self.clicked = True
+                if on_click is not None:
+                    on_click(*args)  # type: ignore[operator]
+            return should_click
+
+        def rerun(self) -> None:
+            raise AssertionError("The item jump uses a callback, not rerun")
+
+    initial = ReviewScreenRecorder(clicked_label="Notebook paper")
+    app._render_review(initial)
+
+    assert initial.tab_labels == ("Summary", "Jawan  (1)")
+    assert initial.writes[:3] == ["2", "1", "1"]
+    assert "1 decision remains." in initial.messages
+    assert state["personalize_active_tab"] == "child-1"
+    assert state["personalize_scroll_target"] == (
+        app._personalize_item_anchor("flagged")
+    )
+
+    state["personalize_active_tab"] = "summary"
+    state.pop("personalize_scroll_target", None)
+    state[f"{group.group_id}:confirmed"] = True
+    resolved = ReviewScreenRecorder()
+    app._render_review(resolved)
+
+    assert resolved.tab_labels == ("Summary", "Jawan")
+    assert resolved.writes[:3] == ["2", "0", "1"]
+    assert "Nothing left to decide." in resolved.messages
+    assert "Notebook paper" not in resolved.buttons
 
 
 def test_personalize_source_summary_extracts_scope_and_deduplicates_gaps() -> None:
@@ -2585,6 +2979,12 @@ def test_personalize_source_summary_extracts_scope_and_deduplicates_gaps() -> No
             self.errors: list[str] = []
             self.expanders: list[str] = []
 
+        def __enter__(self) -> "SourceRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
         def caption(self, value: object) -> None:
             self.captions.append(str(value))
 
@@ -2597,9 +2997,10 @@ def test_personalize_source_summary_extracts_scope_and_deduplicates_gaps() -> No
         def warning(self, value: object) -> None:
             self.writes.append(str(value))
 
-        def expander(self, label: str) -> object:
+        def expander(self, label: str, **kwargs: object) -> object:
+            del kwargs
             self.expanders.append(label)
-            raise AssertionError("Excluded-section detail must not render")
+            return self
 
     envelope = ExtractionEnvelope(
         document_selection=DocumentSelection(
@@ -2612,7 +3013,7 @@ def test_personalize_source_summary_extracts_scope_and_deduplicates_gaps() -> No
             CatalogUnavailableItem(
                 child_id="child-1",
                 item_name="tape",
-                source_line="1 roll Scotch tape",
+                source_line="1 | Scotch tape",
                 document_name="district.pdf",
                 section_name="5th Grade",
                 page_number=3,
@@ -2620,7 +3021,7 @@ def test_personalize_source_summary_extracts_scope_and_deduplicates_gaps() -> No
             CatalogUnavailableItem(
                 child_id="child-1",
                 item_name="tape",
-                source_line="1 roll Scotch tape",
+                source_line="1 | Scotch tape",
                 document_name="district.pdf",
                 section_name="Highly Capable",
                 page_number=3,
@@ -2634,14 +3035,84 @@ def test_personalize_source_summary_extracts_scope_and_deduplicates_gaps() -> No
         "child-1",
         envelope,
     )
+    app._render_personalize_unavailable(
+        recorder,
+        "child-1",
+        envelope,
+        (),
+    )
 
-    assert recorder.captions == ["Extracted Sections: 5th Grade"]
-    assert recorder.errors == [
-        "Items these stores do not carry. You will need to source these "
-        "yourself."
+    assert recorder.captions == ["List section: 5th Grade"]
+    assert recorder.errors == []
+    assert recorder.writes == ["1 Scotch tape"]
+    assert recorder.expanders == [
+        "Not available from these stores (1)"
     ]
-    assert recorder.writes == ["1 roll Scotch tape"]
-    assert recorder.expanders == []
+
+
+def test_personalize_typed_list_omits_page_count_and_names_skipped_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-52/BR-64: the production summary uses useful typed-list wording."""
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {
+                "list_inputs": (
+                    ListInput(
+                        child_id="child-1",
+                        source="1 pencil\nBring on Monday",
+                        mime_type="text/plain",
+                        document_name="Kevin's supply list",
+                        source_page_texts=(
+                            "1 pencil\nBring on Monday",
+                        ),
+                    ),
+                )
+            }
+            self.captions: list[str] = []
+            self.markdowns: list[str] = []
+            self.writes: list[str] = []
+
+        def caption(self, value: object) -> None:
+            self.captions.append(str(value))
+
+        def markdown(self, value: object) -> None:
+            self.markdowns.append(str(value))
+
+        def write(self, value: object) -> None:
+            self.writes.append(str(value))
+
+        def warning(self, value: object) -> None:
+            self.writes.append(str(value))
+
+    monkeypatch.setattr(
+        app,
+        "_render_source_reference",
+        lambda *args, **kwargs: None,
+    )
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="pencil",
+                child_id="child-1",
+                raw_text="1 pencil",
+                canonical_item="pencils",
+                quantity=1,
+                source_document="Kevin's supply list",
+                source_page=1,
+                extraction_confidence=1.0,
+            ),
+        ),
+        skipped_lines=("Teacher direction: Bring on Monday",),
+    )
+    recorder = Recorder()
+
+    app._personalize_source_summary(recorder, "child-1", envelope)
+
+    assert all("page" not in caption.casefold() for caption in recorder.captions)
+    assert recorder.markdowns == ["**List lines not added to the cart (1)**"]
+    assert recorder.writes == ["Teacher direction: Bring on Monday"]
 
 
 def test_one_uploaded_document_builds_inputs_for_every_child() -> None:
@@ -3028,9 +3499,9 @@ def test_merge_quick_choices_and_quantity_field_share_one_state() -> None:
     ) == largest_label
     assert all("selected" not in label for label in choices)
     assert app.quantity_preselection_rationale(interrupt) == (
-        "Adding the amounts would make 84 pencils, above this app's working "
-        "limit of 48 for one student. The lines may repeat the same need, so "
-        "the largest single amount is preselected."
+        "Adding both amounts would come to 84 pencils, which looked like more "
+        "than one student would need, so we've preselected the larger single "
+        "request of 48 instead."
     )
     state: dict[str, object] = {"choice": total_label, "quantity": 48}
 
@@ -3098,9 +3569,8 @@ def test_durable_quantity_default_keeps_combined_choice_without_selecting_it() -
         choices,
     ) == "**1** — Quantity from 5th Grade"
     assert app.quantity_preselection_rationale(interrupt) == (
-        "This app treats a backpack as one reusable item. When more than one "
-        "part of a list mentions it, the largest single amount is preselected "
-        "instead of adding the amounts."
+        "Backpacks are usually reused rather than used up, so we've "
+        "preselected one instead of adding both requests together."
     )
 
 
@@ -3153,10 +3623,9 @@ def test_type_a_quantity_choices_do_not_repeat_source_text() -> None:
     )
     assert all("tissues" not in label for label in labels)
     assert app.quantity_preselection_rationale(interrupt) == (
-        "Tissues are used up over time, so requests in separate parts of the "
-        "list may both apply. Added together, they come to 5. This app's "
-        "working limit for combining this item is 6 for one student, so the "
-        "combined amount is preselected."
+        "Both parts of the list ask for tissues, and tissues get used up, so "
+        "we've added the amounts together. Change it if that's more than you "
+        "need."
     )
     assert app.visible_quantity_preselection_rationale(
         interrupt,
@@ -3467,8 +3936,8 @@ def test_identity_rationale_radio_and_quantity_share_resolved_state() -> None:
     assert resolved.selected_identity == "different"
     assert resolved.quantity_control == "variants"
     assert resolved.rationale == (
-        "The list names cardboard and plastic for material. Those details "
-        "suggest the list may be asking for different products."
+        "5th Grade asks for cardboard and Highly Capable Class asks for "
+        "plastic. Those are different folders, so we've kept them separate."
     )
 
     state[identity_key] = "The same product"
@@ -3634,6 +4103,276 @@ def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> N
         "4",
         "Regular composition books",
     ]
+
+
+def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> None:
+    """BR-40/BR-45/BR-47/BR-55: test the production Lists renderer."""
+
+    requirements = (
+        Requirement(
+            req_id="backpack-grade",
+            child_id="child-1",
+            raw_text="1 backpack",
+            canonical_item="backpacks",
+            quantity=1,
+            source_document="district.pdf",
+            source_section="5th",
+            source_page=2,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="backpack-capable",
+            child_id="child-1",
+            raw_text="1 book bag",
+            canonical_item="backpacks",
+            quantity=1,
+            source_document="district.pdf",
+            source_section="Highly Capable",
+            source_page=3,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="tissues-grade",
+            child_id="child-1",
+            raw_text="4 boxes of tissues",
+            canonical_item="tissues",
+            quantity=4,
+            source_document="district.pdf",
+            source_section="5th",
+            source_page=2,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="tissues-capable",
+            child_id="child-1",
+            raw_text="1 box of tissues",
+            canonical_item="tissues",
+            quantity=1,
+            source_document="district.pdf",
+            source_section="Highly Capable",
+            source_page=3,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="pencils-grade",
+            child_id="child-1",
+            raw_text="48 pencils",
+            canonical_item="pencils",
+            quantity=48,
+            source_document="district.pdf",
+            source_section="5th",
+            source_page=2,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="pencils-capable",
+            child_id="child-1",
+            raw_text="36 pencils",
+            canonical_item="pencils",
+            quantity=36,
+            source_document="district.pdf",
+            source_section="Highly Capable",
+            source_page=3,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="folders-grade",
+            child_id="child-1",
+            raw_text="3 cardboard folders",
+            canonical_item="folders",
+            quantity=3,
+            attributes={"material": "cardboard"},
+            source_document="district.pdf",
+            source_section="5th Grade",
+            source_page=2,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="folders-capable",
+            child_id="child-1",
+            raw_text="2 plastic folders",
+            canonical_item="folders",
+            quantity=2,
+            attributes={"material": "plastic"},
+            source_document="district.pdf",
+            source_section="Highly Capable Class",
+            source_page=3,
+            extraction_confidence=1.0,
+        ),
+    )
+    envelope = ExtractionEnvelope(
+        requirements=requirements,
+        document_selection=DocumentSelection(
+            selected_section_ids=("grade-five", "highly-capable"),
+            selected_section_labels=(
+                "5th Grade",
+                "Highly Capable Class",
+            ),
+        ),
+    )
+    _, result = consolidate_extractions({"child-1": envelope})
+
+    class ListsMergeRecorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {
+                "requirement_merge_result": result,
+                "unmerged_extracted_lists": {"child-1": envelope},
+                "intake": {
+                    "children": (
+                        {"child_id": "child-1", "label": "Kevin"},
+                    )
+                },
+                "list_inputs": (),
+            }
+            self.captions: list[str] = []
+            self.radio_options: list[tuple[str, ...]] = []
+
+        def __enter__(self) -> "ListsMergeRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def container(self, **kwargs: object) -> "ListsMergeRecorder":
+            del kwargs
+            return self
+
+        def expander(
+            self,
+            label: str,
+            **kwargs: object,
+        ) -> "ListsMergeRecorder":
+            del label, kwargs
+            return self
+
+        def columns(self, spec: object) -> tuple["ListsMergeRecorder", ...]:
+            count = spec if isinstance(spec, int) else len(spec)
+            return tuple(self for _ in range(count))
+
+        def header(self, value: object) -> None:
+            del value
+
+        def subheader(self, value: object) -> None:
+            del value
+
+        def write(self, value: object) -> None:
+            del value
+
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del value, kwargs
+
+        def caption(self, value: object) -> None:
+            self.captions.append(str(value))
+
+        def radio(
+            self,
+            label: str,
+            options: tuple[str, ...],
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            self.radio_options.append(tuple(options))
+            return str(self.session_state[key])
+
+        def number_input(
+            self,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> int:
+            del label, kwargs
+            return int(self.session_state[key])
+
+        def checkbox(
+            self,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> bool:
+            del label, kwargs
+            self.session_state.setdefault(key, False)
+            return bool(self.session_state[key])
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del label, kwargs
+            return False
+
+        def warning(self, value: object) -> None:
+            del value
+
+        def error(self, value: object) -> None:
+            del value
+
+    recorder = ListsMergeRecorder()
+    app._render_requirement_merge(recorder)
+
+    rendered = "\n".join(recorder.captions)
+    assert (
+        "Rationale: Backpacks are usually reused rather than used up, so "
+        "we've preselected one instead of adding both requests together."
+        in rendered
+    )
+    assert (
+        "Rationale: Both parts of the list ask for tissues, and tissues get "
+        "used up, so we've added the amounts together. Change it if that's "
+        "more than you need."
+        in rendered
+    )
+    assert (
+        "Rationale: Adding both amounts would come to 84 pencils, which "
+        "looked like more than one student would need, so we've preselected "
+        "the larger single request of 48 instead."
+        in rendered
+    )
+    assert (
+        "Rationale: Both lines describe the same thing, just worded "
+        "differently."
+        in rendered
+    )
+    assert (
+        "Rationale: 5th Grade asks for cardboard and Highly Capable Class "
+        "asks for plastic. Those are different folders, so we've kept them "
+        "separate."
+        in rendered
+    )
+    assert all("working limit" not in caption for caption in recorder.captions)
+    assert all(
+        "This was resolved from the product details" not in caption
+        for caption in recorder.captions
+    )
+    rendered_options = tuple(
+        option
+        for options in recorder.radio_options
+        for option in options
+    )
+    assert "**1** — Quantity from 5th Grade" in rendered_options
+    assert (
+        "**1** — Quantity from Highly Capable Class"
+        in rendered_options
+    )
+
+    folder_decision = next(
+        decision
+        for decision in item_decisions(result)
+        if decision.canonical_item == "folders"
+    )
+    identity_key = f"{folder_decision.decision_id}:same-or-different"
+    recorder.session_state[identity_key] = "The same product"
+    recorder.session_state[f"{identity_key}:facts"] = (
+        resolve_item_decision_state(folder_decision).state_fingerprint
+    )
+    recorder.captions.clear()
+    app._render_requirement_merge(recorder)
+    assert (
+        "Result: You said these are the same product, so we've used the "
+        "description from 5th Grade. Change it below if you'd rather use the "
+        "other one."
+        in recorder.captions
+    )
 
 
 def test_custom_quantity_choice_highlights_until_parent_enters_value() -> None:
@@ -4102,8 +4841,12 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
         def markdown(self, value: object) -> None:
             del value
 
-        def expander(self, label: str) -> "SurfaceRecorder":
-            del label
+        def expander(
+            self,
+            label: str,
+            **kwargs: object,
+        ) -> "SurfaceRecorder":
+            del label, kwargs
             return self
 
         def columns(self, spec: object) -> tuple["SurfaceColumn", ...]:
@@ -4224,11 +4967,17 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
             ),
         )
     )
-    before_unavailable = len(recorder.popovers)
     app._personalize_source_summary(
         recorder,
         "child-1",
         envelope,
+    )
+    before_unavailable = len(recorder.popovers)
+    app._render_personalize_unavailable(
+        recorder,
+        "child-1",
+        envelope,
+        (),
     )
     unavailable_surface_count = (
         len(recorder.popovers) - before_unavailable
@@ -4236,7 +4985,7 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
 
     assert item_surface_count == 1
     assert conflict_surface_count == 2
-    assert unavailable_surface_count == 2
+    assert unavailable_surface_count == 1
     assert all(
         label.startswith("View source")
         and "Kevin's supply list" in label
@@ -4246,10 +4995,7 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
         pasted
         for _ in recorder.popovers
     ]
-    assert recorder.errors == [
-        "Items these stores do not carry. You will need to source these "
-        "yourself."
-    ]
+    assert recorder.errors == []
     assert "1 graphing calculator" in recorder.writes
 
 

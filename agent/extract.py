@@ -31,12 +31,17 @@ from agent.document_pages import (
 from agent.sections import build_document_selection
 from agent.rules import (
     ALLOWED_CATEGORIES,
+    CATALOG_UNAVAILABLE_RECONCILES_WITH_ACCEPTED_REQUIREMENT,
     CONFIDENCE_FLOOR,
     CORRECTED_EXTRACTION_CONFIDENCE,
+    EXPLICIT_COMPOUND_REQUIREMENT_COMPONENTS,
     EXTRACTION_TEXT_MODEL_TIMEOUT_SECONDS,
     MAX_UPLOAD_BYTES,
     NON_PURCHASABLE_CATEGORY,
     VISION_MODEL_CALL_TIMEOUT_SECONDS,
+    canonical_items_from_source,
+    deterministic_source_quantity,
+    deterministic_source_unit,
     section_is_parent_selectable,
 )
 from agent.provider import (
@@ -58,6 +63,7 @@ from agent.schema import (
     DocumentStructureEnvelope,
     ExtractionEnvelope,
     Requirement,
+    RequirementAttributes,
     validate_extraction_envelope,
 )
 
@@ -231,6 +237,11 @@ Extraction rules:
 - Put a visible line deliberately skipped for a stated reason in skipped_lines,
   prefixed by that short reason. Do not use skipped_lines for parent-ignored
   document sections; the application records those separately.
+- When one source line explicitly names more than one separately purchasable
+  item, return one Requirement per item and repeat the exact source line on
+  each. For `1 Three-Ring Binder with Dividers`, return one `binders`
+  requirement and one `dividers` requirement; never collapse the line into
+  only one of them.
 - For purchasable lines represented by the catalog, canonical_item must be
   exactly one of: {ALLOWED_CATEGORY_TEXT}
 - If a line is clearly a school supply but is not in that catalog list, still
@@ -736,6 +747,44 @@ def _restore_complete_raw_text(
     return envelope.model_copy(update={"requirements": tuple(restored)})
 
 
+def restore_deterministically_recognized_requirements(
+    envelope: ExtractionEnvelope,
+    content: list[dict[str, Any]],
+    child_id: str,
+) -> ExtractionEnvelope:
+    """Apply BR-66/BR-67 when the model omits a recognized source item."""
+
+    requirements = list(envelope.requirements)
+    represented_lines = {
+        _raw_text_match_key(requirement.raw_text)
+        for requirement in requirements
+    }
+    for line_index, source_line in enumerate(_source_lines(content), start=1):
+        source_key = _raw_text_match_key(source_line)
+        canonical_items = canonical_items_from_source(source_line)
+        if not canonical_items or source_key in represented_lines:
+            continue
+        for canonical_item in canonical_items:
+            requirements.append(
+                Requirement(
+                    req_id=(
+                        f"deterministic-source-{line_index}:"
+                        f"{canonical_item}"
+                    ),
+                    child_id=child_id,
+                    raw_text=source_line,
+                    canonical_item=canonical_item,
+                    quantity=deterministic_source_quantity(source_line),
+                    unit_type=deterministic_source_unit(source_line),
+                    extraction_confidence=CORRECTED_EXTRACTION_CONFIDENCE,
+                )
+            )
+        represented_lines.add(source_key)
+    if tuple(requirements) == envelope.requirements:
+        return envelope
+    return envelope.model_copy(update={"requirements": tuple(requirements)})
+
+
 def selectable_document_sections(
     structure: DocumentStructureEnvelope,
 ) -> tuple[DocumentSection, ...]:
@@ -1124,6 +1173,53 @@ def group_mutually_exclusive_conditions(
     )
 
 
+def preserve_explicit_compound_requirements(
+    envelope: ExtractionEnvelope,
+) -> ExtractionEnvelope:
+    """Apply BR-65 when a model omits one explicit compound component."""
+
+    requirements = list(envelope.requirements)
+    for source_phrase, categories in (
+        EXPLICIT_COMPOUND_REQUIREMENT_COMPONENTS.items()
+    ):
+        matching = tuple(
+            requirement
+            for requirement in requirements
+            if source_phrase in requirement.raw_text.casefold()
+        )
+        if not matching:
+            continue
+        present_categories = {
+            requirement.canonical_item for requirement in matching
+        }
+        template = matching[0]
+        for category in categories:
+            if category in present_categories:
+                continue
+            attributes = RequirementAttributes(
+                connector=(
+                    "three-ring" if category == "binders" else None
+                )
+            )
+            requirements.append(
+                template.model_copy(
+                    update={
+                        "req_id": f"{template.req_id}:{category}",
+                        "canonical_item": category,
+                        "unit_type": "each",
+                        "attributes": attributes,
+                        "extraction_confidence": (
+                            CORRECTED_EXTRACTION_CONFIDENCE
+                        ),
+                    }
+                )
+            )
+            present_categories.add(category)
+    if tuple(requirements) == envelope.requirements:
+        return envelope
+    return envelope.model_copy(update={"requirements": tuple(requirements)})
+
+
 def apply_extraction_security_filters(
     envelope: ExtractionEnvelope,
     child_id: str,
@@ -1132,13 +1228,15 @@ def apply_extraction_security_filters(
 
     validated = validate_extraction_envelope(envelope)
     envelope = group_mutually_exclusive_conditions(
-        validated.model_copy(
-            update={
-                "requirements": tuple(
-                    requirement.model_copy(update={"child_id": child_id})
-                    for requirement in validated.requirements
-                )
-            }
+        preserve_explicit_compound_requirements(
+            validated.model_copy(
+                update={
+                    "requirements": tuple(
+                        requirement.model_copy(update={"child_id": child_id})
+                        for requirement in validated.requirements
+                    )
+                }
+            )
         )
     )
     accepted: list[Requirement] = []
@@ -1217,6 +1315,26 @@ def apply_extraction_security_filters(
                 reasons.append(reason)
             else:
                 deferred_reasons.append(reason)
+
+    if CATALOG_UNAVAILABLE_RECONCILES_WITH_ACCEPTED_REQUIREMENT:
+        accepted_by_source: dict[str, set[str]] = {}
+        for requirement in accepted:
+            accepted_by_source.setdefault(
+                _raw_text_match_key(requirement.raw_text),
+                set(),
+            ).add(requirement.canonical_item)
+        catalog_unavailable_items = [
+            item
+            for item in catalog_unavailable_items
+            if not (
+                accepted_by_source.get(
+                    _raw_text_match_key(item.source_line),
+                    set(),
+                ).intersection(
+                    canonical_items_from_source(item.item_name)
+                )
+            )
+        ]
 
     return ExtractionEnvelope(
         stated_grades=envelope.stated_grades,
@@ -1355,6 +1473,11 @@ def extract_document(
             )
 
     envelope = _restore_complete_raw_text(envelope, content)
+    envelope = restore_deterministically_recognized_requirements(
+        envelope,
+        content,
+        child_id,
+    )
     secured = apply_extraction_security_filters(envelope, child_id)
     if section_selection is not None:
         secured = secured.model_copy(

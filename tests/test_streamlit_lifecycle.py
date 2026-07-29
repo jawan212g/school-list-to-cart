@@ -228,6 +228,46 @@ def test_budget_modes_survive_real_widget_unmount_and_remount() -> None:
     ).value == "150.00"
 
 
+def test_classroom_budget_default_tracks_count_until_parent_edits() -> None:
+    """BR-71: real Budget widgets stop auto-scaling after a parent edit."""
+
+    test_app = _run_app()
+    _set_widget(test_app, "radio", "entity_type_0", "Classroom")
+    _set_widget(test_app, "text_input", "teacher_name_0", "Ms. Rivera")
+    _set_widget(test_app, "selectbox", "classroom_grade_0", "Grade 3")
+    _set_widget(test_app, "number_input", "student_count_0", 10)
+    _click_label(test_app, "Continue to budget")
+    assert _widget(
+        test_app,
+        "text_input",
+        "combined_budget_text",
+    ).value == "750.00"
+
+    _click_label(test_app, "Back to students")
+    _set_widget(test_app, "number_input", "student_count_0", 12)
+    _click_label(test_app, "Continue to budget")
+    assert _widget(
+        test_app,
+        "text_input",
+        "combined_budget_text",
+    ).value == "900.00"
+
+    _set_widget(
+        test_app,
+        "text_input",
+        "combined_budget_text",
+        "800.00",
+    )
+    _click_label(test_app, "Back to students")
+    _set_widget(test_app, "number_input", "student_count_0", 15)
+    _click_label(test_app, "Continue to budget")
+    assert _widget(
+        test_app,
+        "text_input",
+        "combined_budget_text",
+    ).value == "800.00"
+
+
 def test_preferences_do_not_narrate_unused_budget_state() -> None:
     """FR-03: confirming a budget mode exposes no internal cleanup message."""
 
@@ -391,7 +431,7 @@ def test_untouched_defaults_are_committed_before_continue() -> None:
 
     _click_label(test_app, "Continue to the lists")
     intake = test_app.session_state["intake"]
-    assert intake["budget_total"] == 15_000
+    assert intake["budget_total"] == 7_500
     assert intake["store_radius_miles"] == 10.0
     assert intake["tax_basis_points"] == 700
 

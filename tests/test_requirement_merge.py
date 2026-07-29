@@ -307,8 +307,9 @@ def test_graph_and_regular_composition_books_are_different_products() -> None:
     resolved = resolve_item_decision_state(decision)
     assert resolved.quantity_control == "variants"
     assert resolved.rationale == (
-        "Graph paper and lined paper are used for different work, so the "
-        "list may be asking for both products."
+        "Highly Capable Class asks for graph and 5th Grade asks for lined. "
+        "Those are different composition notebooks, so we've kept them "
+        "separate."
     )
     assert AMBIGUOUS_PRODUCT_DESCRIPTORS == frozenset()
 
@@ -522,8 +523,9 @@ def test_boolean_product_difference_uses_parent_language() -> None:
     rationale = resolve_item_decision_state(item_decisions(result)[0]).rationale
 
     assert rationale == (
-        "The list names pre sharpened and unsharpened for sharpening. Those "
-        "details suggest the list may be asking for different products."
+        "5th Grade asks for pre-sharpened and Highly Capable Class asks for "
+        "unsharpened. Those are different pencils, so we've kept them "
+        "separate."
     )
     assert "True" not in rationale
     assert "False" not in rationale
@@ -958,9 +960,8 @@ def test_parent_can_override_type_b_to_one_product() -> None:
     assert merged.requirements[0].attributes.material == "cardboard"
     assert merged.requirements[0].attributes.connector is None
     assert same_product_override_notice(decision) == (
-        "You chose one product, so the cart will use material: cardboard "
-        "from 5th Grade. This keeps one real source description instead of "
-        "mixing details from different products."
+        "You said these are the same product, so we've used the description "
+        "from 5th Grade. Change it below if you'd rather use the other one."
     )
 
 
