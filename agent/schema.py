@@ -17,6 +17,7 @@ from agent.rules import (
     ITEM_FULFILLMENT_PREFERENCE_DEFAULT,
     NONPAGINATED_SOURCE_PAGE,
     PACKAGE_QUANTITY_STATE_DEFAULT,
+    QUANTITY_ONLY_SOURCE_LINE_PATTERN,
     explicit_package_count,
     preferred_brand_from_source,
     required_brand_from_source,
@@ -298,6 +299,17 @@ class RequirementSource(BaseModel):
     exact_line: str = Field(min_length=1)
     quantity: int = Field(ge=0)
 
+    @field_validator("exact_line")
+    @classmethod
+    def require_item_wording_in_exact_line(cls, value: str) -> str:
+        """Preserve BR-22/BR-36 evidence instead of a selected-cell quantity."""
+
+        if QUANTITY_ONLY_SOURCE_LINE_PATTERN.fullmatch(value):
+            raise ValueError(
+                "An exact source line cannot be only a quantity"
+            )
+        return value
+
 
 class Requirement(BaseModel):
     """One normalized school-list line matching BRD Section 8 (FR-07)."""
@@ -490,6 +502,14 @@ class Requirement(BaseModel):
 
         if self.is_purchasable and self.quantity < 1:
             raise ValueError("Purchasable requirements need a positive quantity")
+        if (
+            self.is_purchasable
+            and QUANTITY_ONLY_SOURCE_LINE_PATTERN.fullmatch(self.raw_text)
+        ):
+            raise ValueError(
+                "A purchasable requirement must preserve the item wording "
+                "in raw_text, not only its quantity"
+            )
         if self.quantity_is_range:
             if self.quantity_max is None:
                 raise ValueError("Quantity ranges require quantity_max")

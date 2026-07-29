@@ -187,6 +187,7 @@ def test_graph_and_regular_composition_books_require_ambiguity_choice() -> None:
 
     decision = item_decisions(result)[0]
     assert decision.conflict_type == "ambiguous"
+    assert decision.default_identity == "same"
     assert tuple(source.page_number for source in decision.sources) == (2, 3)
     assert decision.variants[0].attributes.ruling == "graph"
     assert decision.variants[1].details == (
@@ -225,6 +226,7 @@ def test_different_non_null_rulings_are_different_products() -> None:
     decision = item_decisions(result)[0]
     assert len(result.requirements) == 2
     assert decision.conflict_type == "different_products"
+    assert decision.default_identity == "different"
     assert sorted(
         variant.attributes.ruling for variant in decision.variants
     ) == ["graph", "lined"]
@@ -439,8 +441,9 @@ def test_quantity_and_color_difference_is_type_a_only() -> None:
     assert len(decisions) == 1
     assert decisions[0].quantity_interrupt is not None
     assert decisions[0].constraint_interrupts == ()
-    assert decisions[0].variants == ()
+    assert len(decisions[0].variants) == 2
     assert decisions[0].conflict_type == "quantity_only"
+    assert decisions[0].default_identity == "same"
 
 
 def test_parent_can_split_quantity_across_conflicting_variants() -> None:
@@ -537,6 +540,7 @@ def test_variant_allocations_survive_as_two_cart_lines() -> None:
     merged = consolidate_requirements(
         requirements,
         variant_quantity_choices={decision.decision_id: selected},
+        product_identity_choices={decision.decision_id: "different"},
     )
     store = Store(
         store_id="store",
@@ -602,6 +606,99 @@ def test_variant_allocations_survive_as_two_cart_lines() -> None:
         4,
     )
     assert len(result.proposed_cart.plan.lines) == 2
+
+
+def test_parent_can_override_type_b_to_one_product() -> None:
+    """BR-37: a rules-classified product difference remains parent-overridable."""
+
+    requirements = (
+        Requirement(
+            req_id="paper",
+            child_id="child-1",
+            raw_text="2 cardboard pocket folders",
+            canonical_item="folders",
+            quantity=2,
+            attributes={"material": "cardboard"},
+            source_document="district.pdf",
+            source_section="5th Grade",
+            source_page=2,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="plastic",
+            child_id="child-1",
+            raw_text="2 plastic pocket folders with fasteners",
+            canonical_item="folders",
+            quantity=2,
+            attributes={"material": "plastic"},
+            source_document="district.pdf",
+            source_section="Highly Capable Class",
+            source_page=3,
+            extraction_confidence=1.0,
+        ),
+    )
+
+    initial = consolidate_requirements(requirements)
+    decision = item_decisions(initial)[0]
+    assert decision.conflict_type == "different_products"
+    assert decision.default_identity == "different"
+    assert decision.quantity_interrupt is not None
+
+    merged = consolidate_requirements(
+        requirements,
+        quantity_choices={
+            decision.quantity_interrupt.interrupt_id: 2,
+        },
+        product_identity_choices={decision.decision_id: "same"},
+    )
+
+    assert len(merged.requirements) == 1
+    assert merged.requirements[0].quantity == 2
+    assert len(merged.requirements[0].sources) == 2
+
+
+def test_parent_can_override_type_a_to_two_products() -> None:
+    """BR-37: a quantity-only card can retain two parent-declared kinds."""
+
+    requirements = (
+        Requirement(
+            req_id="grade-five",
+            child_id="child-1",
+            raw_text="1 composition notebook",
+            canonical_item="composition_notebooks",
+            quantity=1,
+            source_document="district.pdf",
+            source_section="5th Grade",
+            source_page=2,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="capable",
+            child_id="child-1",
+            raw_text="4 composition notebooks",
+            canonical_item="composition_notebooks",
+            quantity=4,
+            source_document="district.pdf",
+            source_section="Highly Capable Class",
+            source_page=3,
+            extraction_confidence=1.0,
+        ),
+    )
+    initial = consolidate_requirements(requirements)
+    decision = item_decisions(initial)[0]
+    selected = {
+        variant.variant_id: variant.default_quantity
+        for variant in decision.variants
+    }
+
+    split = consolidate_requirements(
+        requirements,
+        variant_quantity_choices={decision.decision_id: selected},
+        product_identity_choices={decision.decision_id: "different"},
+    )
+
+    assert sorted(item.quantity for item in split.requirements) == [1, 4]
+    assert all(item.product_variant_id for item in split.requirements)
 
 
 @pytest.mark.parametrize(

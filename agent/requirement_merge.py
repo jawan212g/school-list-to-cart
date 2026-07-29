@@ -9,6 +9,9 @@ from typing import Any, Literal
 
 from agent.rules import (
     AMBIGUOUS_DESCRIPTOR_DEFAULT,
+    CONFLICT_IDENTITY_DEFAULTS,
+    CONFLICT_IDENTITY_DIFFERENT,
+    CONFLICT_IDENTITY_SAME,
     INCIDENTAL_REQUIREMENT_ATTRIBUTE_FIELDS,
     PRODUCT_DEFINING_ATTRIBUTE_FIELDS,
     REQUIREMENT_MERGE_CONFLICT_DEFAULT_ACTION,
@@ -41,6 +44,7 @@ class RequirementQuantityInterrupt:
     canonical_item: str
     sources: tuple[RequirementSource, ...]
     default_quantity: int
+    variants: tuple[RequirementVariant, ...] = ()
     default_action: str = REQUIREMENT_MERGE_CONFLICT_DEFAULT_ACTION
 
 
@@ -104,6 +108,7 @@ class RequirementItemDecision:
         "different_products",
         "ambiguous",
     ]
+    default_identity: Literal["same", "different"]
 
 
 def item_decisions(
@@ -146,6 +151,20 @@ def item_decisions(
             if quantity is not None
             else _distinct_option_sources(constraints)
         )
+        conflict_type: Literal[
+            "quantity_only",
+            "different_products",
+            "ambiguous",
+        ] = (
+            "ambiguous"
+            if any(
+                constraint.field_name == "ambiguous_descriptor"
+                for constraint in constraints
+            )
+            else "different_products"
+            if constraints
+            else "quantity_only"
+        )
         decisions.append(
             RequirementItemDecision(
                 decision_id=decision_id,
@@ -154,17 +173,15 @@ def item_decisions(
                 sources=sources,
                 quantity_interrupt=quantity,
                 constraint_interrupts=constraints,
-                variants=constraints[0].variants if constraints else (),
-                conflict_type=(
-                    "ambiguous"
-                    if any(
-                        constraint.field_name == "ambiguous_descriptor"
-                        for constraint in constraints
-                    )
-                    else "different_products"
+                variants=(
+                    constraints[0].variants
                     if constraints
-                    else "quantity_only"
+                    else quantity.variants
+                    if quantity is not None
+                    else ()
                 ),
+                conflict_type=conflict_type,
+                default_identity=CONFLICT_IDENTITY_DEFAULTS[conflict_type],
             )
         )
     return tuple(decisions)
@@ -546,6 +563,26 @@ def _build_variants(
     return tuple(variants)
 
 
+def _build_source_variants(
+    decision_id: str,
+    group: list[Requirement],
+) -> tuple[RequirementVariant, ...]:
+    """Keep each source-backed row available when a parent chooses two kinds."""
+
+    return tuple(
+        RequirementVariant(
+            variant_id=f"{decision_id}:variant-{index}",
+            details=(),
+            default_quantity=requirement.quantity,
+            sources=_distinct_sources((requirement,)),
+            brand_lock=requirement.brand_lock,
+            exclusions=requirement.exclusions,
+            attributes=requirement.attributes,
+        )
+        for index, requirement in enumerate(group, start=1)
+    )
+
+
 def _resolved_variant_requirements(
     first: Requirement,
     variants: tuple[RequirementVariant, ...],
@@ -637,12 +674,17 @@ def consolidate_requirements(
         str,
         Mapping[str, int],
     ] | None = None,
+    product_identity_choices: Mapping[
+        str,
+        Literal["same", "different"],
+    ] | None = None,
 ) -> RequirementMergeResult:
     """Merge same-student duplicates and flag quantity conflicts (FR-14)."""
 
     choices = quantity_choices or {}
     active_constraint_choices = constraint_choices or {}
     active_variant_choices = variant_quantity_choices or {}
+    active_identity_choices = product_identity_choices or {}
     grouped: dict[tuple[Any, ...], list[Requirement]] = {}
     passthrough: list[Requirement] = []
     for requirement in requirements:
@@ -706,6 +748,52 @@ def consolidate_requirements(
             for interrupt in group_constraint_interrupts
         )
         constraint_interrupts.extend(group_constraint_interrupts)
+        conflict_type = (
+            "ambiguous"
+            if any(
+                interrupt.field_name == "ambiguous_descriptor"
+                for interrupt in group_constraint_interrupts
+            )
+            else "different_products"
+            if group_constraint_interrupts
+            else "quantity_only"
+        )
+        default_identity = CONFLICT_IDENTITY_DEFAULTS[conflict_type]
+        selected_identity = active_identity_choices.get(
+            decision_id,
+            default_identity,
+        )
+        if selected_identity not in {
+            CONFLICT_IDENTITY_SAME,
+            CONFLICT_IDENTITY_DIFFERENT,
+        }:
+            raise ValueError("Unknown product-identity choice")
+        if not variants:
+            variants = _build_source_variants(decision_id, group)
+        if (
+            len(set(quantities)) == 1
+            and not group_constraint_interrupts
+        ):
+            quantity = quantities[0]
+            quantity_interrupt = None
+        else:
+            interrupt_id = _interrupt_id(first.child_id, identity)
+            default_quantity = max(quantities)
+            quantity = choices.get(interrupt_id, default_quantity)
+            if quantity < 1:
+                raise ValueError(
+                    "A merged purchasable quantity must be positive"
+                )
+            quantity_interrupt = RequirementQuantityInterrupt(
+                interrupt_id=interrupt_id,
+                decision_id=decision_id,
+                child_id=first.child_id,
+                canonical_item=first.canonical_item,
+                sources=sources,
+                default_quantity=default_quantity,
+                variants=variants,
+            )
+            interrupts.append(quantity_interrupt)
         system_decisions = tuple(
             dict.fromkeys(
                 (
@@ -715,7 +803,10 @@ def consolidate_requirements(
                 )
             )
         )
-        if variants and decision_id in active_variant_choices:
+        if (
+            selected_identity == CONFLICT_IDENTITY_DIFFERENT
+            and decision_id in active_variant_choices
+        ):
             merged.extend(
                 _resolved_variant_requirements(
                     first,
@@ -730,10 +821,7 @@ def consolidate_requirements(
                 )
             )
             continue
-        if variants and all(
-            interrupt.field_name != "ambiguous_descriptor"
-            for interrupt in group_constraint_interrupts
-        ):
+        if selected_identity == CONFLICT_IDENTITY_DIFFERENT:
             merged.extend(
                 _resolved_variant_requirements(
                     first,
@@ -751,24 +839,7 @@ def consolidate_requirements(
                 )
             )
             continue
-        if len(set(quantities)) == 1:
-            quantity = quantities[0]
-        else:
-            interrupt_id = _interrupt_id(first.child_id, identity)
-            default_quantity = max(quantities)
-            quantity = choices.get(interrupt_id, default_quantity)
-            if quantity < 1:
-                raise ValueError("A merged purchasable quantity must be positive")
-            interrupts.append(
-                RequirementQuantityInterrupt(
-                    interrupt_id=interrupt_id,
-                    decision_id=decision_id,
-                    child_id=first.child_id,
-                    canonical_item=first.canonical_item,
-                    sources=sources,
-                    default_quantity=default_quantity,
-                )
-            )
+        if quantity_interrupt is not None:
             system_decisions = tuple(
                 dict.fromkeys(
                     (
@@ -815,6 +886,10 @@ def consolidate_extractions(
         str,
         Mapping[str, int],
     ] | None = None,
+    product_identity_choices: Mapping[
+        str,
+        Literal["same", "different"],
+    ] | None = None,
 ) -> tuple[dict[str, ExtractionEnvelope], RequirementMergeResult]:
     """Merge production extraction envelopes without changing their metadata."""
 
@@ -827,6 +902,7 @@ def consolidate_extractions(
         quantity_choices=quantity_choices,
         constraint_choices=constraint_choices,
         variant_quantity_choices=variant_quantity_choices,
+        product_identity_choices=product_identity_choices,
     )
     requirements_by_child: dict[str, list[Requirement]] = {
         child_id: [] for child_id in extractions

@@ -2039,3 +2039,90 @@ starting the next Personalize revision.
 Visually exercise all three conflict-card types and the repeatable missing-item
 flow in deployed Streamlit, then decide whether a later scoped change may update
 optimizer package-selection behavior for the recorded closest-quantity preference.
+
+## 2026-07-29 — Part A-7 source integrity and conflict-card revision
+
+### Objective
+
+Prevent quantity-only matrix cells from masquerading as exact source lines,
+let the parent override same-item versus different-product classification on
+every merge card, and keep concurrent list extraction from repeating successful
+documents when another document fails.
+
+### Work completed
+
+- Added BR-36 through BR-38 for exact source evidence, parent-overridable
+  product identity with rule-derived defaults, and failed-document-only
+  sequential extraction fallback.
+- Rejected purchasable requirements and provenance records whose purported
+  exact source text is only a number. The existing schema-validation retry can
+  correct that model defect; otherwise the list fails visibly instead of
+  showing false evidence.
+- Added one same-item/two-kinds control to every conflict card. Type A, Type B,
+  and ambiguous classification now determines the default, while deterministic
+  merge resolution honors the parent's override.
+- Reworked quantity choices to lead with the amount, name section and page,
+  mark exactly one source-backed default, and avoid a duplicate largest-value
+  option.
+- Added bordered source rows, a wider non-wrapping source control, and visible
+  pending treatment for a custom quantity until the parent edits the field.
+- Kept concurrent extraction and added a sequential retry only for each failed
+  document in both the Lists workflow and the pipeline. Successful documents
+  are never repeated.
+- Changed the shared application tagline to “School supplies sorted before the
+  first bell.”
+
+### Decisions made
+
+- The source-line defect was diagnosed as a data/provenance-boundary problem:
+  the renderer used `RequirementSource.exact_line` correctly, but merge had
+  received a quantity-only `Requirement.raw_text`.
+- No PDF text-reading path or model prompt was added. The validated schema
+  enforces honest evidence while retaining the existing model call and retry
+  behavior.
+- Product classification rules remain unchanged; BR-31 and BR-32 now determine
+  only the initial same/different selection.
+
+### Problems or limitations
+
+- Streamlit is unavailable on Windows ARM64, so the card borders, control
+  re-rendering, and source-button width still require deployed visual review.
+- Kelley GPT API was unstable during live verification. Before the code change,
+  both concurrent Maple extractions succeeded in 60.74 seconds. Afterward, both
+  concurrent attempts and both targeted sequential fallbacks timed out, ending
+  after 243.35 seconds with no complete extraction. A final sequential retry
+  failed Grade 2 after 61.45 seconds while Grade 5 succeeded after 61.12 seconds
+  with 16 requirements. Because no shared two-list extraction completed, no
+  honest post-change $150 or $85 cart baseline could be produced.
+- Static AST tools count Python union annotations (`A | B`) and one instruction
+  string append as binary operations in `agent/extract.py`; inspection found no
+  numeric, quantity, package, tax, fee, or money arithmetic there. No code was
+  changed merely to appease that false-positive check.
+
+### Files changed
+
+- Updated `agent/rules.py`, `agent/schema.py`,
+  `agent/requirement_merge.py`, `agent/pipeline.py`, `app.py`,
+  `tests/test_app.py`, `tests/test_extract.py`, and
+  `tests/test_requirement_merge.py`.
+
+### Testing performed
+
+- `py -3.12-arm64 -m pytest -q`: 317 passed, 1 skipped.
+- Production-shaped tests cover full source-line retention, rejection of
+  quantity-only evidence, all conflict identity defaults and overrides, custom
+  quantity pending state, and failed-document-only extraction retry.
+- Architecture inspection confirmed no model call in `agent/optimize.py` and no
+  numeric calculation in `agent/extract.py`; neither file was modified.
+
+### Remaining work
+
+- Re-run both Maple baselines once Kelley can complete both documents in one
+  shared extraction.
+- Visually inspect the revised Lists conflict cards in deployed Streamlit.
+
+### Recommended next step
+
+Deploy Part A-7 for one conflict-card visual pass, then repeat the Maple
+regression run when the Kelley endpoint is responsive enough to finish both
+lists.

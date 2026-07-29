@@ -882,3 +882,20 @@ def test_regular_composition_descriptor_remains_explicitly_ambiguous() -> None:
     assert requirement.attributes.ruling is None
     assert requirement.attributes.style is None
     assert requirement.ambiguous_descriptors == ("regular",)
+
+
+def test_purchasable_requirement_rejects_quantity_only_source_text() -> None:
+    """BR-36: a selected matrix quantity cannot replace exact item evidence."""
+
+    with pytest.raises(
+        ValueError,
+        match="must preserve the item wording",
+    ):
+        Requirement(
+            req_id="matrix-cell",
+            child_id="child-1",
+            raw_text="4",
+            canonical_item="composition_notebooks",
+            quantity=4,
+            extraction_confidence=1.0,
+        )

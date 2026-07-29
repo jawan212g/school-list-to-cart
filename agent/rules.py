@@ -108,6 +108,26 @@ REQUIREMENT_SOURCE_DEDUPLICATION_FIELDS = (
 )
 # BR-22: consolidated requirements retain every distinct document, section, page, line, and quantity source.
 
+QUANTITY_ONLY_SOURCE_LINE_PATTERN = re.compile(
+    r"^\s*[\d.,]+\s*$"
+)
+# BR-36: a purchasable requirement's exact source evidence must contain item
+# wording; a bare quantity is not an exact list line and cannot enter a merge.
+
+CONFLICT_IDENTITY_SAME = "same"
+CONFLICT_IDENTITY_DIFFERENT = "different"
+CONFLICT_IDENTITY_DEFAULTS = {
+    "quantity_only": CONFLICT_IDENTITY_SAME,
+    "different_products": CONFLICT_IDENTITY_DIFFERENT,
+    "ambiguous": CONFLICT_IDENTITY_SAME,
+}
+# BR-37: BR-31/BR-32 classification supplies the default on every conflict,
+# while the parent may override it to one item or two distinct kinds.
+
+FAILED_DOCUMENT_SEQUENTIAL_FALLBACK = True
+# BR-38: after concurrent extraction, retry only each failed document
+# sequentially; never repeat a document whose concurrent extraction succeeded.
+
 EXPLICIT_PACKAGE_COUNT_PATTERNS = (
     r"\b(\d+)\s*(?:count|ct)\b",
     r"\b(?:pack|box|set|package)\s+of\s+(\d+)\b",

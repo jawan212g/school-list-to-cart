@@ -47,6 +47,7 @@ from agent.optimize import (
 )
 from agent.rules import (
     DEFAULT_TAX_BASIS_POINTS,
+    FAILED_DOCUMENT_SEQUENTIAL_FALLBACK,
     MODEL_MAX_CONCURRENCY,
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
@@ -437,6 +438,33 @@ def run_pipeline(
                 )
             try:
                 completed_envelopes[list_index] = future.result()
+            except Exception as error:
+                extraction_failures[list_input.child_id] = (
+                    f"{type(error).__name__}: {error}"
+                )
+    if FAILED_DOCUMENT_SEQUENTIAL_FALLBACK and extraction_failures:
+        failed_lists = tuple(
+            (list_index, list_input)
+            for list_index, list_input in enumerate(lists)
+            if list_input.child_id in extraction_failures
+        )
+        for retry_index, (list_index, list_input) in enumerate(
+            failed_lists,
+            start=1,
+        ):
+            if progress_callback is not None:
+                progress_callback(
+                    "extraction_retry",
+                    retry_index,
+                    len(failed_lists),
+                    (
+                        "Retrying the list that did not finish "
+                        f"({retry_index} of {len(failed_lists)})"
+                    ),
+                )
+            try:
+                completed_envelopes[list_index] = extract_one(list_input)
+                extraction_failures.pop(list_input.child_id, None)
             except Exception as error:
                 extraction_failures[list_input.child_id] = (
                     f"{type(error).__name__}: {error}"

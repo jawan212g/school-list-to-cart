@@ -93,6 +93,9 @@ from agent.provider import (
 from agent.rules import (
     ALLOWED_CATEGORIES,
     DEFAULT_TAX_BASIS_POINTS,
+    CONFLICT_IDENTITY_DIFFERENT,
+    CONFLICT_IDENTITY_SAME,
+    FAILED_DOCUMENT_SEQUENTIAL_FALLBACK,
     MAX_CHILDREN_PER_SESSION,
     MAX_UPLOAD_BYTES,
     MINIMUM_BUDGET_CENTS,
@@ -141,7 +144,7 @@ from data.loader import Offer, Store, load_catalog, load_stores
 
 LOGGER = logging.getLogger(__name__)
 APP_NAME = "Ready, Set, School"
-APP_TAGLINE = "Sorted before the first bell."
+APP_TAGLINE = "School supplies sorted before the first bell."
 CENTS_PER_DOLLAR = 100
 BASIS_POINTS_PER_PERCENT = 100
 MAX_TAX_PERCENT = Decimal("25")
@@ -3003,6 +3006,7 @@ def _initialize_state(st: Any) -> None:
         "requirement_merge_choices": {},
         "requirement_constraint_choices": {},
         "requirement_variant_quantity_choices": {},
+        "requirement_product_identity_choices": {},
         "parent_added_review_items": (),
         "last_added_review_item": None,
         "requirement_merge_validation_errors": (),
@@ -3932,6 +3936,7 @@ def clear_section_selection_after_grade_change(
         state["requirement_merge_choices"] = {}
         state["requirement_constraint_choices"] = {}
         state["requirement_variant_quantity_choices"] = {}
+        state["requirement_product_identity_choices"] = {}
         state["requirement_merge_validation_errors"] = ()
         state["organized_list_confirmed"] = False
         _limit_reached_stage(state, 2)
@@ -5234,6 +5239,7 @@ def _render_lists(st: Any) -> None:
         st.session_state["requirement_merge_choices"] = {}
         st.session_state["requirement_constraint_choices"] = {}
         st.session_state["requirement_variant_quantity_choices"] = {}
+        st.session_state["requirement_product_identity_choices"] = {}
         st.session_state["requirement_merge_validation_errors"] = ()
         st.session_state["review_items"] = ()
         st.session_state["parent_added_review_items"] = ()
@@ -5544,6 +5550,34 @@ def _extract_list_inputs(
             )
         )
 
+    def stamp_extraction(
+        list_input: ListInput,
+        extraction: ExtractionEnvelope,
+    ) -> ExtractionEnvelope:
+        return extraction.model_copy(
+            update={
+                "requirements": tuple(
+                    stamped.model_copy(
+                        update={
+                            "sources": (
+                                requirement_source(stamped),
+                            )
+                        }
+                    )
+                    for requirement in extraction.requirements
+                    for stamped in (
+                        requirement.model_copy(
+                            update={
+                                "source_document": (
+                                    list_input.resolved_document_name
+                                )
+                            }
+                        ),
+                    )
+                )
+            }
+        )
+
     with ThreadPoolExecutor(
         max_workers=min(max(len(list_inputs), 1), MODEL_MAX_CONCURRENCY)
     ) as executor:
@@ -5564,29 +5598,35 @@ def _extract_list_inputs(
                 )
             try:
                 extraction = future.result()
-                completed[list_input.child_id] = extraction.model_copy(
-                    update={
-                        "requirements": tuple(
-                            stamped.model_copy(
-                                update={
-                                    "sources": (
-                                        requirement_source(stamped),
-                                    )
-                                }
-                            )
-                            for requirement in extraction.requirements
-                            for stamped in (
-                                requirement.model_copy(
-                                    update={
-                                        "source_document": (
-                                            list_input.resolved_document_name
-                                        )
-                                    }
-                                ),
-                            )
-                        )
-                    }
+                completed[list_input.child_id] = stamp_extraction(
+                    list_input,
+                    extraction,
                 )
+            except Exception as error:
+                errors[list_input.child_id] = error
+    if FAILED_DOCUMENT_SEQUENTIAL_FALLBACK and errors:
+        failed_inputs = tuple(
+            list_input
+            for list_input in list_inputs
+            if list_input.child_id in errors
+        )
+        for retry_index, list_input in enumerate(failed_inputs, start=1):
+            if progress_callback is not None:
+                progress_callback(
+                    "extraction_retry",
+                    retry_index,
+                    len(failed_inputs),
+                    (
+                        "Retrying the list that did not finish "
+                        f"({retry_index} of {len(failed_inputs)})"
+                    ),
+                )
+            try:
+                completed[list_input.child_id] = stamp_extraction(
+                    list_input,
+                    extract_one(list_input),
+                )
+                errors.pop(list_input.child_id, None)
             except Exception as error:
                 errors[list_input.child_id] = error
     for list_input in list_inputs:
@@ -7294,6 +7334,7 @@ def _render_sections(st: Any) -> None:
         st.session_state["requirement_merge_choices"] = {}
         st.session_state["requirement_constraint_choices"] = {}
         st.session_state["requirement_variant_quantity_choices"] = {}
+        st.session_state["requirement_product_identity_choices"] = {}
         st.session_state["requirement_merge_validation_errors"] = ()
         st.session_state["organized_list_confirmed"] = False
         _limit_reached_stage(st.session_state, 2)
@@ -7317,6 +7358,30 @@ def _display_source_line(source_line: str) -> str:
     """Hide matrix-cell annotations while preserving stored provenance."""
 
     return source_line.split("|", 1)[0].strip()
+
+
+@dataclass(frozen=True)
+class ConflictSourceRow:
+    """One production provenance row rendered in a merge decision table."""
+
+    quantity: int
+    exact_line: str
+    display_line: str
+    source: RequirementSource
+
+
+def conflict_source_rows(decision: Any) -> tuple[ConflictSourceRow, ...]:
+    """Keep BR-22 exact evidence distinct from its numeric quantity."""
+
+    return tuple(
+        ConflictSourceRow(
+            quantity=source.quantity,
+            exact_line=source.exact_line,
+            display_line=_display_source_line(source.exact_line),
+            source=source,
+        )
+        for source in decision.sources
+    )
 
 
 def _variant_detail_label(details: Sequence[tuple[str, object]]) -> str:
@@ -7349,27 +7414,46 @@ def quantity_quick_choice_values(
 ) -> dict[str, int | None]:
     """Build BR-30 shortcuts from production requirement sources."""
 
+    sources = tuple(interrupt.sources)
+    default_index = next(
+        index
+        for index, source in enumerate(sources)
+        if source.quantity == interrupt.default_quantity
+    )
+    default_source = sources[default_index]
+    default_location = (
+        default_source.section_name
+        or default_source.document_name
+        or "This list"
+    )
+    default_description = (
+        f"{default_location}, page {default_source.page_number}"
+    )
+    if len({source.quantity for source in sources}) > 1:
+        default_description += "; the larger of the listed amounts"
     values: dict[str, int | None] = {
         (
-            "Use the largest "
-            f"({interrupt.default_quantity}) — default"
-        ): interrupt.default_quantity,
+            f"**{default_source.quantity}** — "
+            f"{default_description} — default"
+        ): default_source.quantity,
         (
-            "Add them together "
-            f"({sum(source.quantity for source in interrupt.sources)})"
-        ): sum(source.quantity for source in interrupt.sources),
+            f"**{sum(source.quantity for source in sources)}** — "
+            "both lists combined"
+        ): sum(source.quantity for source in sources),
     }
-    for source in interrupt.sources:
-        source_name = (
-            f"page {source.page_number}"
-            if source.page_number
-            else source.section_name or "this source"
+    for index, source in enumerate(sources):
+        if index == default_index:
+            continue
+        source_location = (
+            source.section_name
+            or source.document_name
+            or "This list"
         )
         values[
-            f"Use the quantity from {source_name} "
-            f"({source.quantity})"
+            f"**{source.quantity}** — {source_location}, "
+            f"page {source.page_number}"
         ] = source.quantity
-    values["Enter my own"] = None
+    values[MERGE_CUSTOM_QUANTITY_LABEL] = None
     return values
 
 
@@ -7378,12 +7462,17 @@ def apply_merge_quick_choice(
     choice_key: str,
     quantity_keys: Mapping[str, str],
     choices: Mapping[str, Mapping[str, int] | int | None],
+    custom_pending_key: str | None = None,
 ) -> None:
     """Synchronize editable quantities after a BR-30 radio shortcut."""
 
     selected = choices.get(str(state.get(choice_key)))
     if selected is None:
+        if custom_pending_key is not None:
+            state[custom_pending_key] = True
         return
+    if custom_pending_key is not None:
+        state[custom_pending_key] = False
     if isinstance(selected, Mapping):
         for item_id, value in selected.items():
             state[quantity_keys[item_id]] = int(value)
@@ -7395,10 +7484,13 @@ def mark_merge_quantities_custom(
     state: MutableMapping[str, Any],
     choice_key: str,
     custom_label: str,
+    custom_pending_key: str | None = None,
 ) -> None:
     """Keep radio and number inputs as two views of one selection state."""
 
     state[choice_key] = custom_label
+    if custom_pending_key is not None:
+        state[custom_pending_key] = False
 
 
 def _render_merge_source_rows(
@@ -7409,35 +7501,39 @@ def _render_merge_source_rows(
     """Show quantity, exact source line, and link-out in one readable row."""
 
     heading_quantity, heading_line, heading_source = st.columns(
-        [0.8, 3.2, 1.2]
+        [0.7, 3.5, 1.8]
     )
     heading_quantity.markdown("**Quantity**")
     heading_line.markdown("**What the list says**")
     heading_source.markdown("**Source**")
-    for index, source in enumerate(decision.sources, start=1):
-        quantity_column, line_column, source_column = st.columns(
-            [0.8, 3.2, 1.2]
-        )
-        quantity_column.write(str(source.quantity))
-        line_column.write(
-            escape_streamlit_dollars(
-                _display_source_line(source.exact_line)
+    for index, row in enumerate(
+        conflict_source_rows(decision),
+        start=1,
+    ):
+        with st.container(border=True):
+            quantity_column, line_column, source_column = st.columns(
+                [0.7, 3.5, 1.8]
             )
-        )
-        if list_input is None:
-            source_column.caption(f"Page {source.page_number}")
-            continue
-        with source_column:
-            _render_source_reference(
-                st,
-                list_input,
-                page_number=source.page_number,
-                source_line=source.exact_line,
-                key=(
-                    f"{decision.decision_id}:source-row:"
-                    f"{source.source_req_id}:{index}"
-                ),
+            quantity_column.write(str(row.quantity))
+            line_column.write(
+                escape_streamlit_dollars(row.display_line)
             )
+            if list_input is None:
+                source_column.caption(
+                    f"Page {row.source.page_number}"
+                )
+                continue
+            with source_column:
+                _render_source_reference(
+                    st,
+                    list_input,
+                    page_number=row.source.page_number,
+                    source_line=row.exact_line,
+                    key=(
+                        f"{decision.decision_id}:source-row:"
+                        f"{row.source.source_req_id}:{index}"
+                    ),
+                )
 
 
 def _merge_product_difference(decision: Any) -> str:
@@ -7468,6 +7564,7 @@ def _render_merge_quantity_controls(
     quick_choices = quantity_quick_choice_values(interrupt)
     choice_key = f"{interrupt.interrupt_id}:choice"
     quantity_key = f"{interrupt.interrupt_id}:quantity"
+    custom_pending_key = f"{interrupt.interrupt_id}:custom-pending"
     quantity_keys = {interrupt.interrupt_id: quantity_key}
     if choice_key not in st.session_state:
         st.session_state[choice_key] = next(iter(quick_choices))
@@ -7483,30 +7580,40 @@ def _render_merge_quantity_controls(
             choice_key,
             quantity_keys,
             quick_choices,
+            custom_pending_key,
         ),
     )
-    selected_quantity = int(
-        st.number_input(
-            "Quantity for the cart",
-            min_value=1,
-            step=1,
-            key=quantity_key,
-            on_change=mark_merge_quantities_custom,
-            args=(
-                st.session_state,
-                choice_key,
-                MERGE_CUSTOM_QUANTITY_LABEL,
-            ),
-        )
+    quantity_container = (
+        st.container(border=True)
+        if bool(st.session_state.get(custom_pending_key))
+        else st.container()
     )
+    with quantity_container:
+        if bool(st.session_state.get(custom_pending_key)):
+            st.warning("Enter the quantity you want to use.")
+        selected_quantity = int(
+            st.number_input(
+                "Quantity for the cart",
+                min_value=1,
+                step=1,
+                key=quantity_key,
+                on_change=mark_merge_quantities_custom,
+                args=(
+                    st.session_state,
+                    choice_key,
+                    MERGE_CUSTOM_QUANTITY_LABEL,
+                    custom_pending_key,
+                ),
+            )
+        )
     selected_label = str(st.session_state[choice_key])
     action = (
         "custom"
         if selected_label == MERGE_CUSTOM_QUANTITY_LABEL
         else "total"
-        if selected_label.startswith("Add them")
+        if "both lists combined" in selected_label
         else "largest"
-        if selected_label.startswith("Use the largest")
+        if "default" in selected_label
         else "source"
     )
     return action, selected_quantity
@@ -7543,7 +7650,11 @@ def _render_merge_variant_controls(
         )
         variant_label = (
             " · ".join(dict.fromkeys(variant_values))
-            or "Other listed kind"
+            or (
+                _display_source_line(variant.sources[0].exact_line)
+                + " · "
+                + _requirement_source_label(variant.sources[0])
+            )
         )
         selected[variant.variant_id] = int(
             st.number_input(
@@ -7597,6 +7708,7 @@ def _render_requirement_merge(st: Any) -> None:
 
     selections: dict[str, tuple[str, int | None]] = {}
     variant_quantity_choices: dict[str, dict[str, int]] = {}
+    product_identity_choices: dict[str, str] = {}
     validation_errors: list[str] = []
     first_error_anchor_added = False
     for decision in item_decisions(result):
@@ -7617,28 +7729,20 @@ def _render_requirement_merge(st: Any) -> None:
                 )
                 first_error_anchor_added = True
             item_name = _item_display_name(decision.canonical_item)
+            st.subheader(f"{item_name} for {child_label}")
             if decision.conflict_type == "quantity_only":
-                st.subheader(f"How many {item_name} for {child_label}?")
                 quantities = tuple(source.quantity for source in decision.sources)
                 st.write(
                     f"One part of the list asks for {quantities[0]} and "
                     f"another asks for {quantities[1]}."
                 )
             elif decision.conflict_type == "different_products":
-                st.subheader(
-                    f"{item_name} for {child_label} — "
-                    "the list asks for two different kinds"
-                )
                 st.write(
                     "The list specifies "
                     + _merge_product_difference(decision)
-                    + ". These are different products."
+                    + ", which usually means two different kinds."
                 )
             else:
-                st.subheader(
-                    f"{item_name} for {child_label} — "
-                    "are these the same thing?"
-                )
                 st.write(
                     "One description uses a word that could mean a product "
                     "difference or could simply be general wording."
@@ -7647,24 +7751,47 @@ def _render_requirement_merge(st: Any) -> None:
             list_input = input_by_child.get(decision.child_id)
             _render_merge_source_rows(st, decision, list_input)
 
-            render_as_variants = decision.conflict_type == "different_products"
-            if decision.conflict_type == "ambiguous":
-                ambiguity_key = f"{decision.decision_id}:same-or-different"
-                ambiguity_choice = st.radio(
-                    "Do these source lines describe the same item?",
-                    (
-                        "Treat them as the same item — default",
-                        "They are two different kinds",
-                    ),
-                    key=ambiguity_key,
-                    help=(
-                        "The default treats them as one item because that is "
-                        "the smaller error. You can choose two kinds instead."
-                    ),
+            identity_key = f"{decision.decision_id}:same-or-different"
+            identity_labels = (
+                "The same item",
+                "Two different kinds",
+            )
+            if identity_key not in st.session_state:
+                st.session_state[identity_key] = (
+                    identity_labels[0]
+                    if decision.default_identity == CONFLICT_IDENTITY_SAME
+                    else identity_labels[1]
                 )
-                render_as_variants = ambiguity_choice.startswith("They are")
+            identity_choice = st.radio(
+                "Do these describe the same item?",
+                identity_labels,
+                key=identity_key,
+            )
+            selected_identity = (
+                CONFLICT_IDENTITY_SAME
+                if identity_choice == identity_labels[0]
+                else CONFLICT_IDENTITY_DIFFERENT
+            )
+            product_identity_choices[decision.decision_id] = (
+                selected_identity
+            )
+            if decision.conflict_type == "ambiguous":
+                st.caption(
+                    "Default: The same item. This is an assumption because "
+                    "the wording does not establish a product difference."
+                )
+            elif decision.conflict_type == "different_products":
+                st.caption(
+                    "Default: Two different kinds, based on the product "
+                    "details written in the list."
+                )
+            else:
+                st.caption(
+                    "Default: The same item, because the normalized item "
+                    "description matches."
+                )
 
-            if render_as_variants:
+            if selected_identity == CONFLICT_IDENTITY_DIFFERENT:
                 selected_variants = _render_merge_variant_controls(st, decision)
                 variant_quantity_choices[decision.decision_id] = selected_variants
                 if not any(selected_variants.values()):
@@ -7700,6 +7827,7 @@ def _render_requirement_merge(st: Any) -> None:
         quantity_choices=quantity_choices,
         constraint_choices={},
         variant_quantity_choices=variant_quantity_choices,
+        product_identity_choices=product_identity_choices,
     )
     st.session_state["extracted_lists"] = merged
     st.session_state["requirement_merge_result"] = resolved
@@ -7707,6 +7835,9 @@ def _render_requirement_merge(st: Any) -> None:
     st.session_state["requirement_constraint_choices"] = {}
     st.session_state["requirement_variant_quantity_choices"] = (
         variant_quantity_choices
+    )
+    st.session_state["requirement_product_identity_choices"] = (
+        product_identity_choices
     )
     st.session_state["requirement_merge_resolved"] = True
     st.session_state["screen"] = "working"
@@ -8517,6 +8648,7 @@ def _render_working(st: Any) -> None:
             st.session_state["requirement_merge_choices"] = {}
             st.session_state["requirement_constraint_choices"] = {}
             st.session_state["requirement_variant_quantity_choices"] = {}
+            st.session_state["requirement_product_identity_choices"] = {}
             st.session_state["requirement_merge_validation_errors"] = ()
             st.session_state["extraction_errors"] = extraction_errors
             st.session_state["extraction_cache_ready"] = True
@@ -11177,6 +11309,9 @@ def _apply_custom_css(st: Any) -> None:
             align-items: flex-start;
             gap: 1rem;
             animation: rss-fields-in 160ms ease-out both;
+        }
+        [data-testid="stPopover"] button {
+            white-space: nowrap !important;
         }
         h1, h2, h3 {
             color: var(--rss-ink);

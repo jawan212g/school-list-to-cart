@@ -16,7 +16,11 @@ from agent.aggregate import UnitNeed
 from agent.match import StructuredSuitabilityJudge
 from agent.normalize import NormalizationResult, NormalizedRequirement
 from agent.pipeline import ListInput, PipelineResult, PipelineSession, run_pipeline
-from agent.requirement_merge import consolidate_requirements, item_decisions
+from agent.requirement_merge import (
+    consolidate_extractions,
+    consolidate_requirements,
+    item_decisions,
+)
 from agent.review import confirmed_requirements, organize_extractions
 from agent.schema import (
     DocumentSelection,
@@ -1302,7 +1306,9 @@ def test_landing_keeps_context_in_one_collapsed_explainer() -> None:
 
     app._persistent_notice(ExplainerStreamlit())
 
-    assert app.APP_TAGLINE == "Sorted before the first bell."
+    assert app.APP_TAGLINE == (
+        "School supplies sorted before the first bell."
+    )
     assert "rss-title__ready" in title_source
     assert "rss-title__set" in title_source
     assert "rss-title__school" in title_source
@@ -2756,13 +2762,156 @@ def test_type_a_quantity_choices_do_not_repeat_source_text() -> None:
     labels = tuple(app.quantity_quick_choice_values(interrupt))
 
     assert labels == (
-        "Use the largest (4) — default",
-        "Add them together (5)",
-        "Use the quantity from page 2 (4)",
-        "Use the quantity from page 3 (1)",
+        (
+            "**4** — Grade 5, page 2; the larger of the listed amounts "
+            "— default"
+        ),
+        "**5** — both lists combined",
+        "**1** — Highly Capable, page 3",
         "Enter my own",
     )
+    assert sum("default" in label for label in labels) == 1
+    assert all(
+        label == "Enter my own" or label.startswith("**")
+        for label in labels
+    )
     assert all("tissues" not in label for label in labels)
+
+
+def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> None:
+    """BR-22/BR-36: every production conflict row retains item wording."""
+
+    def extractor(
+        source: object,
+        *,
+        child_id: str,
+        mime_type: str | None,
+    ) -> ExtractionEnvelope:
+        del source, mime_type
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="grade-five",
+                    child_id=child_id,
+                    raw_text="1 Composition book (sewn binding) - graph paper",
+                    canonical_item="composition_notebooks",
+                    quantity=1,
+                    attributes={"ruling": "graph"},
+                    source_section="5th Grade",
+                    source_page=2,
+                    extraction_confidence=1.0,
+                ),
+                Requirement(
+                    req_id="highly-capable",
+                    child_id=child_id,
+                    raw_text="4 Regular composition books",
+                    canonical_item="composition_notebooks",
+                    quantity=4,
+                    source_section="Highly Capable Class",
+                    source_page=3,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+
+    extracted, errors = app._extract_list_inputs(
+        (
+            ListInput(
+                child_id="child-1",
+                source="rendered production document",
+                mime_type="text/plain",
+                document_name="district.pdf",
+            ),
+        ),
+        extractor=extractor,
+    )
+    _, result = consolidate_extractions(extracted)
+    rows = app.conflict_source_rows(item_decisions(result)[0])
+
+    assert errors == {}
+    assert tuple(row.quantity for row in rows) == (1, 4)
+    assert tuple(row.exact_line for row in rows) == (
+        "1 Composition book (sewn binding) - graph paper",
+        "4 Regular composition books",
+    )
+    assert all(not row.display_line.strip().isnumeric() for row in rows)
+    assert rows[1].exact_line != str(rows[1].quantity)
+
+
+def test_custom_quantity_choice_highlights_until_parent_enters_value() -> None:
+    """FR-12: the custom quantity field has explicit pending state."""
+
+    state: dict[str, object] = {
+        "choice": app.MERGE_CUSTOM_QUANTITY_LABEL,
+        "quantity": 4,
+    }
+    choices = {
+        "**4** — Highly Capable Class, page 3 — default": 4,
+        app.MERGE_CUSTOM_QUANTITY_LABEL: None,
+    }
+
+    app.apply_merge_quick_choice(
+        state,
+        "choice",
+        {"quantity-choice": "quantity"},
+        choices,
+        "custom-pending",
+    )
+    assert state["custom-pending"] is True
+
+    app.mark_merge_quantities_custom(
+        state,
+        "choice",
+        app.MERGE_CUSTOM_QUANTITY_LABEL,
+        "custom-pending",
+    )
+    assert state["custom-pending"] is False
+
+
+def test_failed_concurrent_document_retries_without_repeating_success() -> None:
+    """BR-38: only a failed production-shaped extraction retries sequentially."""
+
+    attempts = {"child-1": 0, "child-2": 0}
+    progress: list[tuple[str, int, int]] = []
+
+    def extractor(
+        source: object,
+        *,
+        child_id: str,
+        mime_type: str | None,
+    ) -> ExtractionEnvelope:
+        del source, mime_type
+        attempts[child_id] += 1
+        if child_id == "child-2" and attempts[child_id] == 1:
+            raise TimeoutError("first attempt did not finish")
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id=f"{child_id}:pencils",
+                    child_id=child_id,
+                    raw_text="1 pencil",
+                    canonical_item="pencils",
+                    quantity=1,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+
+    extracted, errors = app._extract_list_inputs(
+        (
+            ListInput("child-1", "first list"),
+            ListInput("child-2", "second list"),
+        ),
+        extractor=extractor,
+        progress_callback=lambda stage, done, total, detail: (
+            progress.append((stage, done, total))
+        ),
+    )
+
+    assert tuple(extracted) == ("child-1", "child-2")
+    assert errors == {}
+    assert attempts == {"child-1": 1, "child-2": 2}
+    assert ("extraction_retry", 1, 1) in progress
 
 
 def test_saved_list_page_count_uses_retained_production_input() -> None:
