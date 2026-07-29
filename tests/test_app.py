@@ -2917,73 +2917,12 @@ def test_personalize_screen_groups_sources_in_student_summary() -> None:
     assert "Products and prices come next" in source
     assert "Confirm the readings" not in source
     assert "Notes from the teacher" in source
-    assert "Already provided by school" in source
 
 
-def test_personalize_summary_and_marked_section_share_production_state() -> None:
-    """BR-52: rendered counts and marked decisions use the same section."""
-
-    class SummaryColumn:
-        def __init__(
-            self,
-            recorder: "SummaryRecorder",
-            row_index: int,
-            column_index: int,
-        ) -> None:
-            self.recorder = recorder
-            self.row_index = row_index
-            self.column_index = column_index
-
-        def _record(self, value: object) -> None:
-            self.recorder.rows[self.row_index][self.column_index].append(
-                str(value)
-            )
-
-        def markdown(self, value: object) -> None:
-            self._record(value)
-
-        def write(self, value: object) -> None:
-            self._record(value)
-
-        def caption(self, value: object) -> None:
-            self._record(value)
-
-        def button(self, label: str, **kwargs: object) -> bool:
-            del kwargs
-            self._record(label)
-            return False
-
-    class SummaryRecorder:
-        def __init__(self) -> None:
-            self.session_state: dict[str, object] = {}
-            self.rows: list[list[list[str]]] = []
-            self.messages: list[str] = []
-
-        def columns(self, spec: object) -> tuple[SummaryColumn, ...]:
-            count = len(spec)  # type: ignore[arg-type]
-            row_index = len(self.rows)
-            self.rows.append([[] for _ in range(count)])
-            return tuple(
-                SummaryColumn(self, row_index, column_index)
-                for column_index in range(count)
-            )
-
-        def rerun(self) -> None:
-            raise AssertionError("No summary control was clicked")
-
-        def warning(self, value: object) -> None:
-            self.messages.append(str(value))
-
-        def success(self, value: object) -> None:
-            self.messages.append(str(value))
-
-        def markdown(self, value: object) -> None:
-            self.messages.append(str(value))
-
-        def button(self, label: str, **kwargs: object) -> bool:
-            del kwargs
-            self.messages.append(label)
-            return False
+def test_personalize_navigation_round_trip_uses_non_widget_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-52: the production screen survives every tab and item-jump route."""
 
     rows = (
         SupplyItemReview(
@@ -3019,94 +2958,62 @@ def test_personalize_summary_and_marked_section_share_production_state() -> None
             confidence=1.0,
         ),
     )
-    groups = review_flag_groups(rows)
-    sections = app.build_personalize_student_sections(
-        ({"child_id": "child-1", "label": "Jawan"},),
-        rows,
-        groups,
-        unhandled_group_ids=frozenset(
-            group.group_id for group in groups
-        ),
-    )
-    recorder = SummaryRecorder()
+    class WidgetAwareState(dict[str, object]):
+        """Reject application writes to keys owned by rendered widgets."""
 
-    app._render_personalize_summary(
-        recorder,
-        sections,
-        {row.review_id: row for row in rows},
-    )
+        def __init__(self, values: dict[str, object]) -> None:
+            super().__init__(values)
+            self.widget_keys: set[str] = set()
 
-    section = sections[0]
-    assert section.item_count == 2
-    assert section.decision_count == 1
-    assert section.excluded_count == 1
-    assert section.anchored_flag_groups[0].row_ids == ("flagged",)
-    assert recorder.rows[1][0] == ["Jawan"]
-    assert recorder.rows[1][1:4] == [["2"], ["1"], ["1"]]
-    assert recorder.rows[1][4] == ["Approve defaults"]
+        def __setitem__(self, key: str, value: object) -> None:
+            if key in self.widget_keys:
+                raise AssertionError(
+                    f"Application assigned widget-owned key {key}"
+                )
+            super().__setitem__(key, value)
 
+        def set_widget(self, key: str, value: object) -> None:
+            dict.__setitem__(self, key, value)
 
-def test_personalize_screen_tabs_counts_and_item_jump_use_live_state() -> None:
-    """BR-52: the production screen shares counts and navigates to one item."""
-
-    rows = (
-        SupplyItemReview(
-            review_id="clear",
-            req_id="clear",
-            child_id="child-1",
-            item_name="pencils",
-            required_quantity=12,
-            source_text="12 pencils",
-            confidence=1.0,
-        ),
-        SupplyItemReview(
-            review_id="flagged",
-            req_id="flagged",
-            child_id="child-1",
-            item_name="notebook_paper",
-            required_quantity=1,
-            unit="pack",
-            package_quantity_state="assumed",
-            package_size=150,
-            issue_codes=("ambiguous_package_size",),
-            source_text="1 pack notebook paper",
-            confidence=0.8,
-        ),
-        SupplyItemReview(
-            review_id="owned",
-            req_id="owned",
-            child_id="child-1",
-            item_name="backpacks",
-            required_quantity=0,
-            already_owned=True,
-            source_text="1 backpack",
-            confidence=1.0,
-        ),
-    )
-    (group,) = review_flag_groups(rows)
-    state: dict[str, object] = {
+    state = WidgetAwareState({
         "intake": {
             "children": (
                 {"child_id": "child-1", "label": "Jawan"},
             )
         },
-        "extracted_lists": {"child-1": ExtractionEnvelope()},
+        "extracted_lists": {
+            "child-1": ExtractionEnvelope(
+                catalog_unavailable_items=(
+                    CatalogUnavailableItem(
+                        child_id="child-1",
+                        item_name="graphing_calculator",
+                        source_line="1 graphing calculator",
+                    ),
+                ),
+            )
+        },
         "review_items": rows,
         "parent_added_review_items": (),
         "extraction_errors": {},
         "list_inputs": (),
-        "personalize_active_tab": "summary",
-    }
+        app.PERSONALIZE_SELECTED_VIEW_KEY: "summary",
+    })
 
     class ReviewScreenRecorder:
-        def __init__(self, clicked_label: str | None = None) -> None:
+        def __init__(self) -> None:
             self.session_state = state
-            self.clicked_label = clicked_label
-            self.clicked = False
             self.messages: list[str] = []
             self.writes: list[str] = []
             self.buttons: list[str] = []
             self.tab_labels: tuple[str, ...] = ()
+            self.radio_callback: tuple[object, tuple[object, ...]] | None = None
+            self.button_callbacks: dict[
+                str, tuple[object, tuple[object, ...]]
+            ] = {}
+            self.radio_label_visibility: str | None = None
+            self.components = SimpleNamespace(
+                v1=SimpleNamespace(html=lambda *args, **kwargs: None)
+            )
 
         def __enter__(self) -> "ReviewScreenRecorder":
             return self
@@ -3125,6 +3032,14 @@ def test_personalize_screen_tabs_counts_and_item_jump_use_live_state() -> None:
 
         def container(self, **kwargs: object) -> "ReviewScreenRecorder":
             del kwargs
+            return self
+
+        def expander(
+            self,
+            label: str,
+            **kwargs: object,
+        ) -> "ReviewScreenRecorder":
+            del label, kwargs
             return self
 
         def header(self, value: object) -> None:
@@ -3159,14 +3074,27 @@ def test_personalize_screen_tabs_counts_and_item_jump_use_live_state() -> None:
             *,
             key: str,
             format_func: object | None = None,
+            index: int | None = 0,
+            on_change: object | None = None,
+            args: tuple[object, ...] = (),
             **kwargs: object,
         ) -> str:
-            del kwargs
+            self.radio_label_visibility = str(
+                kwargs.get("label_visibility")
+            )
             if format_func is not None:
                 self.tab_labels = tuple(
                     format_func(option) for option in options  # type: ignore[operator]
                 )
-            self.session_state.setdefault(key, options[0])
+            if key not in self.session_state:
+                selected_index = 0 if index is None else index
+                self.session_state.set_widget(
+                    key,
+                    options[selected_index],
+                )
+            self.session_state.widget_keys.add(key)
+            if on_change is not None:
+                self.radio_callback = (on_change, args)
             return str(self.session_state[key])
 
         def button(
@@ -3179,39 +3107,257 @@ def test_personalize_screen_tabs_counts_and_item_jump_use_live_state() -> None:
         ) -> bool:
             del kwargs
             self.buttons.append(label)
-            should_click = (
-                not self.clicked and label == self.clicked_label
-            )
-            if should_click:
-                self.clicked = True
-                if on_click is not None:
-                    on_click(*args)  # type: ignore[operator]
-            return should_click
+            if on_click is not None:
+                self.button_callbacks[label] = (on_click, args)
+            return False
 
         def rerun(self) -> None:
-            raise AssertionError("The item jump uses a callback, not rerun")
+            raise AssertionError("Navigation callbacks do not request reruns")
 
-    initial = ReviewScreenRecorder(clicked_label="Notebook paper")
-    app._render_review(initial)
+        def select_view(self, view: str) -> None:
+            assert self.radio_callback is not None
+            callback, args = self.radio_callback
+            self.session_state.set_widget(
+                app.PERSONALIZE_VIEW_WIDGET_KEY,
+                view,
+            )
+            callback(*args)  # type: ignore[operator]
 
-    assert initial.tab_labels == ("Summary", "Jawan  (1)")
-    assert initial.writes[:3] == ["2", "1", "1"]
-    assert "1 decision remains." in initial.messages
-    assert state["personalize_active_tab"] == "child-1"
-    assert state["personalize_scroll_target"] == (
-        app._personalize_item_anchor("flagged")
+        def click(self, label: str) -> None:
+            callback, args = self.button_callbacks[label]
+            callback(*args)  # type: ignore[operator]
+
+    monkeypatch.setattr(
+        app,
+        "_render_compact_review_row",
+        lambda st, members, *args, **kwargs: (
+            {item.review_id: item for item in members},
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_settled_review_row",
+        lambda st, item, *args, **kwargs: item,
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_excluded_review_row",
+        lambda st, item, *args, **kwargs: item,
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_personalize_unavailable",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        app,
+        "_personalize_source_summary",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        app,
+        "_new_review_item_from_controls",
+        lambda *args, **kwargs: None,
     )
 
-    state["personalize_active_tab"] = "summary"
-    state.pop("personalize_scroll_target", None)
-    state[f"{group.group_id}:confirmed"] = True
-    resolved = ReviewScreenRecorder()
-    app._render_review(resolved)
+    summary = ReviewScreenRecorder()
+    app._render_review(summary)
+    assert summary.tab_labels == ("Summary", "Jawan  (1)")
+    assert summary.radio_label_visibility == "collapsed"
+    assert "1 decision remains." in summary.messages
+    assert summary.buttons[:5] == [
+        "Approve all remaining defaults",
+        "1 pack of 150 notebook paper",
+        "12 pencils",
+        "0 backpacks",
+        "1 graphing calculator",
+    ]
+    assert "Needs a decision · package size assumed" in summary.writes
+    assert "In cart" in summary.writes
+    assert "Excluded by you" in summary.writes
+    assert "Not stocked (source it yourself)" in summary.writes
 
-    assert resolved.tab_labels == ("Summary", "Jawan")
-    assert resolved.writes[:3] == ["2", "0", "1"]
-    assert "Nothing left to decide." in resolved.messages
-    assert "Notebook paper" not in resolved.buttons
+    summary.select_view("child-1")
+    student = ReviewScreenRecorder()
+    app._render_review(student)
+    assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "child-1"
+
+    student.select_view("summary")
+    returned_summary = ReviewScreenRecorder()
+    app._render_review(returned_summary)
+    assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "summary"
+
+    item_label = next(
+        label
+        for label in returned_summary.buttons
+        if "notebook paper" in label.casefold()
+    )
+    returned_summary.click(item_label)
+    jumped_student = ReviewScreenRecorder()
+    app._render_review(jumped_student)
+    assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "child-1"
+    assert "personalize_scroll_target" not in state
+
+    jumped_student.select_view("summary")
+    final_summary = ReviewScreenRecorder()
+    app._render_review(final_summary)
+    assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "summary"
+    assert app.PERSONALIZE_VIEW_WIDGET_KEY in state.widget_keys
+    assert "personalize_active_tab" not in state
+
+
+def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
+    """BR-52/BR-64: the production Summary opens both retained source types."""
+
+    typed_text = "12 pencils\n1 box of tissues\n"
+    pdf_path = (
+        Path(__file__).parent
+        / "sample_lists"
+        / "Machiasschoolsupplylist 1.pdf"
+    )
+    state: dict[str, object] = {
+        "intake": {
+            "children": (
+                {"child_id": "child-1", "label": "Kevin"},
+                {"child_id": "child-2", "label": "Maya"},
+            )
+        },
+        "extracted_lists": {
+            "child-1": ExtractionEnvelope(),
+            "child-2": ExtractionEnvelope(),
+        },
+        "review_items": (),
+        "parent_added_review_items": (),
+        "extraction_errors": {},
+        "list_inputs": (
+            app._build_pasted_list_input(
+                child_id="child-1",
+                text=typed_text,
+                document_name="Kevin's supply list",
+            ),
+            ListInput(
+                child_id="child-2",
+                source=pdf_path.read_bytes(),
+                mime_type="application/pdf",
+                document_name=pdf_path.name,
+            ),
+        ),
+        app.PERSONALIZE_SELECTED_VIEW_KEY: "summary",
+    }
+
+    class SourceScreenRecorder:
+        def __init__(self) -> None:
+            self.session_state = state
+            self.messages: list[str] = []
+            self.popovers: list[str] = []
+            self.text_sources: list[str] = []
+            self.pdf_pages: list[bytes] = []
+
+        def __enter__(self) -> "SourceScreenRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def columns(
+            self,
+            spec: object,
+            **kwargs: object,
+        ) -> tuple["SourceScreenRecorder", ...]:
+            del kwargs
+            count = spec if isinstance(spec, int) else len(spec)
+            return tuple(self for _ in range(count))
+
+        def container(self, **kwargs: object) -> "SourceScreenRecorder":
+            del kwargs
+            return self
+
+        def popover(
+            self,
+            label: str,
+            **kwargs: object,
+        ) -> "SourceScreenRecorder":
+            del kwargs
+            self.popovers.append(label)
+            return self
+
+        def header(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def caption(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del kwargs
+            self.messages.append(str(value))
+
+        def warning(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def success(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def error(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def write(self, value: object) -> None:
+            self.messages.append(str(value))
+
+        def code(
+            self,
+            value: str,
+            *,
+            language: str | None,
+            wrap_lines: bool,
+        ) -> None:
+            assert language is None
+            assert wrap_lines is False
+            self.text_sources.append(value)
+
+        def image(self, value: bytes, **kwargs: object) -> None:
+            del kwargs
+            self.pdf_pages.append(value)
+
+        def info(self, value: object) -> None:
+            raise AssertionError(value)
+
+        def radio(
+            self,
+            label: str,
+            options: tuple[str, ...],
+            *,
+            key: str,
+            index: int,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            self.session_state.setdefault(key, options[index])
+            return str(self.session_state[key])
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del label, kwargs
+            return False
+
+        def rerun(self) -> None:
+            raise AssertionError("No control was clicked")
+
+    recorder = SourceScreenRecorder()
+    app._render_review(recorder)
+
+    assert len(recorder.popovers) == 2
+    assert "Kevin" in recorder.popovers[0]
+    assert "Kevin's supply list" in recorder.popovers[0]
+    assert "Maya" in recorder.popovers[1]
+    assert pdf_path.name in recorder.popovers[1]
+    assert recorder.text_sources == [typed_text]
+    assert len(recorder.pdf_pages) == 1
+    assert recorder.messages.index("**Source documents**") < (
+        recorder.messages.index("**Every item**")
+    )
+    assert recorder.messages.index("**Every item**") < (
+        recorder.messages.index("**By student**")
+    )
 
 
 def test_personalize_source_summary_extracts_scope_and_deduplicates_gaps() -> None:
@@ -3236,6 +3382,9 @@ def test_personalize_source_summary_extracts_scope_and_deduplicates_gaps() -> No
 
         def write(self, value: object) -> None:
             self.writes.append(str(value))
+
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del value, kwargs
 
         def error(self, value: object) -> None:
             self.errors.append(str(value))
@@ -4277,8 +4426,8 @@ def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> N
         def __init__(self, recorder: RenderedMergeRecorder) -> None:
             self.recorder = recorder
 
-        def markdown(self, value: object) -> None:
-            del value
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del value, kwargs
 
         def write(self, value: object) -> None:
             self.recorder.writes.append(str(value))
@@ -5084,8 +5233,8 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
         def warning(self, value: object) -> None:
             self.writes.append(str(value))
 
-        def markdown(self, value: object) -> None:
-            del value
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del value, kwargs
 
         def expander(
             self,

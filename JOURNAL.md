@@ -3227,3 +3227,69 @@ parent-entered amount when the entry count changes.
 - The real Streamlit lifecycle test module remains skipped locally because
   Streamlit is unavailable on this Windows ARM64 machine. The added tests call
   the same `_render_budget_step` function used by the screen.
+
+## 2026-07-29 — Personalize navigation and complete Summary
+
+### Objective
+
+Remove the Streamlit widget-state crash when moving between Personalize views
+and replace the count-only Summary with a compact, complete review.
+
+### Work completed
+
+- Separated the durable Personalize selection from the radio widget's state.
+  Direct radio changes and student/item jump callbacks now update only the
+  non-widget selection.
+- Hid the navigation control label while retaining an accessible label.
+- Rebuilt the Summary in this order: overall decision status, approve-all
+  defaults, source documents, every item, and per-student counts and controls.
+- Added one Summary source popover per student list, including exact retained
+  text for pasted lists and rendered pages for uploaded PDFs.
+- Rendered every BR-52 item with one of the four requested statuses and a short
+  reason for pending decisions.
+- Made item rows and student names navigate to their production student view.
+- Added stable anchors for settled, excluded, conditional, and unavailable
+  items; excluded or unavailable sections open when a Summary jump targets
+  them.
+- Included both current and legacy catalog-unavailable records in BR-52's
+  shared per-student exclusion set.
+
+### Decisions made
+
+- The durable view key is `personalize_selected_view`; the radio alone owns
+  `personalize_view_control`.
+- Existing `personalize_active_tab` values are migrated once and removed.
+- Source links appear once near the top of Summary rather than once per item.
+- Per-student approve controls remain visible but disabled when that student
+  has no remaining default decision.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused Personalize and lifecycle suite:
+  `py -3.12-arm64 -m pytest -q tests/test_app.py tests/test_streamlit_lifecycle.py`
+  -> 109 passed, 1 skipped.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 416 passed, 1 skipped in
+  3.23 seconds.
+- The production `_render_review` path was driven through Summary, a student
+  view, back to Summary, an item jump, and back to Summary while the test state
+  rejected assignments to widget-owned keys.
+- The production Summary opened exact pasted text and rendered page 1 from a
+  real PDF fixture.
+
+### Problems or limitations
+
+- Streamlit is not installed locally on this Windows ARM64 machine, so visual
+  inspection remains a deployed-environment check. The lifecycle regression
+  test calls the production screen renderer and enforces the widget ownership
+  rule that caused the deployed crash.
+
+### Recommended next step
+
+Deploy this Personalize-only change and visually verify table density and
+source-popover sizing with two 20-plus-item lists.
