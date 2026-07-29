@@ -139,7 +139,8 @@ def review_issue_explanations(
             )
         elif issue == "low_confidence":
             messages.append(
-                "This reading is uncertain. Compare it with the original line."
+                "This extraction is uncertain. Compare it with the original "
+                "line."
             )
         elif issue == "quantity_range":
             if (
@@ -358,6 +359,7 @@ def organize_extractions(
             source_page=requirement.source_page,
             source_language=requirement.source_language,
             sources=requirement.sources,
+            system_decisions=requirement.system_decisions,
             notes=None,
             source_text=requirement.raw_text,
             confidence=requirement.extraction_confidence,
@@ -723,6 +725,7 @@ def confirmed_requirements(
                 source_page=row.source_page,
                 source_language=row.source_language,
                 sources=row.sources,
+                system_decisions=(),
                 attributes=RequirementAttributes(),
                 extraction_confidence=row.confidence,
             )
@@ -735,6 +738,7 @@ def confirmed_requirements(
                     "attributes": RequirementAttributes.model_validate(
                         attributes
                     ),
+                    "system_decisions": row.system_decisions,
                 }
             )
         )

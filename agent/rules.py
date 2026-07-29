@@ -142,6 +142,25 @@ REQUIREMENT_ITEM_IDENTITY_FIELDS = (
 REQUIREMENT_CONSTRAINT_CONFLICT_ACTION = "parent_choice"
 # BR-26: genuinely incompatible constraints merge once but cannot proceed without one parent choice.
 
+REQUIREMENT_MERGE_ORIGIN_FIELDS = (
+    "document_name",
+    "section_name",
+)
+# BR-27: same-item rows from one document section remain distinct and additive; rows from different sections or documents may consolidate.
+
+PARENT_EDITABLE_DETAIL_FIELDS = (
+    "size",
+    "material",
+    "acceptable_colors",
+)
+# BR-28: show an editable detail only when the source supplied it or in-scope catalog products differ on it.
+
+SYSTEM_DECISION_CONSOLIDATED_SOURCES = "consolidated_sources"
+SYSTEM_DECISION_RECONCILED_BRAND = "reconciled_brand"
+SYSTEM_DECISION_RECONCILED_EXCLUSIONS = "reconciled_exclusions"
+SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX = "reconciled_attribute:"
+# BR-29: every deterministic choice made while interpreting an item is visible beside that item.
+
 SectionResolutionAction = Literal[
     "auto_select",
     "rule_out",

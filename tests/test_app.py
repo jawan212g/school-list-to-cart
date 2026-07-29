@@ -22,9 +22,10 @@ from agent.schema import (
     DocumentStructureEnvelope,
     ExtractionEnvelope,
     Requirement,
+    RequirementSource,
     SupplyItemReview,
 )
-from data.loader import Offer, Store
+from data.loader import Offer, Store, load_catalog
 
 
 @dataclass(frozen=True)
@@ -2300,15 +2301,15 @@ def test_review_framing_names_cart_choices_and_uncertainty() -> None:
     )
 
 
-def test_personalize_screen_keeps_source_beside_cart_choice() -> None:
-    """The primary path is compact source, cart choice, and confirmation."""
+def test_personalize_screen_groups_sources_in_student_summary() -> None:
+    """BR-29: routine rows use the student summary instead of source noise."""
 
     source = inspect.getsource(app._render_review)
 
     assert "data_editor" not in source
     assert "Personalize what goes in your cart" in source
-    assert source.index("From the list") < source.index("For your cart")
-    assert source.index("For your cart") < source.index("Choose")
+    assert "_personalize_source_summary" in source
+    assert "Items for your cart" in source
     assert "Products and prices come next" in source
     assert "Confirm the readings" not in source
     assert "Notes from the teacher" in source
@@ -2605,6 +2606,112 @@ def test_saved_list_page_count_uses_retained_production_input() -> None:
 
     assert app._saved_list_page_count(pdf_input) == 3
     assert app._saved_list_page_count(text_input) == 1
+
+
+def test_review_detail_visibility_uses_real_catalog_variation() -> None:
+    """BR-28: only source-backed or catalog-discriminating fields appear."""
+
+    item = SupplyItemReview(
+        review_id="review-composition",
+        req_id="composition",
+        child_id="child-1",
+        item_name="composition_notebooks",
+        required_quantity=2,
+        source_text="2 composition notebooks",
+        confidence=1.0,
+    )
+
+    visibility = app.review_detail_field_visibility(
+        item,
+        load_catalog(),
+    )
+    supplied_material = app.review_detail_field_visibility(
+        item.model_copy(update={"material": "cardboard"}),
+        load_catalog(),
+    )
+
+    assert visibility == {
+        "size": False,
+        "material": False,
+        "acceptable_colors": True,
+    }
+    assert supplied_material["material"] is True
+
+
+def test_source_annotation_is_hidden_only_at_display_edge() -> None:
+    """Matrix annotations stay in provenance but not parent-facing copy."""
+
+    exact_line = "Composition book | 5th: 1"
+    source = RequirementSource(
+        source_req_id="composition",
+        document_name="district.pdf",
+        section_name="5th Grade",
+        page_number=2,
+        exact_line=exact_line,
+        quantity=1,
+    )
+
+    assert app._display_source_line(source.exact_line) == "Composition book"
+    assert source.exact_line == exact_line
+
+
+def test_review_understanding_pluralizes_composition_notebooks() -> None:
+    """Personalize copy uses a grammatically correct quantity label."""
+
+    item = SupplyItemReview(
+        review_id="review-composition",
+        req_id="composition",
+        child_id="child-1",
+        item_name="composition_notebooks",
+        required_quantity=2,
+        source_text="2 composition notebooks",
+        confidence=1.0,
+    )
+
+    assert app.review_understanding_text(item) == (
+        "2 composition notebooks"
+    )
+
+
+def test_system_merge_decisions_are_plainly_visible() -> None:
+    """BR-29: consolidation and reconciliation are named at the item."""
+
+    item = SupplyItemReview(
+        review_id="review-folder",
+        req_id="folder",
+        child_id="child-1",
+        item_name="folders",
+        required_quantity=1,
+        sources=(
+            RequirementSource(
+                source_req_id="folder-1",
+                document_name="district.pdf",
+                section_name="5th Grade",
+                page_number=2,
+                exact_line="1 folder",
+                quantity=1,
+            ),
+            RequirementSource(
+                source_req_id="folder-2",
+                document_name="district.pdf",
+                section_name="Highly Capable",
+                page_number=3,
+                exact_line="1 plastic folder",
+                quantity=1,
+            ),
+        ),
+        system_decisions=(
+            "consolidated_sources",
+            "reconciled_attribute:material",
+        ),
+        source_text="1 folder",
+        confidence=1.0,
+    )
+
+    messages = app.review_system_decision_messages(item)
+
+    assert messages[0] == "Combined from 2 places in the list."
+    assert "material" in messages[1]
 
 
 def test_grade_preselection_handles_ordinals_and_preserves_parent_changes() -> None:

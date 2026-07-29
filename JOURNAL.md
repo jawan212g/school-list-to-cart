@@ -1828,3 +1828,77 @@ lists workflow.
 
 Deploy Part A-3 and verify the Grade 5 plus Highly Capable section override, merged
 source display, and custom quantity control once in the live Streamlit interface.
+
+## 2026-07-28 - Scope merges and organize Personalize by student
+
+### Objective
+
+Keep deliberately enumerated same-section items additive, combine every open
+same-item question into one decision, and make the Lists and Personalize screens
+compact and student-centered.
+
+### Work completed
+
+- Added document-section origin to deterministic requirement merge scope. Repeated
+  same-item rows within one section stay separate; cross-section or cross-document
+  restatements can consolidate.
+- Grouped quantity and detail conflicts into one item decision and allowed zero-or-
+  greater quantities per source-backed variant, retaining the source-requested
+  quantities as defaults.
+- Replaced generic missing-detail validation with item names and a link to the first
+  affected card.
+- Grouped Personalize content by student with one document/section/page summary,
+  collapsed excluded content, and per-item sources only for uncertainty,
+  consolidation, assumptions, or deterministic reconciliation.
+- Hid size, material, and acceptable-color editors unless the source supplied the
+  field or available catalog offers differ on the mapped matching attribute.
+- Removed matrix annotations at the display edge, preserved exact provenance,
+  removed “Included by default,” formatted canonical item names, and corrected
+  quantity pluralization.
+
+### Decisions made
+
+- Added BR-27 through BR-29 without renumbering existing rules.
+- Used the same catalog attribute aliases as matching for detail visibility; direct
+  JSON-key coverage alone would incorrectly treat catalog color as absent.
+- Kept shared conditional questions and teacher notes deduplicated, anchoring each
+  under the first affected student's section.
+
+### Problems or limitations
+
+- Streamlit remains intentionally unavailable on Windows ARM64, so the real AppTest
+  module is skipped locally and must execute in the deployed x86 environment.
+- Kelley remained nondeterministic. The $85 suitability pass produced a higher
+  baseline cart than the $150 pass even though it reused the same extractions, so
+  the regression movement cannot be attributed solely to BR-27.
+- Direct catalog coverage is sparse: size 14/162, material 22/162, and
+  acceptable_colors 0/162. Matching-effective alias coverage is 35/162, 22/162,
+  and 50/162 respectively.
+
+### Files created or changed
+
+- Updated `agent/requirement_merge.py`, `agent/review.py`, `agent/rules.py`,
+  `agent/schema.py`, `app.py`, `tests/test_app.py`,
+  `tests/test_requirement_merge.py`, and `tests/test_sections.py`.
+
+### Testing performed
+
+- `py -3.12-arm64 -m pytest -q`: 287 passed, 1 skipped.
+- Verified cross-section consolidation for backpack, scissors, composition
+  notebooks, and folders; verified two same-section Sharpie variants remain two
+  additive requirements.
+- Kelley GPT API (`gpt-oss-20b`): $94.81 landed and five interrupts at $150.
+  Reusing the extraction at $85 produced a $110.04 baseline cart and a $71.47
+  recommended plan with four interrupts.
+
+### Remaining work
+
+- Run the Streamlit AppTest module and visually inspect Lists and Personalize in the
+  deployed x86 environment.
+- Use a captured extraction and candidate map for any future strict cart-regression
+  attribution; live provider calls do not isolate merge behavior.
+
+### Recommended next step
+
+Deploy Part A-4 and verify the mixed-section Sharpie example, per-variant quantity
+controls, student summaries, and collapsed excluded-content panel in one live pass.

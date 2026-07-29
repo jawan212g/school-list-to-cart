@@ -139,7 +139,7 @@ def test_translation_context_names_detected_languages() -> None:
 
     assert app._translation_context(structure, resolution) == (
         "This document repeats the lists in Spanish and Haitian Creole. "
-        "The English version was read."
+        "Items were extracted from the English version."
     )
 
 

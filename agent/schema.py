@@ -270,6 +270,7 @@ class Requirement(BaseModel):
     source_page: int = Field(default=NONPAGINATED_SOURCE_PAGE, ge=1)
     source_language: str | None = None
     sources: tuple[RequirementSource, ...] = ()
+    system_decisions: tuple[str, ...] = ()
     attributes: RequirementAttributes = Field(
         default_factory=RequirementAttributes
     )
@@ -286,6 +287,7 @@ class Requirement(BaseModel):
         if not isinstance(value, Mapping):
             return value
         normalized = dict(value)
+        normalized["system_decisions"] = ()
         if normalized.get("quantity_is_range") is not True:
             normalized["quantity_max"] = None
         if (
@@ -558,6 +560,7 @@ class SupplyItemReview(BaseModel):
     source_page: int | None = Field(default=None, ge=1)
     source_language: str | None = None
     sources: tuple[RequirementSource, ...] = ()
+    system_decisions: tuple[str, ...] = ()
     notes: str | None = None
     source_text: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)

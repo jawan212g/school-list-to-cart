@@ -99,12 +99,18 @@ from agent.rules import (
     MODEL_MAX_CONCURRENCY,
     NONPAGINATED_SOURCE_PAGE,
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
+    PARENT_EDITABLE_DETAIL_FIELDS,
+    SYSTEM_DECISION_CONSOLIDATED_SOURCES,
+    SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX,
+    SYSTEM_DECISION_RECONCILED_BRAND,
+    SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
     SUBSTITUTION_NONE,
     grade_token_identifier,
 )
 from agent.requirement_merge import (
     RequirementMergeResult,
     consolidate_extractions,
+    item_decisions,
     requirement_source,
 )
 from agent.sections import (
@@ -530,7 +536,7 @@ def progress_narration(
 
     if stage == "extraction":
         noun = "list" if total == 1 else "lists"
-        return f"Reading {completed} of {total} {noun}"
+        return f"Extracting {completed} of {total} {noun}"
     if stage == "normalization":
         return "Combining shared items across the lists"
     if stage == "matching":
@@ -2994,6 +3000,8 @@ def _initialize_state(st: Any) -> None:
         "requirement_merge_resolved": False,
         "requirement_merge_choices": {},
         "requirement_constraint_choices": {},
+        "requirement_variant_quantity_choices": {},
+        "requirement_merge_validation_errors": (),
         "review_items": (),
         "organized_list_confirmed": False,
         "allow_unresolved_items": False,
@@ -3919,6 +3927,8 @@ def clear_section_selection_after_grade_change(
         state["requirement_merge_resolved"] = False
         state["requirement_merge_choices"] = {}
         state["requirement_constraint_choices"] = {}
+        state["requirement_variant_quantity_choices"] = {}
+        state["requirement_merge_validation_errors"] = ()
         state["organized_list_confirmed"] = False
         _limit_reached_stage(state, 2)
         _invalidate_plan_state(state)
@@ -5033,7 +5043,7 @@ def _render_lists(st: Any) -> None:
     st.write(
         "Paste or upload the list for each student. If one district document "
         "contains several grades, upload it once and choose a section for "
-        "each student. Every file is checked before it is read."
+        "each student. Every file is checked before items are extracted."
     )
     saved_inputs = tuple(st.session_state["list_inputs"])
     expected_child_ids = tuple(
@@ -5075,7 +5085,7 @@ def _render_lists(st: Any) -> None:
             st.session_state["review_items"] = ()
             st.session_state["organized_list_confirmed"] = False
             _limit_reached_stage(st.session_state, 2)
-            st.session_state["progress_substep"] = "reading the lists"
+            st.session_state["progress_substep"] = "extracting the lists"
             st.session_state["screen"] = "working"
             st.rerun()
     shared_list_for_all = False
@@ -5219,6 +5229,8 @@ def _render_lists(st: Any) -> None:
         st.session_state["requirement_merge_resolved"] = False
         st.session_state["requirement_merge_choices"] = {}
         st.session_state["requirement_constraint_choices"] = {}
+        st.session_state["requirement_variant_quantity_choices"] = {}
+        st.session_state["requirement_merge_validation_errors"] = ()
         st.session_state["review_items"] = ()
         st.session_state["organized_list_confirmed"] = False
         _limit_reached_stage(st.session_state, 2)
@@ -5226,7 +5238,7 @@ def _render_lists(st: Any) -> None:
         st.session_state["list_identity_confirmed"] = False
         st.session_state["result"] = None
         st.session_state["ui_error_active"] = False
-        st.session_state["progress_substep"] = "reading the lists"
+        st.session_state["progress_substep"] = "extracting the lists"
         st.session_state["screen"] = "working"
         st.rerun()
 
@@ -5542,7 +5554,7 @@ def _extract_list_inputs(
                     "extraction",
                     done_count,
                     len(list_inputs),
-                    f"Read {done_count} of {len(list_inputs)} lists",
+                    f"Extracted {done_count} of {len(list_inputs)} lists",
                 )
             try:
                 extraction = future.result()
@@ -5996,6 +6008,19 @@ REVIEW_SINGULAR_ITEM_NAMES: Mapping[str, str] = {
     "water_bottles": "water bottle",
 }
 
+REVIEW_PLURAL_ITEM_NAMES: Mapping[str, str] = {
+    "backpacks": "backpacks",
+    "binders": "binders",
+    "composition_notebooks": "composition notebooks",
+    "folders": "folders",
+    "pencil_boxes": "pencil boxes",
+    "pencil_pouches": "pencil pouches",
+    "pencil_sharpeners": "pencil sharpeners",
+    "rulers": "rulers",
+    "spiral_notebooks": "spiral notebooks",
+    "water_bottles": "water bottles",
+}
+
 
 def review_understanding_text(item: SupplyItemReview) -> str:
     """Describe one extracted purchase in plain parent-facing language."""
@@ -6014,7 +6039,16 @@ def review_understanding_text(item: SupplyItemReview) -> str:
     if quantity is None:
         text = f"Quantity needed for {branded_name}"
     elif item.unit == "each":
-        name = singular_name if quantity == 1 else branded_name
+        name = (
+            singular_name
+            if quantity == 1
+            else REVIEW_PLURAL_ITEM_NAMES.get(
+                item.item_name,
+                display_name,
+            )
+        )
+        if item.brand and quantity != 1:
+            name = f"{item.brand} {name}"
         if item.brand and quantity == 1:
             name = f"{item.brand} {singular_name}"
         text = f"{quantity} {name}"
@@ -6049,6 +6083,44 @@ def review_understanding_text(item: SupplyItemReview) -> str:
     if item.condition:
         details.append(f"only if {item.condition}")
     return ", ".join((text, *details))
+
+
+def review_system_decision_messages(
+    item: SupplyItemReview,
+) -> tuple[str, ...]:
+    """Translate BR-29 interpretation choices into parent language."""
+
+    messages: list[str] = []
+    if SYSTEM_DECISION_CONSOLIDATED_SOURCES in item.system_decisions:
+        messages.append(
+            f"Combined from {len(item.sources)} places in the list."
+        )
+    if SYSTEM_DECISION_RECONCILED_BRAND in item.system_decisions:
+        messages.append(
+            "The sources differed on brand detail; the explicit requirement "
+            "was kept."
+        )
+    if SYSTEM_DECISION_RECONCILED_EXCLUSIONS in item.system_decisions:
+        messages.append(
+            "The exclusions from every contributing source were kept."
+        )
+    for decision in item.system_decisions:
+        if not decision.startswith(
+            SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX
+        ):
+            continue
+        field_name = decision.removeprefix(
+            SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX
+        )
+        field_label = ATTRIBUTE_DISPLAY_NAMES.get(
+            field_name,
+            field_name.replace("_", " "),
+        )
+        messages.append(
+            f"The sources described {field_label} differently; the compatible "
+            "details were combined."
+        )
+    return tuple(messages)
 
 
 def review_child_framing(
@@ -6153,20 +6225,51 @@ def _review_control_update(
     )
 
 
+def review_detail_field_visibility(
+    item: SupplyItemReview,
+    offers: Sequence[Offer],
+) -> Mapping[str, bool]:
+    """Apply BR-28 using the same catalog attribute keys as matching."""
+
+    supplied_values: Mapping[str, object] = {
+        "size": item.size,
+        "material": item.material,
+        "acceptable_colors": item.color,
+    }
+    visibility: dict[str, bool] = {}
+    for field_name in PARENT_EDITABLE_DETAIL_FIELDS:
+        catalog_values: set[str] = set()
+        for offer in offers:
+            if offer.category != item.item_name or offer.stock_qty <= 0:
+                continue
+            for key in ATTRIBUTE_OFFER_KEYS[field_name]:
+                value = offer.attributes.get(key)
+                if value not in (None, "", (), [], {}):
+                    catalog_values.add(repr(value).casefold())
+        visibility[field_name] = (
+            supplied_values[field_name] not in (None, "", (), [], {})
+            or len(catalog_values) > 1
+        )
+    return visibility
+
+
 def _render_review_detail_controls(
     st: Any,
     item: SupplyItemReview,
     *,
     key_prefix: str,
+    offers: Sequence[Offer],
 ) -> SupplyItemReview:
     """Render secondary item editing controls inside a collapsed expander."""
 
+    visibility = review_detail_field_visibility(item, offers)
     with st.expander("More detail"):
         first, second = st.columns(2)
         item_name = first.selectbox(
             "Item",
             options=tuple(sorted(ALLOWED_CATEGORIES)),
             index=tuple(sorted(ALLOWED_CATEGORIES)).index(item.item_name),
+            format_func=_item_display_name,
             key=f"{key_prefix}:item",
         )
         quantity = int(
@@ -6196,21 +6299,27 @@ def _render_review_detail_controls(
             value=item.brand or "",
             key=f"{key_prefix}:brand",
         )
-        size = second.text_input(
-            "Size or dimensions",
-            value=item.size or "",
-            key=f"{key_prefix}:size",
-        )
-        colors = first.text_input(
-            "Acceptable colors",
-            value=", ".join(item.color),
-            key=f"{key_prefix}:colors",
-        )
-        material = second.text_input(
-            "Material",
-            value=item.material or "",
-            key=f"{key_prefix}:material",
-        )
+        size = item.size or ""
+        if visibility["size"]:
+            size = second.text_input(
+                "Size or dimensions",
+                value=size,
+                key=f"{key_prefix}:size",
+            )
+        colors = ", ".join(item.color)
+        if visibility["acceptable_colors"]:
+            colors = first.text_input(
+                "Acceptable colors",
+                value=colors,
+                key=f"{key_prefix}:colors",
+            )
+        material = item.material or ""
+        if visibility["material"]:
+            material = second.text_input(
+                "Material",
+                value=material,
+                key=f"{key_prefix}:material",
+            )
         required_details = st.text_input(
             "Other required details",
             value=str(
@@ -6308,6 +6417,7 @@ def _copy_shared_review_edits(
             "already_owned": source.already_owned,
             "allow_equivalents": source.allow_equivalents,
             "review_status": source.review_status,
+            "system_decisions": source.system_decisions,
         }
     )
 
@@ -6318,6 +6428,7 @@ def _render_compact_review_row(
     child_labels: Mapping[str, str],
     *,
     key_prefix: str,
+    offers: Sequence[Offer],
     flag_messages: Sequence[str] = (),
 ) -> tuple[dict[str, SupplyItemReview], bool]:
     """Render source, interpretation, and only the needed confirmation."""
@@ -6342,80 +6453,93 @@ def _render_compact_review_row(
                     "Affects " + _join_names(affected_labels)
                 )
             )
-        source_column, understanding_column, confirm_column = st.columns(
-            [5, 4, 2]
+        decision_messages = tuple(
+            dict.fromkeys(
+                message
+                for member in members
+                for message in review_system_decision_messages(member)
+            )
         )
-        with source_column:
-            source_inputs = {
-                (
-                    list_input.child_id,
-                    list_input.resolved_document_name,
-                ): list_input
-                for list_input in st.session_state.get("list_inputs", ())
-            }
-            for member in members:
-                if len(members) > 1:
-                    st.caption(
-                        escape_streamlit_dollars(
-                            child_labels.get(
-                                member.child_id,
-                                member.child_id,
+        for message in decision_messages:
+            st.info(escape_streamlit_dollars(message))
+        show_item_sources = bool(flag_messages or decision_messages)
+        if show_item_sources:
+            source_column, understanding_column, confirm_column = st.columns(
+                [5, 4, 2]
+            )
+        else:
+            understanding_column, confirm_column = st.columns([9, 2])
+            source_column = None
+        if source_column is not None:
+            with source_column:
+                st.caption("Source details")
+                source_inputs = {
+                    (
+                        list_input.child_id,
+                        list_input.resolved_document_name,
+                    ): list_input
+                    for list_input in st.session_state.get("list_inputs", ())
+                }
+                for member in members:
+                    if len(members) > 1:
+                        st.caption(
+                            escape_streamlit_dollars(
+                                child_labels.get(
+                                    member.child_id,
+                                    member.child_id,
+                                )
                             )
                         )
-                    )
-                sources = member.sources
-                if len(sources) > 1:
-                    st.caption(
-                        f"Combined from {len(sources)} places in the list"
-                    )
-                source_rows = sources or (
-                    RequirementSource(
-                        source_req_id=member.req_id,
-                        document_name=member.source_document,
-                        section_name=member.source_section,
-                        page_number=(
-                            member.source_page
-                            or NONPAGINATED_SOURCE_PAGE
-                        ),
-                        exact_line=member.source_text,
-                        quantity=member.required_quantity or 0,
-                    ),
-                )
-                for source in source_rows:
-                    page_text = (
-                        f"Page {source.page_number}: "
-                        if source.page_number is not None
-                        else ""
-                    )
-                    st.write(
-                        escape_streamlit_dollars(
-                            page_text + source.exact_line
-                        )
-                    )
-                    list_input = source_inputs.get(
-                        (member.child_id, source.document_name)
-                    ) or next(
-                        (
-                            candidate
-                            for (
-                                child_id,
-                                _,
-                            ), candidate in source_inputs.items()
-                            if child_id == member.child_id
-                        ),
-                        None,
-                    )
-                    if list_input is not None:
-                        _render_source_reference(
-                            st,
-                            list_input,
-                            page_number=source.page_number,
-                            source_line=source.exact_line,
-                            key=(
-                                f"{key_prefix}:item-source:"
-                                f"{source.source_req_id}"
+                    sources = member.sources
+                    source_rows = sources or (
+                        RequirementSource(
+                            source_req_id=member.req_id,
+                            document_name=member.source_document,
+                            section_name=member.source_section,
+                            page_number=(
+                                member.source_page
+                                or NONPAGINATED_SOURCE_PAGE
                             ),
+                            exact_line=member.source_text,
+                            quantity=member.required_quantity or 0,
+                        ),
+                    )
+                    for source in source_rows:
+                        page_text = (
+                            f"Page {source.page_number}: "
+                            if source.page_number is not None
+                            else ""
                         )
+                        st.write(
+                            escape_streamlit_dollars(
+                                page_text
+                                + _display_source_line(source.exact_line)
+                            )
+                        )
+                        list_input = source_inputs.get(
+                            (member.child_id, source.document_name)
+                        ) or next(
+                            (
+                                candidate
+                                for (
+                                    child_id,
+                                    _,
+                                ), candidate in source_inputs.items()
+                                if child_id == member.child_id
+                            ),
+                            None,
+                        )
+                        if list_input is not None:
+                            _render_source_reference(
+                                st,
+                                list_input,
+                                page_number=source.page_number,
+                                source_line=source.exact_line,
+                                key=(
+                                    f"{key_prefix}:item-source:"
+                                    f"{source.source_req_id}"
+                                ),
+                            )
         with understanding_column:
             st.write(
                 escape_streamlit_dollars(
@@ -6436,12 +6560,12 @@ def _render_compact_review_row(
                     key=f"{key_prefix}:confirmed",
                 )
             else:
-                st.caption("Included by default")
                 confirmed = True
         edited_representative = _render_review_detail_controls(
             st,
             representative,
             key_prefix=key_prefix,
+            offers=offers,
         )
     edited = {
         member.review_id: (
@@ -6474,6 +6598,7 @@ def _new_review_item_from_controls(
         item_name = first.selectbox(
             "Item",
             options=tuple(sorted(ALLOWED_CATEGORIES)),
+            format_func=_item_display_name,
             key=f"{key_prefix}:item",
         )
         quantity = int(
@@ -6665,7 +6790,7 @@ def _translation_context(
     return (
         "This document repeats the lists in "
         + _join_names(translated_languages)
-        + f". The {read_language} version was read."
+        + f". Items were extracted from the {read_language} version."
     )
 
 
@@ -6690,7 +6815,7 @@ def _render_sections(st: Any) -> None:
     }
     selections = dict(st.session_state["document_selections"])
 
-    st.header("What will be read from each list")
+    st.header("What will be extracted from each list")
     st.write(
         "The matching grade is selected automatically. You only need to "
         "answer when a section has no grade or the document does not contain "
@@ -6699,7 +6824,7 @@ def _render_sections(st: Any) -> None:
     if st.session_state["structure_errors"]:
         st.error(
             "The documents named below could not be organized. They will not "
-            "be read, but the other lists can continue."
+            "be extracted, but the other lists can continue."
         )
         for child_id, error in st.session_state["structure_errors"].items():
             child = child_by_id.get(child_id, {})
@@ -6762,7 +6887,7 @@ def _render_sections(st: Any) -> None:
                     escape_streamlit_dollars(
                         f"{document_name} contains {languages or 'translated'} "
                         "sections, but no source-language original that can be "
-                        f"resolved for {child['label']}. Nothing will be read "
+                        f"resolved for {child['label']}. Nothing will be extracted "
                         "until you choose how to proceed."
                     )
                 )
@@ -6783,7 +6908,7 @@ def _render_sections(st: Any) -> None:
                     escape_streamlit_dollars(
                         f"No section in {document_name} matches "
                         f"{child['label']} ({grade}). The document covers "
-                        f"{covered}. Nothing will be read until you choose "
+                        f"{covered}. Nothing will be extracted until you choose "
                         "how to proceed."
                     )
                 )
@@ -6799,7 +6924,7 @@ def _render_sections(st: Any) -> None:
             elif choice.selected_section_labels:
                 st.success(
                     escape_streamlit_dollars(
-                        "Will read "
+                        "Will extract "
                         + _join_names(choice.selected_section_labels)
                         + f" from {document_name}."
                     )
@@ -6882,11 +7007,11 @@ def _render_sections(st: Any) -> None:
             if exclusion_summary:
                 st.caption(
                     escape_streamlit_dollars(
-                        f"Not read: {exclusion_summary}."
+                        f"Not extracted: {exclusion_summary}."
                     )
                 )
 
-            with st.expander("Change which sections are read"):
+            with st.expander("Change which sections are extracted"):
                 st.checkbox(
                     "Use a different section selection",
                     key=override_toggle_key,
@@ -6963,10 +7088,12 @@ def _render_sections(st: Any) -> None:
         st.session_state["requirement_merge_resolved"] = False
         st.session_state["requirement_merge_choices"] = {}
         st.session_state["requirement_constraint_choices"] = {}
+        st.session_state["requirement_variant_quantity_choices"] = {}
+        st.session_state["requirement_merge_validation_errors"] = ()
         st.session_state["organized_list_confirmed"] = False
         _limit_reached_stage(st.session_state, 2)
         _invalidate_plan_state(st.session_state)
-        st.session_state["progress_substep"] = "reading selected sections"
+        st.session_state["progress_substep"] = "extracting selected sections"
         st.session_state["screen"] = "working"
         st.rerun()
 
@@ -6979,6 +7106,34 @@ def _requirement_source_label(source: Any) -> str:
         location += f" · {source.section_name}"
     location += f" · page {source.page_number}"
     return location
+
+
+def _display_source_line(source_line: str) -> str:
+    """Hide matrix-cell annotations while preserving stored provenance."""
+
+    return source_line.split("|", 1)[0].strip()
+
+
+def _variant_detail_label(details: Sequence[tuple[str, object]]) -> str:
+    """Describe one source-backed variant without internal field names."""
+
+    parts = []
+    for field_name, value in details:
+        field_label = ATTRIBUTE_DISPLAY_NAMES.get(
+            field_name,
+            field_name.replace("_", " "),
+        )
+        value_label = (
+            "not specified"
+            if value in (None, (), "")
+            else (
+                " or ".join(map(str, value))
+                if isinstance(value, (tuple, list, set))
+                else str(value)
+            )
+        )
+        parts.append(f"{field_label}: {value_label}")
+    return "; ".join(parts)
 
 
 def _render_requirement_merge(st: Any) -> None:
@@ -7003,90 +7158,152 @@ def _render_requirement_merge(st: Any) -> None:
         for list_input in st.session_state["list_inputs"]
     }
 
-    st.header("Choose what quantity goes in the cart")
+    st.header("Choose what goes in the cart")
     st.write(
         "The same item appears differently in more than one part of a list. "
         "Choose once before it enters your cart."
     )
+    pending_errors = tuple(
+        st.session_state.get("requirement_merge_validation_errors", ())
+    )
+    if pending_errors:
+        st.error(
+            escape_streamlit_dollars(
+                "Choose a quantity for: " + _join_names(pending_errors) + "."
+            )
+        )
+        st.markdown("[Go to the first item that needs attention](#merge-first-error)")
+
     selections: dict[str, tuple[str, int | None]] = {}
-    constraint_choices: dict[str, object] = {}
-    for interrupt in result.interrupts:
+    variant_quantity_choices: dict[str, dict[str, int]] = {}
+    validation_errors: list[str] = []
+    first_error_anchor_added = False
+    for decision in item_decisions(result):
         child_label = child_labels.get(
-            interrupt.child_id,
-            interrupt.child_id,
+            decision.child_id,
+            decision.child_id,
         )
         with st.container(border=True):
+            if (
+                pending_errors
+                and _item_display_name(decision.canonical_item)
+                in pending_errors
+                and not first_error_anchor_added
+            ):
+                st.markdown(
+                    '<span id="merge-first-error"></span>',
+                    unsafe_allow_html=True,
+                )
+                first_error_anchor_added = True
             st.subheader(
                 escape_streamlit_dollars(
-                    f"How many "
-                    f"{_item_display_name(interrupt.canonical_item)} "
-                    f"should be purchased for {child_label}?"
+                    f"{_item_display_name(decision.canonical_item)} "
+                    f"for {child_label}"
                 )
             )
-            source_options = tuple(
-                (
-                    "Use the quantity from "
-                    f"{_requirement_source_label(source)} "
-                    f"({source.quantity})",
-                    source.quantity,
-                )
-                for source in interrupt.sources
-            )
-            option_labels = (
-                (
-                    "Add every list's quantity together "
-                    f"({interrupt.default_quantity}) — default"
-                ),
-                *(label for label, _ in source_options),
-                "Choose my own quantity",
-            )
-            selected_label = st.radio(
-                "Quantity to purchase",
-                option_labels,
-                index=0,
-                key=f"{interrupt.interrupt_id}:choice",
-            )
-            if selected_label == option_labels[0]:
-                selections[interrupt.interrupt_id] = (
-                    "total",
-                    interrupt.default_quantity,
-                )
-                st.caption(
-                    f"The cart quantity will be {interrupt.default_quantity}."
-                )
-            elif selected_label == option_labels[-1]:
-                custom_quantity = int(
-                    st.number_input(
-                        "Quantity to purchase",
-                        min_value=1,
-                        value=interrupt.default_quantity,
-                        step=1,
-                        key=f"{interrupt.interrupt_id}:custom",
-                    )
-                )
-                selections[interrupt.interrupt_id] = (
-                    "custom",
-                    custom_quantity,
-                )
-                st.caption(f"The cart quantity will be {custom_quantity}.")
-            else:
-                source_index = option_labels.index(selected_label) - 1
-                selected_quantity = source_options[source_index][1]
-                selections[interrupt.interrupt_id] = (
-                    "source",
-                    selected_quantity,
-                )
-                st.caption(
-                    f"The cart quantity will be {selected_quantity}."
-                )
-            list_input = input_by_child.get(interrupt.child_id)
-            for source in interrupt.sources:
-                st.caption(
+            st.caption("What each source requested")
+            for source in decision.sources:
+                st.write(
                     escape_streamlit_dollars(
-                        f"{_requirement_source_label(source)}: "
-                        f"{source.exact_line}"
+                        f"{_requirement_source_label(source)} — "
+                        f"{source.quantity}: "
+                        f"{_display_source_line(source.exact_line)}"
                     )
                 )
+
+            if decision.variants:
+                st.caption(
+                    "The sources specify different versions. Adjust how many "
+                    "of each version should go in the cart."
+                )
+                selected_variants: dict[str, int] = {}
+                for variant in decision.variants:
+                    variant_quantity = int(
+                        st.number_input(
+                            _variant_detail_label(variant.details),
+                            min_value=0,
+                            value=variant.default_quantity,
+                            step=1,
+                            key=f"{variant.variant_id}:quantity",
+                            help=(
+                                "The starting value is the quantity extracted "
+                                "from the source for this version."
+                            ),
+                        )
+                    )
+                    selected_variants[variant.variant_id] = variant_quantity
+                    for source in variant.sources:
+                        st.caption(
+                            escape_streamlit_dollars(
+                                f"{_requirement_source_label(source)}: "
+                                f"{_display_source_line(source.exact_line)}"
+                            )
+                        )
+                variant_quantity_choices[decision.decision_id] = (
+                    selected_variants
+                )
+                if not any(selected_variants.values()):
+                    validation_errors.append(
+                        _item_display_name(decision.canonical_item)
+                    )
+            else:
+                interrupt = decision.quantity_interrupt
+                if interrupt is None:
+                    continue
+                source_options = tuple(
+                    (
+                        "Use the quantity from "
+                        f"{_requirement_source_label(source)} "
+                        f"({source.quantity})",
+                        source.quantity,
+                    )
+                    for source in interrupt.sources
+                )
+                option_labels = (
+                    (
+                        "Add every list's quantity together "
+                        f"({interrupt.default_quantity}) — default"
+                    ),
+                    *(label for label, _ in source_options),
+                    "Choose my own quantity",
+                )
+                selected_label = st.radio(
+                    "Quantity to purchase",
+                    option_labels,
+                    index=0,
+                    key=f"{interrupt.interrupt_id}:choice",
+                )
+                if selected_label == option_labels[0]:
+                    selections[interrupt.interrupt_id] = (
+                        "total",
+                        interrupt.default_quantity,
+                    )
+                    selected_quantity = interrupt.default_quantity
+                elif selected_label == option_labels[-1]:
+                    selected_quantity = int(
+                        st.number_input(
+                            "Quantity to purchase",
+                            min_value=1,
+                            value=interrupt.default_quantity,
+                            step=1,
+                            key=f"{interrupt.interrupt_id}:custom",
+                        )
+                    )
+                    selections[interrupt.interrupt_id] = (
+                        "custom",
+                        selected_quantity,
+                    )
+                else:
+                    source_index = option_labels.index(selected_label) - 1
+                    selected_quantity = source_options[source_index][1]
+                    selections[interrupt.interrupt_id] = (
+                        "source",
+                        selected_quantity,
+                    )
+                st.caption(f"The cart quantity will be {selected_quantity}.")
+
+            for source in decision.sources:
+                list_input = input_by_child.get(decision.child_id)
                 if list_input is not None:
                     _render_source_reference(
                         st,
@@ -7094,45 +7311,8 @@ def _render_requirement_merge(st: Any) -> None:
                         page_number=source.page_number,
                         source_line=source.exact_line,
                         key=(
-                            f"{interrupt.interrupt_id}:"
+                            f"{decision.decision_id}:"
                             f"{source.source_req_id}"
-                        ),
-                    )
-
-    for interrupt in result.constraint_interrupts:
-        child_label = child_labels.get(
-            interrupt.child_id,
-            interrupt.child_id,
-        )
-        with st.container(border=True):
-            st.subheader(
-                escape_streamlit_dollars(
-                    f"Choose the {interrupt.field_name.replace('_', ' ')} "
-                    f"for {_item_display_name(interrupt.canonical_item)} "
-                    f"for {child_label}"
-                )
-            )
-            labels = tuple(
-                f"{option.value} — {_requirement_source_label(option.sources[0])}"
-                for option in interrupt.options
-            )
-            selected = st.radio(
-                "Which list detail should be used?",
-                labels,
-                index=None,
-                key=f"{interrupt.interrupt_id}:constraint",
-            )
-            if selected is not None:
-                selected_index = labels.index(selected)
-                constraint_choices[interrupt.interrupt_id] = (
-                    interrupt.options[selected_index].value
-                )
-            for option in interrupt.options:
-                for source in option.sources:
-                    st.caption(
-                        escape_streamlit_dollars(
-                            f"{_requirement_source_label(source)}: "
-                            f"{source.exact_line}"
                         )
                     )
 
@@ -7143,9 +7323,12 @@ def _render_requirement_merge(st: Any) -> None:
     )
     if not submitted:
         return
-    if len(constraint_choices) != len(result.constraint_interrupts):
-        st.error("Choose one value for each conflicting list detail.")
-        return
+    if validation_errors:
+        st.session_state["requirement_merge_validation_errors"] = tuple(
+            dict.fromkeys(validation_errors)
+        )
+        st.rerun()
+    st.session_state["requirement_merge_validation_errors"] = ()
     quantity_choices = {
         interrupt_id: int(quantity)
         for interrupt_id, (_, quantity) in selections.items()
@@ -7154,15 +7337,111 @@ def _render_requirement_merge(st: Any) -> None:
     merged, resolved = consolidate_extractions(
         st.session_state["unmerged_extracted_lists"],
         quantity_choices=quantity_choices,
-        constraint_choices=constraint_choices,
+        constraint_choices={},
+        variant_quantity_choices=variant_quantity_choices,
     )
     st.session_state["extracted_lists"] = merged
     st.session_state["requirement_merge_result"] = resolved
     st.session_state["requirement_merge_choices"] = selections
-    st.session_state["requirement_constraint_choices"] = constraint_choices
+    st.session_state["requirement_constraint_choices"] = {}
+    st.session_state["requirement_variant_quantity_choices"] = (
+        variant_quantity_choices
+    )
     st.session_state["requirement_merge_resolved"] = True
     st.session_state["screen"] = "working"
     st.rerun()
+
+
+def _personalize_source_summary(
+    st: Any,
+    child_id: str,
+    envelope: ExtractionEnvelope,
+) -> None:
+    """Show one compact source summary and hide excluded content by default."""
+
+    requirements = tuple(envelope.requirements)
+    documents = tuple(
+        dict.fromkeys(
+            source.document_name
+            for requirement in requirements
+            for source in (
+                requirement.sources
+                or (requirement_source(requirement),)
+            )
+            if source.document_name
+        )
+    )
+    selection = envelope.document_selection
+    sections = (
+        selection.selected_section_labels
+        if selection is not None
+        else tuple(
+            dict.fromkeys(
+                requirement.source_section
+                for requirement in requirements
+                if requirement.source_section
+            )
+        )
+    )
+    pages = tuple(
+        sorted(
+            {
+                source.page_number
+                for requirement in requirements
+                for source in (
+                    requirement.sources
+                    or (requirement_source(requirement),)
+                )
+                if source.page_number is not None
+            }
+        )
+    )
+    list_input = next(
+        (
+            candidate
+            for candidate in st.session_state.get("list_inputs", ())
+            if candidate.child_id == child_id
+        ),
+        None,
+    )
+    if not documents and list_input is not None:
+        documents = (list_input.resolved_document_name,)
+    summary_parts = []
+    if documents:
+        summary_parts.append("Document: " + _join_names(documents))
+    if sections:
+        summary_parts.append("Sections: " + _join_names(sections))
+    if pages:
+        summary_parts.append("Pages: " + ", ".join(map(str, pages)))
+    if summary_parts:
+        st.caption(
+            escape_streamlit_dollars(
+                "Extracted from " + " · ".join(summary_parts)
+            )
+        )
+
+    ignored = (
+        selection.ignored_section_labels
+        if selection is not None
+        else ()
+    )
+    if ignored or envelope.uninterpreted_lines or envelope.skipped_lines:
+        with st.expander("What was not extracted"):
+            if ignored:
+                st.caption("Other document sections")
+                st.write(escape_streamlit_dollars(_join_names(ignored)))
+            for line in envelope.uninterpreted_lines:
+                st.warning(
+                    escape_streamlit_dollars(
+                        "Could not interpret: " + _display_source_line(line)
+                    )
+                )
+            for line in envelope.skipped_lines:
+                st.info(
+                    escape_streamlit_dollars(
+                        "Deliberately skipped: " + _display_source_line(line)
+                    )
+                )
 
 
 def _render_review(st: Any) -> None:
@@ -7185,6 +7464,7 @@ def _render_review(st: Any) -> None:
         for index, child in enumerate(children)
     }
     items = tuple(st.session_state["review_items"])
+    review_offers = tuple(load_catalog())
     item_by_id = {item.review_id: item for item in items}
     flag_groups = review_flag_groups(items)
     flagged_row_ids = frozenset(
@@ -7199,50 +7479,26 @@ def _render_review(st: Any) -> None:
         )
         flag_anchor_by_group[group.group_id] = anchor
         flag_groups_by_child.setdefault(anchor, []).append(group)
+    note_groups = teacher_note_groups(items)
+    note_groups_by_child: dict[str, list[Any]] = {}
+    for note in note_groups:
+        anchor = min(
+            note.child_ids,
+            key=lambda child_id: child_order.get(child_id, 10_000),
+        )
+        note_groups_by_child.setdefault(anchor, []).append(note)
+    condition_groups = deduplicate_conditional_questions(
+        conditional_review_questions(items)
+    )
+    condition_groups_by_child: dict[str, list[Any]] = {}
+    for group in condition_groups:
+        anchor = min(
+            group.child_ids,
+            key=lambda child_id: child_order.get(child_id, 10_000),
+        )
+        condition_groups_by_child.setdefault(anchor, []).append(group)
 
     st.header("Personalize what goes in your cart")
-    for child in children:
-        child_id = str(child["child_id"])
-        envelope = extractions.get(child_id)
-        if envelope is None:
-            continue
-        st.write(
-            escape_streamlit_dollars(
-                review_child_framing(
-                    child_id,
-                    child_labels[child_id],
-                    envelope,
-                    items,
-                )
-            )
-        )
-        selection = envelope.document_selection
-        if selection is not None:
-            st.caption(
-                escape_streamlit_dollars(
-                    "Read: "
-                    + _join_names(selection.selected_section_labels)
-                )
-            )
-            if selection.ignored_section_labels:
-                st.caption(
-                    escape_streamlit_dollars(
-                        "Not read: "
-                        + _join_names(selection.ignored_section_labels)
-                    )
-                )
-        for line in envelope.uninterpreted_lines:
-            st.warning(
-                escape_streamlit_dollars(
-                    f"Could not interpret: {line}"
-                )
-            )
-        for line in envelope.skipped_lines:
-            st.info(
-                escape_streamlit_dollars(
-                    f"Skipped from the cart: {line}"
-                )
-            )
     for child_id, error in st.session_state["extraction_errors"].items():
         st.warning(
             escape_streamlit_dollars(
@@ -7260,51 +7516,61 @@ def _render_review(st: Any) -> None:
     added_items: list[SupplyItemReview] = []
 
     with st.form("compact_extraction_review"):
-        condition_groups = deduplicate_conditional_questions(
-            conditional_review_questions(items)
-        )
-        if condition_groups:
-            st.subheader("Questions from the list")
-            for group in condition_groups:
-                affected = tuple(
-                    child_labels.get(child_id, child_id)
-                    for child_id in group.child_ids
-                )
-                st.caption(
-                    escape_streamlit_dollars(
-                        "Affects " + _join_names(affected)
-                    )
-                )
-                selected = st.radio(
-                    group.prompt,
-                    options=group.option_labels,
-                    index=(
-                        group.option_labels.index(group.selected_label)
-                        if group.selected_label in group.option_labels
-                        else None
-                    ),
-                    key=f"condition-group:{group.group_id}",
-                )
-                condition_answers.update(
-                    conditional_answers_for_selection(
-                        group,
-                        selected,
-                    )
-                )
-
         for child in children:
             child_id = str(child["child_id"])
             st.subheader(
-                escape_streamlit_dollars(
-                    f"{child_labels[child_id]} — Items to buy"
+                escape_streamlit_dollars(child_labels[child_id])
+            )
+            envelope = extractions.get(child_id)
+            if envelope is not None:
+                st.write(
+                    escape_streamlit_dollars(
+                        review_child_framing(
+                            child_id,
+                            child_labels[child_id],
+                            envelope,
+                            items,
+                        )
+                    )
                 )
+                _personalize_source_summary(
+                    st,
+                    child_id,
+                    envelope,
+                )
+            child_condition_groups = tuple(
+                condition_groups_by_child.get(child_id, ())
             )
-            heading_source, heading_understood, heading_confirm = (
-                st.columns([5, 4, 2])
-            )
-            heading_source.caption("From the list")
-            heading_understood.caption("For your cart")
-            heading_confirm.caption("Choose")
+            if child_condition_groups:
+                st.markdown("**Questions from the list**")
+                for group in child_condition_groups:
+                    affected = tuple(
+                        child_labels.get(member_id, member_id)
+                        for member_id in group.child_ids
+                    )
+                    if len(affected) > 1:
+                        st.caption(
+                            escape_streamlit_dollars(
+                                "Affects " + _join_names(affected)
+                            )
+                        )
+                    selected = st.radio(
+                        group.prompt,
+                        options=group.option_labels,
+                        index=(
+                            group.option_labels.index(group.selected_label)
+                            if group.selected_label in group.option_labels
+                            else None
+                        ),
+                        key=f"condition-group:{group.group_id}",
+                    )
+                    condition_answers.update(
+                        conditional_answers_for_selection(
+                            group,
+                            selected,
+                        )
+                    )
+            st.markdown("**Items for your cart**")
 
             rendered_any = False
             for group in flag_groups_by_child.get(child_id, ()):
@@ -7316,6 +7582,7 @@ def _render_review(st: Any) -> None:
                     members,
                     child_labels,
                     key_prefix=group.group_id,
+                    offers=review_offers,
                     flag_messages=group.messages,
                 )
                 edited_by_id.update(edited)
@@ -7349,6 +7616,7 @@ def _render_review(st: Any) -> None:
                     (item,),
                     child_labels,
                     key_prefix=f"clear:{item.review_id}",
+                    offers=review_offers,
                 )
                 edited_by_id.update(edited)
                 rendered_any = True
@@ -7357,6 +7625,51 @@ def _render_review(st: Any) -> None:
                     "No items are currently selected for this student."
                 )
 
+            provided_items = tuple(
+                item
+                for item in items
+                if item.child_id == child_id
+                and item.provided_by_school
+                and item.review_status != "deleted"
+            )
+            if provided_items:
+                with st.expander("Already provided by school"):
+                    for item in provided_items:
+                        st.write(
+                            escape_streamlit_dollars(
+                                _display_source_line(item.source_text)
+                            )
+                        )
+                        st.caption(
+                            escape_streamlit_dollars(
+                                "Provided by school: "
+                                + review_understanding_text(item)
+                                + " — not added to the cart"
+                            )
+                        )
+
+            child_note_groups = tuple(
+                note_groups_by_child.get(child_id, ())
+            )
+            if child_note_groups:
+                with st.expander("Notes from the teacher"):
+                    for note in child_note_groups:
+                        affected = tuple(
+                            child_labels.get(member_id, member_id)
+                            for member_id in note.child_ids
+                        )
+                        if len(affected) > 1:
+                            st.caption(
+                                escape_streamlit_dollars(
+                                    "Affects " + _join_names(affected)
+                                )
+                            )
+                        st.write(
+                            escape_streamlit_dollars(
+                                _display_source_line(note.source_text)
+                            )
+                        )
+
             added = _new_review_item_from_controls(
                 st,
                 child_id,
@@ -7364,52 +7677,6 @@ def _render_review(st: Any) -> None:
             )
             if added is not None:
                 added_items.append(added)
-
-        provided_items = tuple(
-            item
-            for item in items
-            if item.provided_by_school
-            and item.review_status != "deleted"
-        )
-        if provided_items:
-            with st.expander("Already provided by school"):
-                for item in provided_items:
-                    st.caption(
-                        escape_streamlit_dollars(
-                            "For "
-                            + child_labels.get(
-                                item.child_id,
-                                item.child_id,
-                            )
-                        )
-                    )
-                    st.write(
-                        escape_streamlit_dollars(item.source_text)
-                    )
-                    st.caption(
-                        escape_streamlit_dollars(
-                            "Provided by school: "
-                            + review_understanding_text(item)
-                            + " — not added to the cart"
-                        )
-                    )
-
-        note_groups = teacher_note_groups(items)
-        if note_groups:
-            with st.expander("Notes from the teacher"):
-                for note in note_groups:
-                    affected = tuple(
-                        child_labels.get(child_id, child_id)
-                        for child_id in note.child_ids
-                    )
-                    st.caption(
-                        escape_streamlit_dollars(
-                            "Affects " + _join_names(affected)
-                        )
-                    )
-                    st.write(
-                        escape_streamlit_dollars(note.source_text)
-                    )
 
         back_column, continue_column = _navigation_button_columns(st)
         return_to_lists = back_column.form_submit_button(
@@ -7450,7 +7717,7 @@ def _render_review(st: Any) -> None:
                 )
             )
             raise ValueError(
-                "Check and confirm the flagged readings before continuing: "
+                "Check and confirm the flagged items before continuing: "
                 + names
             )
         confirmed = reviewed_envelopes(
@@ -7570,7 +7837,7 @@ def _render_working(st: Any) -> None:
             expanded=True,
         ) as status:
             status.write(
-                "Checking the document layout before reading any supply items."
+                "Checking the document layout before extracting supply items."
             )
 
             def structure_progress(
@@ -7647,8 +7914,8 @@ def _render_working(st: Any) -> None:
         return
 
     if not st.session_state["extraction_cache_ready"]:
-        st.header("Reading the lists")
-        with st.status("Reading the lists", expanded=True) as status:
+        st.header("Extracting the lists")
+        with st.status("Extracting the lists", expanded=True) as status:
             status.write(
                 "Finding the items, quantities, and details on each list."
             )
@@ -7697,6 +7964,8 @@ def _render_working(st: Any) -> None:
             )
             st.session_state["requirement_merge_choices"] = {}
             st.session_state["requirement_constraint_choices"] = {}
+            st.session_state["requirement_variant_quantity_choices"] = {}
+            st.session_state["requirement_merge_validation_errors"] = ()
             st.session_state["extraction_errors"] = extraction_errors
             st.session_state["extraction_cache_ready"] = True
             st.session_state["ui_error_active"] = bool(extraction_errors)
