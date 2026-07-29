@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import app
+import pytest
 from agent.extract import apply_extraction_security_filters
 from agent.pipeline import ListInput
 from agent.review import organize_extractions
@@ -232,9 +233,8 @@ def test_unstructured_pasted_list_skips_section_resolution_screen() -> None:
 
     assert errors == {}
     assert structure.sections == ()
-    assert not resolution.document_has_named_grades
     assert not resolution.needs_parent_screen
-    assert resolution.document_action == "extract_entire_document"
+    assert resolution.grade_scope_case == "no_named_grade"
 
     extraction_options: list[dict[str, object]] = []
 
@@ -284,7 +284,6 @@ def test_single_mismatched_grade_section_still_requires_resolution() -> None:
 
     resolution = resolve_document_sections(structure, "Grade 2")
 
-    assert resolution.document_has_named_grades
     assert not resolution.has_grade_match
     assert resolution.covered_grades == ("Grade 5",)
     assert resolution.needs_parent_screen
@@ -319,6 +318,18 @@ def test_grade_mismatch_proceed_actions_navigate_immediately() -> None:
     upload_state: dict[str, object] = {
         "screen": "sections",
         "scope-action": "Upload a different document",
+        "intake": {
+            "children": (
+                {
+                    "child_id": "child-1",
+                    "label": "Kevin",
+                    "grade": "Grade 2",
+                },
+            )
+        },
+        "list_inputs": (
+            ListInput("child-1", "old list", "text/plain"),
+        ),
     }
     app._apply_section_proceed_action(
         upload_state,
@@ -328,6 +339,7 @@ def test_grade_mismatch_proceed_actions_navigate_immediately() -> None:
 
     assert upload_state["screen"] == "lists"
     assert upload_state["list_focus_child_id"] == "child-1"
+    assert upload_state["list_inputs"] == ()
 
     students_state: dict[str, object] = {
         "screen": "sections",
@@ -344,6 +356,443 @@ def test_grade_mismatch_proceed_actions_navigate_immediately() -> None:
     assert students_state["screen"] == "intake"
     assert students_state["intake_step"] == 1
     assert students_state["max_intake_step_reached"] == 3
+
+
+def test_ungraded_list_actual_screen_path_does_not_block_and_extracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-62: production section and working screens honor case (a)."""
+
+    source = Path(
+        "tests/sample_lists/unstructured_tabular_supply_list.txt"
+    ).read_text(encoding="utf-8")
+    list_input = ListInput(
+        child_id="child-1",
+        source=source,
+        mime_type="text/plain",
+        document_name="Kevin's pasted list",
+    )
+    structures, errors = app._inspect_list_inputs(
+        (list_input,),
+        (
+            {
+                "child_id": "child-1",
+                "label": "Kevin",
+                "grade": "Grade 2",
+            },
+        ),
+        inspector=lambda source, *, mime_type: DocumentStructureEnvelope(
+            sections=()
+        ),
+    )
+    assert errors == {}
+
+    extracted = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="wipes",
+                child_id="child-1",
+                raw_text="1\tBox of Disinfecting Wipes",
+                canonical_item="disinfecting_wipes",
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    extraction_calls: list[tuple[tuple[ListInput, ...], object]] = []
+
+    def extract_from_screen(
+        list_inputs: tuple[ListInput, ...],
+        **options: object,
+    ) -> tuple[dict[str, ExtractionEnvelope], dict[str, Exception]]:
+        extraction_calls.append((list_inputs, options.get("selections")))
+        return {"child-1": extracted}, {}
+
+    monkeypatch.setattr(app, "_extract_list_inputs", extract_from_screen)
+
+    class ScreenRecorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {
+                "screen": "sections",
+                "intake": {
+                    "children": (
+                        {
+                            "child_id": "child-1",
+                            "label": "Kevin",
+                            "grade": "Grade 2",
+                        },
+                    ),
+                    "demo_mode": False,
+                },
+                "list_inputs": (list_input,),
+                "document_structures": structures,
+                "document_selections": {},
+                "structure_errors": {},
+                "structure_cache_ready": True,
+                "extracted_lists": {},
+                "unmerged_extracted_lists": {},
+                "extraction_errors": {},
+                "extraction_cache_ready": False,
+                "requirement_merge_result": None,
+                "requirement_merge_resolved": False,
+                "requirement_merge_choices": {},
+                "requirement_constraint_choices": {},
+                "requirement_variant_quantity_choices": {},
+                "requirement_product_identity_choices": {},
+                "requirement_excluded_merge_decisions": frozenset(),
+                "requirement_merge_validation_errors": (),
+                "review_items": (),
+                "organized_list_confirmed": False,
+                "list_identity_confirmed": False,
+                "result": None,
+                "ui_error_active": False,
+            }
+            self.errors: list[str] = []
+            self.rerun_count = 0
+
+        def __enter__(self) -> ScreenRecorder:
+            return self
+
+        def __exit__(
+            self,
+            exc_type: object,
+            exc_value: object,
+            traceback: object,
+        ) -> None:
+            return None
+
+        def rerun(self) -> None:
+            self.rerun_count += 1
+
+        def header(self, value: str) -> None:
+            del value
+
+        def status(
+            self,
+            label: str,
+            **kwargs: object,
+        ) -> ScreenRecorder:
+            del label, kwargs
+            return self
+
+        def write(self, value: str) -> None:
+            del value
+
+        def update(self, **kwargs: object) -> None:
+            del kwargs
+
+        def error(self, value: str) -> None:
+            self.errors.append(value)
+
+    st = ScreenRecorder()
+    app._render_sections(st)
+
+    assert st.session_state["screen"] == "working"
+    assert st.errors == []
+
+    app._render_working(st)
+
+    assert extraction_calls == [((list_input,), {})]
+    assert st.errors == []
+    assert st.session_state["screen"] == "review"
+
+
+def test_replacing_one_student_list_preserves_the_other_student_scope() -> None:
+    """BR-63: the production callback and list builder replace one child only."""
+
+    structure_one = DocumentStructureEnvelope(
+        sections=(
+            DocumentSection(
+                section_id="grade-2",
+                label="Grade 2",
+                grades=("Grade 2",),
+                source_line="Grade 2",
+            ),
+        )
+    )
+    structure_two = DocumentStructureEnvelope(
+        sections=(
+            DocumentSection(
+                section_id="grade-5",
+                label="Grade 5",
+                grades=("Grade 5",),
+                source_line="Grade 5",
+            ),
+        )
+    )
+    selection_one = app.build_document_selection(
+        structure_one,
+        ("grade-2",),
+    )
+    selection_two = app.build_document_selection(
+        structure_two,
+        ("grade-5",),
+    )
+    old_one = ListInput(
+        "child-1",
+        "old grade 2 list",
+        "text/plain",
+        "Kevin's old list",
+    )
+    saved_two = ListInput(
+        "child-2",
+        "saved grade 5 list",
+        "text/plain",
+        "Maya's saved list",
+    )
+    state: dict[str, object] = {
+        "screen": "sections",
+        "scope-action": "Upload a different document",
+        "intake": {
+            "children": (
+                {
+                    "child_id": "child-1",
+                    "label": "Kevin",
+                    "grade": "Grade 2",
+                },
+                {
+                    "child_id": "child-2",
+                    "label": "Maya",
+                    "grade": "Grade 5",
+                },
+            )
+        },
+        "list_inputs": (old_one, saved_two),
+        "document_structures": {
+            "child-1": structure_one,
+            "child-2": structure_two,
+        },
+        "document_selections": {
+            "child-1": selection_one,
+            "child-2": selection_two,
+        },
+        "structure_errors": {},
+        "extracted_lists": {},
+        "unmerged_extracted_lists": {},
+        "extraction_errors": {},
+    }
+
+    app._apply_section_proceed_action(
+        state,
+        "scope-action",
+        "child-1",
+    )
+
+    assert state["screen"] == "lists"
+    assert state["list_inputs"] == (saved_two,)
+    assert state["document_structures"] == {"child-2": structure_two}
+    assert state["document_selections"] == {"child-2": selection_two}
+
+    state["list_mode_0"] = "Paste text"
+    state["list_paste_0"] = "new grade 2 list"
+
+    class ListState:
+        session_state = state
+
+    rebuilt = app._build_list_inputs(
+        ListState(),
+        state["intake"]["children"],  # type: ignore[index]
+    )
+
+    assert tuple(item.child_id for item in rebuilt) == (
+        "child-1",
+        "child-2",
+    )
+    assert rebuilt[0].source == "new grade 2 list"
+    assert rebuilt[1] is saved_two
+    assert state["document_selections"] == {"child-2": selection_two}
+
+
+def test_replacement_working_path_reuses_other_student_document_and_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-63: production reprocessing touches only the replaced student's list."""
+
+    children = (
+        {
+            "child_id": "child-1",
+            "label": "Kevin",
+            "grade": "Grade 2",
+        },
+        {
+            "child_id": "child-2",
+            "label": "Maya",
+            "grade": "Grade 5",
+        },
+    )
+    new_one = ListInput(
+        "child-1",
+        "Grade 2\n1 box tissues",
+        "text/plain",
+        "Kevin's new list",
+    )
+    retained_two = ListInput(
+        "child-2",
+        "Grade 5\n2 notebooks",
+        "text/plain",
+        "Maya's saved list",
+    )
+    structure_one = DocumentStructureEnvelope(
+        sections=(
+            DocumentSection(
+                section_id="grade-2",
+                label="Grade 2",
+                grades=("Grade 2",),
+                source_line="Grade 2",
+            ),
+        )
+    )
+    structure_two = DocumentStructureEnvelope(
+        sections=(
+            DocumentSection(
+                section_id="grade-5",
+                label="Grade 5",
+                grades=("Grade 5",),
+                source_line="Grade 5",
+            ),
+        )
+    )
+    retained_selection = app.build_document_selection(
+        structure_two,
+        ("grade-5",),
+    )
+    new_extraction = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="tissues",
+                child_id="child-1",
+                raw_text="1 box tissues",
+                canonical_item="tissues",
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    retained_extraction = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="notebooks",
+                child_id="child-2",
+                raw_text="2 notebooks",
+                canonical_item="spiral_notebooks",
+                quantity=2,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    inspected_inputs: list[tuple[ListInput, ...]] = []
+    extracted_inputs: list[tuple[ListInput, ...]] = []
+
+    def inspect_pending(
+        inputs: tuple[ListInput, ...],
+        children: object,
+        **options: object,
+    ) -> tuple[dict[str, DocumentStructureEnvelope], dict[str, Exception]]:
+        del children, options
+        inspected_inputs.append(inputs)
+        return {"child-1": structure_one}, {}
+
+    def extract_pending(
+        inputs: tuple[ListInput, ...],
+        **options: object,
+    ) -> tuple[dict[str, ExtractionEnvelope], dict[str, Exception]]:
+        del options
+        extracted_inputs.append(inputs)
+        return {"child-1": new_extraction}, {}
+
+    monkeypatch.setattr(app, "_inspect_list_inputs", inspect_pending)
+    monkeypatch.setattr(app, "_extract_list_inputs", extract_pending)
+
+    class WorkingRecorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {
+                "screen": "working",
+                "intake": {
+                    "children": children,
+                    "demo_mode": False,
+                },
+                "list_inputs": (new_one, retained_two),
+                "document_structures": {"child-2": structure_two},
+                "document_selections": {
+                    "child-2": retained_selection,
+                },
+                "structure_errors": {},
+                "structure_cache_ready": False,
+                "unmerged_extracted_lists": {
+                    "child-2": retained_extraction,
+                },
+                "extracted_lists": {
+                    "child-2": retained_extraction,
+                },
+                "extraction_errors": {},
+                "extraction_cache_ready": False,
+                "requirement_merge_result": None,
+                "requirement_merge_resolved": False,
+                "requirement_merge_choices": {},
+                "requirement_constraint_choices": {},
+                "requirement_variant_quantity_choices": {},
+                "requirement_product_identity_choices": {},
+                "requirement_excluded_merge_decisions": frozenset(),
+                "requirement_merge_validation_errors": (),
+                "review_items": (),
+                "organized_list_confirmed": False,
+                "list_identity_confirmed": False,
+                "result": None,
+                "ui_error_active": False,
+            }
+            self.errors: list[str] = []
+
+        def __enter__(self) -> WorkingRecorder:
+            return self
+
+        def __exit__(
+            self,
+            exc_type: object,
+            exc_value: object,
+            traceback: object,
+        ) -> None:
+            return None
+
+        def header(self, value: str) -> None:
+            del value
+
+        def status(
+            self,
+            label: str,
+            **kwargs: object,
+        ) -> WorkingRecorder:
+            del label, kwargs
+            return self
+
+        def write(self, value: str) -> None:
+            del value
+
+        def update(self, **kwargs: object) -> None:
+            del kwargs
+
+        def rerun(self) -> None:
+            return None
+
+        def error(self, value: str) -> None:
+            self.errors.append(value)
+
+    st = WorkingRecorder()
+    app._render_working(st)
+
+    assert inspected_inputs == [(new_one,)]
+    assert extracted_inputs == [(new_one,)]
+    assert st.session_state["document_structures"] == {
+        "child-1": structure_one,
+        "child-2": structure_two,
+    }
+    assert st.session_state["document_selections"]["child-2"] is (
+        retained_selection
+    )
+    assert tuple(st.session_state["unmerged_extracted_lists"]) == (
+        "child-2",
+        "child-1",
+    )
+    assert st.errors == []
 
 
 def test_explicit_mismatched_section_resolves_without_br18_stop() -> None:

@@ -300,7 +300,7 @@ EXTRACTED_SCOPE_LABEL = "Extracted"
 # BR-58: parent-facing document scope uses "extracted", not "read", so the
 # interface names the actual structured-output operation consistently.
 
-DOCUMENT_WITHOUT_NAMED_GRADE_ACTION = "extract_entire_document"
+DOCUMENT_GRADE_SCOPE_NO_GRADE = "no_named_grade"
 # BR-59: a document that names no grade is one whole list; it is extracted
 # without a section question, grade warning, or BR-18 stop. When any grade is
 # named, matching and no-match behavior remains governed by BR-14 and BR-18.
@@ -331,6 +331,18 @@ SECTION_PROCEED_UPLOAD_ACTION = "Upload a different document"
 SECTION_PROCEED_STUDENTS_ACTION_PREFIX = "Go to Your students"
 # BR-61: every grade-mismatch proceed control performs its named navigation
 # immediately; the screen never presents a control that has no effect.
+
+DOCUMENT_GRADE_SCOPE_MATCH = "matching_grade"
+DOCUMENT_GRADE_SCOPE_MISMATCH = "named_grades_without_match"
+# BR-62: one deterministic grade-scope classification is the sole authority
+# for every Lists-screen consumer: no named grade extracts the whole document,
+# a named matching grade uses its matching sections, and named grades without
+# a match require parent resolution.
+
+STUDENT_SCOPED_LIST_REPLACEMENT = True
+# BR-63: replacing one student's document invalidates only that student's
+# document, section choice, and extraction; every other student's list and
+# section choice remain intact.
 
 PARENT_BOOLEAN_ATTRIBUTE_LABELS = {
     "sharpened": {

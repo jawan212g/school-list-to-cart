@@ -114,10 +114,13 @@ from agent.rules import (
     PERSONALIZE_SOURCE_CONTROL_REASONS,
     PERSONALIZE_SUMMARY_COLUMNS,
     QUANTITY_WORKING_ASSUMPTION_HELP,
+    DOCUMENT_GRADE_SCOPE_MISMATCH,
+    DOCUMENT_GRADE_SCOPE_NO_GRADE,
     SECTION_PROCEED_STUDENTS_ACTION_PREFIX,
     SECTION_PROCEED_UPLOAD_ACTION,
     SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX,
     SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS,
+    STUDENT_SCOPED_LIST_REPLACEMENT,
     SINGLE_INSTANCE_REQUIREMENT_ITEMS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
     SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX,
@@ -144,6 +147,9 @@ from agent.sections import (
     ResolvedSectionChoice,
     SectionResolution,
     build_resolved_section_choice,
+    section_resolution_blocks_extraction,
+    section_resolution_can_auto_select,
+    section_resolution_needs_parent_screen,
     choice_to_document_selection,
     resolve_document_sections,
     sanitize_document_structure,
@@ -5016,10 +5022,92 @@ def _render_intake(st: Any) -> None:
             _render_preferences_step(st)
 
 
+def _build_individual_list_input(
+    st: Any,
+    index: int,
+    child: Mapping[str, Any],
+) -> ListInput:
+    """Build one production Lists-screen input for a named student."""
+
+    mode = st.session_state.get(f"list_mode_{index}", "Paste text")
+    if mode == "Upload a file":
+        draft = _remember_upload_draft(
+            st.session_state,
+            f"list_upload_draft_{index}",
+            st.session_state.get(f"list_upload_{index}"),
+        )
+        if draft is None:
+            raise ValueError(f"{child['label']}: choose a file.")
+        data = draft.data
+        try:
+            mime_type = validate_uploaded_document(draft.name, data)
+        except ValueError as error:
+            raise ValueError(f"{child['label']}: {error}") from error
+        return ListInput(
+            child_id=str(child["child_id"]),
+            source=data,
+            mime_type=mime_type,
+            document_name=draft.name,
+        )
+    pasted = str(
+        st.session_state.get(f"list_paste_{index}", "")
+    ).strip()
+    if not pasted:
+        raise ValueError(f"{child['label']}: paste the supply list.")
+    if len(pasted.encode("utf-8")) > MAX_UPLOAD_BYTES:
+        raise ValueError(
+            f"{child['label']}: pasted text exceeds the size limit."
+        )
+    return ListInput(
+        child_id=str(child["child_id"]),
+        source=pasted,
+        mime_type="text/plain",
+        document_name=f"{child['label']}'s pasted list",
+    )
+
+
 def _build_list_inputs(
     st: Any,
     children: Sequence[Mapping[str, Any]],
 ) -> tuple[ListInput, ...]:
+    replacement_child_id = st.session_state.get("replace_list_child_id")
+    if replacement_child_id is not None:
+        target = next(
+            (
+                (index, child)
+                for index, child in enumerate(children)
+                if str(child["child_id"]) == str(replacement_child_id)
+            ),
+            None,
+        )
+        if target is None:
+            raise ValueError("The student whose list is being replaced is missing.")
+        target_index, target_child = target
+        replacement = _build_individual_list_input(
+            st,
+            target_index,
+            target_child,
+        )
+        retained = {
+            list_input.child_id: list_input
+            for list_input in tuple(st.session_state.get("list_inputs", ()))
+            if list_input.child_id != replacement.child_id
+        }
+        retained[replacement.child_id] = replacement
+        missing = tuple(
+            str(child["label"])
+            for child in children
+            if str(child["child_id"]) not in retained
+        )
+        if missing:
+            raise ValueError(
+                "Saved lists are missing for: " + _join_names(missing) + "."
+            )
+        return tuple(
+            retained[str(child["child_id"])]
+            for child in children
+        )
+
     if bool(st.session_state.get("shared_list_for_all")):
         mode = st.session_state.get(
             "shared_list_mode",
@@ -5066,50 +5154,10 @@ def _build_list_inputs(
     inputs: list[ListInput] = []
     errors: list[str] = []
     for index, child in enumerate(children):
-        mode = st.session_state.get(f"list_mode_{index}", "Paste text")
-        if mode == "Upload a file":
-            draft = _remember_upload_draft(
-                st.session_state,
-                f"list_upload_draft_{index}",
-                st.session_state.get(f"list_upload_{index}"),
-            )
-            if draft is None:
-                errors.append(f"{child['label']}: choose a file.")
-                continue
-            data = draft.data
-            try:
-                mime_type = validate_uploaded_document(draft.name, data)
-            except ValueError as error:
-                errors.append(f"{child['label']}: {error}")
-                continue
-            inputs.append(
-                ListInput(
-                    child_id=str(child["child_id"]),
-                    source=data,
-                    mime_type=mime_type,
-                    document_name=draft.name,
-                )
-            )
-        else:
-            pasted = str(
-                st.session_state.get(f"list_paste_{index}", "")
-            ).strip()
-            if not pasted:
-                errors.append(f"{child['label']}: paste the supply list.")
-                continue
-            if len(pasted.encode("utf-8")) > MAX_UPLOAD_BYTES:
-                errors.append(
-                    f"{child['label']}: pasted text exceeds the size limit."
-                )
-                continue
-            inputs.append(
-                ListInput(
-                    child_id=str(child["child_id"]),
-                    source=pasted,
-                    mime_type="text/plain",
-                    document_name=f"{child['label']}'s pasted list",
-                )
-            )
+        try:
+            inputs.append(_build_individual_list_input(st, index, child))
+        except ValueError as error:
+            errors.append(str(error))
     if errors:
         raise ValueError("\n".join(errors))
     return tuple(inputs)
@@ -5162,15 +5210,18 @@ def _render_lists(st: Any) -> None:
                 )
             )
     saved_inputs = tuple(st.session_state["list_inputs"])
+    replacement_child_id = st.session_state.get("replace_list_child_id")
     expected_child_ids = tuple(
         child["child_id"] for child in children
     )
-    if (
-        saved_inputs
-        and tuple(item.child_id for item in saved_inputs)
-        == expected_child_ids
-    ):
-        st.success("Your previously supplied lists are still available.")
+    if saved_inputs:
+        st.success(
+            (
+                "The other saved lists are still available."
+                if replacement_child_id is not None
+                else "Your previously supplied lists are still available."
+            )
+        )
         labels_by_child = {
             str(child["child_id"]): str(child["label"])
             for child in children
@@ -5190,7 +5241,12 @@ def _render_lists(st: Any) -> None:
                 )
             )
         )
-        if st.button("Rebuild using the saved lists"):
+        if (
+            replacement_child_id is None
+            and tuple(item.child_id for item in saved_inputs)
+            == expected_child_ids
+            and st.button("Rebuild using the saved lists")
+        ):
             st.session_state["result"] = None
             st.session_state["list_identity_confirmed"] = False
             st.session_state["document_structures"] = {}
@@ -5205,7 +5261,7 @@ def _render_lists(st: Any) -> None:
             st.session_state["screen"] = "working"
             st.rerun()
     shared_list_for_all = False
-    if len(children) > 1:
+    if len(children) > 1 and replacement_child_id is None:
         shared_list_for_all = st.checkbox(
             "One district document contains sections for all entries",
             value=bool(
@@ -5214,7 +5270,13 @@ def _render_lists(st: Any) -> None:
             key="shared_list_for_all",
         )
     source_entries: Sequence[tuple[int, Mapping[str, Any]]]
-    if shared_list_for_all:
+    if replacement_child_id is not None:
+        source_entries = tuple(
+            (index, child)
+            for index, child in enumerate(children)
+            if str(child["child_id"]) == str(replacement_child_id)
+        )
+    elif shared_list_for_all:
         source_entries = (
             (
                 -1,
@@ -5324,6 +5386,9 @@ def _render_lists(st: Any) -> None:
         type="primary",
         use_container_width=True,
     ):
+        replacement_child_id = st.session_state.get(
+            "replace_list_child_id"
+        )
         try:
             list_inputs = _build_list_inputs(st, children)
         except ValueError as error:
@@ -5332,14 +5397,16 @@ def _render_lists(st: Any) -> None:
                 st.error(escape_streamlit_dollars(message))
             return
         st.session_state["list_inputs"] = list_inputs
-        st.session_state["document_structures"] = {}
-        st.session_state["document_selections"] = {}
-        st.session_state["source_reference_cache"] = {}
-        st.session_state["structure_errors"] = {}
+        if replacement_child_id is None:
+            st.session_state["document_structures"] = {}
+            st.session_state["document_selections"] = {}
+            st.session_state["source_reference_cache"] = {}
+            st.session_state["structure_errors"] = {}
         st.session_state["structure_cache_ready"] = False
-        st.session_state["extracted_lists"] = {}
-        st.session_state["unmerged_extracted_lists"] = {}
-        st.session_state["extraction_errors"] = {}
+        if replacement_child_id is None:
+            st.session_state["extracted_lists"] = {}
+            st.session_state["unmerged_extracted_lists"] = {}
+            st.session_state["extraction_errors"] = {}
         st.session_state["extraction_cache_ready"] = False
         st.session_state["requirement_merge_result"] = None
         st.session_state["requirement_merge_resolved"] = False
@@ -5360,6 +5427,7 @@ def _render_lists(st: Any) -> None:
         st.session_state["ui_error_active"] = False
         st.session_state["progress_substep"] = "extracting the lists"
         st.session_state["screen"] = "working"
+        st.session_state.pop("replace_list_child_id", None)
         st.rerun()
 
 
@@ -7458,6 +7526,82 @@ def _section_display_groups(
     return selected, resolution.parent_questions
 
 
+def _prepare_student_list_replacement(
+    state: MutableMapping[str, Any],
+    child_id: str,
+) -> None:
+    """Apply BR-63 before returning to one student's Lists input."""
+
+    if not STUDENT_SCOPED_LIST_REPLACEMENT:
+        raise RuntimeError("Student-scoped list replacement is disabled")
+    children = tuple(
+        state.get("intake", {}).get("children", ())
+        if isinstance(state.get("intake"), Mapping)
+        else ()
+    )
+    target_index = next(
+        (
+            index
+            for index, child in enumerate(children)
+            if str(child.get("child_id", "")) == child_id
+        ),
+        None,
+    )
+    if target_index is None:
+        raise ValueError("The student whose list is being replaced is missing.")
+
+    state["replace_list_child_id"] = child_id
+    state["list_inputs"] = tuple(
+        list_input
+        for list_input in tuple(state.get("list_inputs", ()))
+        if list_input.child_id != child_id
+    )
+    for key in (
+        f"list_upload_{target_index}",
+        f"list_upload_draft_{target_index}",
+        f"list_paste_{target_index}",
+    ):
+        _delete_navigation_value(state, key)
+    for mapping_key in (
+        "document_structures",
+        "document_selections",
+        "structure_errors",
+        "extracted_lists",
+        "unmerged_extracted_lists",
+        "extraction_errors",
+    ):
+        mapping = state.get(mapping_key)
+        if isinstance(mapping, Mapping) and child_id in mapping:
+            updated = dict(mapping)
+            updated.pop(child_id, None)
+            state[mapping_key] = updated
+    source_cache = state.get("source_reference_cache")
+    if isinstance(source_cache, Mapping):
+        state["source_reference_cache"] = {
+            cache_key: value
+            for cache_key, value in source_cache.items()
+            if not (
+                isinstance(cache_key, tuple)
+                and cache_key
+                and cache_key[0] == child_id
+            )
+        }
+    state["structure_cache_ready"] = False
+    state["extraction_cache_ready"] = False
+    state["requirement_merge_result"] = None
+    state["requirement_merge_resolved"] = False
+    state["requirement_merge_choices"] = {}
+    state["requirement_constraint_choices"] = {}
+    state["requirement_variant_quantity_choices"] = {}
+    state["requirement_product_identity_choices"] = {}
+    state["requirement_excluded_merge_decisions"] = frozenset()
+    state["requirement_merge_validation_errors"] = ()
+    state["review_items"] = ()
+    state["organized_list_confirmed"] = False
+    state["list_identity_confirmed"] = False
+    _invalidate_plan_state(state)
+
+
 def _apply_section_proceed_action(
     state: MutableMapping[str, Any],
     widget_key: str,
@@ -7467,6 +7611,7 @@ def _apply_section_proceed_action(
 
     action = str(state.get(widget_key, ""))
     if action == SECTION_PROCEED_UPLOAD_ACTION:
+        _prepare_student_list_replacement(state, child_id)
         state["list_focus_child_id"] = child_id
         navigate_back_to_screen(state, "lists")
     elif action.startswith(SECTION_PROCEED_STUDENTS_ACTION_PREFIX):
@@ -7494,6 +7639,23 @@ def _render_sections(st: Any) -> None:
         for list_input in st.session_state["list_inputs"]
     }
     selections = dict(st.session_state["document_selections"])
+    resolutions = {
+        child_id: resolve_document_sections(
+            structure,
+            str(child_by_id[child_id]["grade"]),
+        )
+        for child_id, structure in structures.items()
+    }
+    if not any(
+        section_resolution_needs_parent_screen(
+            resolution,
+            has_saved_selection=child_id in selections,
+        )
+        for child_id, resolution in resolutions.items()
+    ):
+        st.session_state["screen"] = "working"
+        st.rerun()
+        return
 
     st.header("What will be extracted from each list")
     st.write(
@@ -7520,7 +7682,25 @@ def _render_sections(st: Any) -> None:
         child = child_by_id[child_id]
         list_input = input_by_child[child_id]
         grade = str(child["grade"])
-        resolution = resolve_document_sections(structure, grade)
+        resolution = resolutions[child_id]
+        document_name = list_input.resolved_document_name
+        if resolution.grade_scope_case == DOCUMENT_GRADE_SCOPE_NO_GRADE:
+            with st.container(border=True):
+                st.subheader(
+                    escape_streamlit_dollars(
+                        f"{child['label']} - {grade}"
+                    )
+                )
+                st.caption(
+                    escape_streamlit_dollars(
+                        f"Document: {document_name}"
+                    )
+                )
+                st.write(
+                    "This document does not name a grade, so the entire "
+                    "list will be extracted."
+                )
+            continue
         current = selections.get(child_id)
         initial_ids = (
             tuple(current.selected_section_ids)
@@ -7545,7 +7725,6 @@ def _render_sections(st: Any) -> None:
             resolution,
             choice,
         )
-        document_name = list_input.resolved_document_name
 
         with st.container(border=True):
             rendered_sources: set[tuple[str, int | None]] = set()
@@ -7590,7 +7769,10 @@ def _render_sections(st: Any) -> None:
                         child_id,
                     ),
                 )
-            elif not resolution.has_grade_match and not choice.can_continue:
+            elif section_resolution_blocks_extraction(
+                resolution,
+                choice,
+            ):
                 covered = (
                     _join_names(resolution.covered_grades)
                     or "no identified grades"
@@ -7653,7 +7835,10 @@ def _render_sections(st: Any) -> None:
                         key_prefix=f"{key_prefix}:selected-source",
                         rendered_sources=rendered_sources,
                     )
-                if not resolution.has_grade_match:
+                if (
+                    resolution.grade_scope_case
+                    == DOCUMENT_GRADE_SCOPE_MISMATCH
+                ):
                     st.warning(
                         escape_streamlit_dollars(
                             f"{document_name} has no section matching {grade}. "
@@ -7765,6 +7950,10 @@ def _render_sections(st: Any) -> None:
                 child_id
                 for child_id, action in blocked_actions.items()
                 if action == SECTION_PROCEED_UPLOAD_ACTION
+            )
+            _prepare_student_list_replacement(
+                st.session_state,
+                matching_child_id,
             )
             st.session_state["list_focus_child_id"] = matching_child_id
             navigate_back_to_screen(st.session_state, "lists")
@@ -9268,14 +9457,39 @@ def _render_working(st: Any) -> None:
                 status.update(label=message)
                 status.write(message)
 
-            structures, structure_errors = _inspect_list_inputs(
-                list_inputs,
+            existing_structures = dict(
+                st.session_state["document_structures"]
+            )
+            pending_structure_inputs = tuple(
+                list_input
+                for list_input in list_inputs
+                if list_input.child_id not in existing_structures
+            )
+            inspected_structures, new_structure_errors = _inspect_list_inputs(
+                pending_structure_inputs,
                 intake["children"],
                 demo_mode=bool(intake.get("demo_mode")),
                 progress_callback=structure_progress,
             )
-            selections: dict[str, DocumentSelection] = {}
-            for child_id, structure in structures.items():
+            structures = {
+                **existing_structures,
+                **inspected_structures,
+            }
+            active_child_ids = {
+                list_input.child_id for list_input in list_inputs
+            }
+            structure_errors = {
+                child_id: error
+                for child_id, error in {
+                    **dict(st.session_state["structure_errors"]),
+                    **new_structure_errors,
+                }.items()
+                if child_id in active_child_ids
+            }
+            selections: dict[str, DocumentSelection] = dict(
+                st.session_state["document_selections"]
+            )
+            for child_id, structure in inspected_structures.items():
                 child = next(
                     child
                     for child in intake["children"]
@@ -9285,10 +9499,7 @@ def _render_working(st: Any) -> None:
                     structure,
                     str(child["grade"]),
                 )
-                if (
-                    resolution.has_grade_match
-                    and not resolution.needs_parent_screen
-                ):
+                if section_resolution_can_auto_select(resolution):
                     choice = build_resolved_section_choice(resolution)
                     selections[child_id] = choice_to_document_selection(
                         structure,
@@ -9307,17 +9518,19 @@ def _render_working(st: Any) -> None:
     structures = st.session_state["document_structures"]
     selections = st.session_state["document_selections"]
     needs_section_choice = any(
-        resolve_document_sections(
-            structure,
-            str(
-                next(
-                    child["grade"]
-                    for child in intake["children"]
-                    if str(child["child_id"]) == child_id
-                )
+        section_resolution_needs_parent_screen(
+            resolve_document_sections(
+                structure,
+                str(
+                    next(
+                        child["grade"]
+                        for child in intake["children"]
+                        if str(child["child_id"]) == child_id
+                    )
+                ),
             ),
-        ).needs_parent_screen
-        and child_id not in selections
+            has_saved_selection=child_id in selections,
+        )
         for child_id, structure in structures.items()
     )
     if needs_section_choice:
@@ -9346,12 +9559,16 @@ def _render_working(st: Any) -> None:
                 status.update(label=message)
                 status.write(message)
 
+            existing_extractions = dict(
+                st.session_state["unmerged_extracted_lists"]
+            )
             readable_inputs = tuple(
                 list_input
                 for list_input in list_inputs
                 if list_input.child_id in structures
+                and list_input.child_id not in existing_extractions
             )
-            extractions, extraction_errors = _extract_list_inputs(
+            new_extractions, new_extraction_errors = _extract_list_inputs(
                 readable_inputs,
                 extractor=(
                     extract_demo_document
@@ -9361,9 +9578,23 @@ def _render_working(st: Any) -> None:
                 selections=selections,
                 progress_callback=extraction_progress,
             )
+            extractions = {
+                **existing_extractions,
+                **new_extractions,
+            }
+            active_child_ids = {
+                list_input.child_id for list_input in list_inputs
+            }
             extraction_errors = {
                 **st.session_state["structure_errors"],
-                **extraction_errors,
+                **{
+                    child_id: error
+                    for child_id, error in dict(
+                        st.session_state["extraction_errors"]
+                    ).items()
+                    if child_id in active_child_ids
+                },
+                **new_extraction_errors,
             }
             merged_extractions, merge_result = consolidate_extractions(
                 extractions

@@ -2572,3 +2572,60 @@ quantity controls on both desktop and phone widths.
 - Streamlit is unavailable on this Windows ARM64 machine, so the immediate
   radio navigation and focused upload notice still require deployed visual
   confirmation.
+
+## 2026-07-29 - Part A-13 unified grade scope and scoped list replacement
+
+### What changed
+
+- Added one deterministic grade-scope classification for the three BR-59
+  cases and routed section-screen blocking, parent-screen routing, and
+  automatic selection through that classification.
+- Changed "Upload a different document" to remove only the affected student's
+  document, section selection, and extraction. Other students' saved lists,
+  section selections, and extractions are retained and reused.
+- Added renderer-path tests that call the actual Lists section and working
+  screen functions with production `ListInput`, `DocumentStructureEnvelope`,
+  `DocumentSelection`, `ExtractionEnvelope`, and `Requirement` objects.
+
+### Diagnosis and decisions
+
+- BR-59 was already applied inside `resolve_document_sections`, and the
+  working-screen router correctly treated an ungraded document as the whole
+  list. The stale block lived in `_render_sections`, which independently
+  treated a choice with zero selected sections as unresolved. This mattered
+  when session state was already on the section screen.
+- BR-62 makes `classify_document_grade_scope` the sole grade-scope authority
+  and centralizes the three downstream decisions that consume it.
+- BR-63 scopes document replacement to one student while retaining unaffected
+  students' state.
+
+### Split-consumer audit
+
+- Grade interpretation is still duplicated between section resolution and
+  post-extraction wrong-list warnings. This is the most likely grade-related
+  divergence because the warning path has separate token and range parsing.
+- Section selectability is derived both by the extraction display helper and
+  by the primary-language section resolver. Malformed multilingual metadata
+  could make the displayed candidates differ from resolvable candidates.
+- Item identity is derived at schema correction, normalization, same-student
+  merge, cross-student aggregation, and selected-SKU consolidation. These
+  stages have different purposes, but merge identity versus normalized
+  aggregation identity is the highest-risk overlap.
+- Quantity semantics are interpreted at schema validation, review package
+  status, normalization, merge defaults, review edits, and classroom
+  multiplication. Package-count assumptions and merge-default UI mapping are
+  the most likely areas to drift.
+- Per-item exclusion quantity is applied by separate Personalize-row and
+  conflict-card callbacks. Both currently use the same named zero constant,
+  but they remain two mutation paths.
+- No broader consolidation was attempted because Part A-13 requested an audit,
+  not a refactor of those areas.
+
+### Testing and architecture
+
+- Focused section suite: 119 passed, 1 skipped.
+- `py -3.12-arm64 -m pytest -q`: 360 passed, 1 skipped.
+- Static AST inspection found no model calls in `agent/optimize.py`.
+  Operator candidates in `agent/extract.py` are type unions and prompt-string
+  assembly, not numeric, quantity, or money arithmetic. No code was modified
+  for a static-check result.

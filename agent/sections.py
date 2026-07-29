@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from agent.rules import (
-    DOCUMENT_WITHOUT_NAMED_GRADE_ACTION,
+    DOCUMENT_GRADE_SCOPE_MATCH,
+    DOCUMENT_GRADE_SCOPE_MISMATCH,
+    DOCUMENT_GRADE_SCOPE_NO_GRADE,
     SECTION_MATCHING_GRADE_ACTION,
     SECTION_OTHER_GRADE_ACTION,
     SECTION_TRANSLATED_DUPLICATE_ACTION,
     SECTION_WITHOUT_GRADE_ACTION,
     choose_primary_document_language,
     document_section_action,
+    grade_token_identifier,
     section_is_layout_artifact,
     section_is_in_primary_language,
 )
@@ -20,6 +24,12 @@ from agent.schema import (
     DocumentSelection,
     DocumentStructureEnvelope,
 )
+
+DocumentGradeScopeCase = Literal[
+    "no_named_grade",
+    "matching_grade",
+    "named_grades_without_match",
+]
 
 
 def build_document_selection(
@@ -101,6 +111,27 @@ def sanitize_document_structure(
     return structure.model_copy(update={"sections": sections})
 
 
+def classify_document_grade_scope(
+    structure: DocumentStructureEnvelope,
+    student_grade: str,
+) -> DocumentGradeScopeCase:
+    """Return the sole BR-62 case consumed by every section decision."""
+
+    named_grade_ids = frozenset(
+        grade_id
+        for section in structure.sections
+        for grade in section.grades
+        for grade_id in (grade_token_identifier(grade),)
+        if grade_id
+    )
+    if not named_grade_ids:
+        return DOCUMENT_GRADE_SCOPE_NO_GRADE
+    student_grade_id = grade_token_identifier(student_grade)
+    if student_grade_id and student_grade_id in named_grade_ids:
+        return DOCUMENT_GRADE_SCOPE_MATCH
+    return DOCUMENT_GRADE_SCOPE_MISMATCH
+
+
 @dataclass(frozen=True)
 class SectionResolution:
     """One student's BR-14 through BR-18 document-scope outcome."""
@@ -114,8 +145,7 @@ class SectionResolution:
     covered_grades: tuple[str, ...]
     primary_language_sections: tuple[DocumentSection, ...]
     has_primary_language_source: bool
-    document_has_named_grades: bool
-    document_action: str | None = None
+    grade_scope_case: DocumentGradeScopeCase
 
     @property
     def has_grade_match(self) -> bool:
@@ -127,11 +157,11 @@ class SectionResolution:
     def needs_parent_screen(self) -> bool:
         """Show the screen for multi-section, unresolved, or blocked documents."""
 
-        if self.document_action == DOCUMENT_WITHOUT_NAMED_GRADE_ACTION:
+        if self.grade_scope_case == DOCUMENT_GRADE_SCOPE_NO_GRADE:
             return False
         return (
             not self.has_primary_language_source
-            or not self.has_grade_match
+            or self.grade_scope_case == DOCUMENT_GRADE_SCOPE_MISMATCH
             or bool(self.parent_questions)
             or len(self.primary_language_sections) > 1
         )
@@ -175,6 +205,42 @@ class ResolvedSectionChoice:
         return bool(self.selected_section_ids)
 
 
+def section_resolution_blocks_extraction(
+    resolution: SectionResolution,
+    choice: ResolvedSectionChoice | None = None,
+) -> bool:
+    """Return the BR-62 blocking result for one current parent choice."""
+
+    if resolution.grade_scope_case == DOCUMENT_GRADE_SCOPE_NO_GRADE:
+        return False
+    if not resolution.has_primary_language_source:
+        return True
+    if resolution.grade_scope_case == DOCUMENT_GRADE_SCOPE_MISMATCH:
+        return choice is None or not choice.can_continue
+    return False
+
+
+def section_resolution_needs_parent_screen(
+    resolution: SectionResolution,
+    *,
+    has_saved_selection: bool,
+) -> bool:
+    """Return whether the Lists flow must show section resolution."""
+
+    return resolution.needs_parent_screen and not has_saved_selection
+
+
+def section_resolution_can_auto_select(
+    resolution: SectionResolution,
+) -> bool:
+    """Return whether BR-62 case (b) needs no parent interaction."""
+
+    return (
+        resolution.grade_scope_case == DOCUMENT_GRADE_SCOPE_MATCH
+        and not resolution.needs_parent_screen
+    )
+
+
 def primary_document_language(
     structure: DocumentStructureEnvelope,
 ) -> str | None:
@@ -211,12 +277,11 @@ def resolve_document_sections(
             primary_language,
         )
     )
-    document_has_named_grades = any(
-        grade.strip()
-        for section in structure.sections
-        for grade in section.grades
+    grade_scope_case = classify_document_grade_scope(
+        structure,
+        student_grade,
     )
-    if not document_has_named_grades:
+    if grade_scope_case == DOCUMENT_GRADE_SCOPE_NO_GRADE:
         return SectionResolution(
             student_grade=student_grade,
             primary_language=primary_language,
@@ -233,8 +298,7 @@ def resolve_document_sections(
             has_primary_language_source=(
                 bool(primary_sections) or not structure.sections
             ),
-            document_has_named_grades=False,
-            document_action=DOCUMENT_WITHOUT_NAMED_GRADE_ACTION,
+            grade_scope_case=grade_scope_case,
         )
     translated: list[DocumentSection] = []
     selected: list[DocumentSection] = []
@@ -276,7 +340,7 @@ def resolve_document_sections(
         covered_grades=covered_grades,
         primary_language_sections=primary_sections,
         has_primary_language_source=bool(primary_sections),
-        document_has_named_grades=True,
+        grade_scope_case=grade_scope_case,
     )
 
 
