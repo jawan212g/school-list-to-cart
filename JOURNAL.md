@@ -2506,3 +2506,69 @@ or cart calculations.
 Deploy Part A-11 and visually verify the per-student summary, anchor jumps,
 student-scoped default approval, rationale information popover, and zeroed
 quantity controls on both desktop and phone widths.
+
+## 2026-07-29 — Part A-12 unstructured documents and section detection
+
+### What changed
+
+- Removed the structure schema's requirement that every document contain a
+  selectable section. The structure prompt now explicitly returns no sections
+  for one plain, ungraded list and does not promote table headers into choices.
+- Added a deterministic Lists-boundary filter for table/column headers and the
+  invented "Unlabeled supply list" placeholder.
+- Added the three-way grade-scope rule: no named grades extracts the whole
+  document; a matching grade keeps automatic selection; named grades with no
+  match keep the BR-18 stop.
+- Wired both grade-mismatch navigation choices to run as soon as the parent
+  selects them. The upload path returns to Lists and identifies the student
+  whose document should be replaced; the removal path returns to Your students.
+- Added the exact 25-line tabular paste as a test fixture and exercised the
+  production `_inspect_list_inputs`, `resolve_document_sections`,
+  `_extract_list_inputs`, and navigation callback contracts with real schema
+  objects.
+
+### Diagnosis and decisions
+
+- The "Quantity Item Notes" defect was cart-affecting structure detection, not
+  display duplication. The prompt encouraged one section per top-level list,
+  the schema rejected zero sections, and the retry demanded at least one
+  section. Those constraints forced a plain table to acquire an invented
+  selectable section.
+- BR-59 distinguishes document grade scope. It amends BR-17 and BR-18 so their
+  section question/stop behavior applies only when at least one grade is named.
+- BR-60 makes layout headers and invented placeholder labels non-sections.
+- BR-61 requires mismatch proceed controls to perform their named navigation
+  immediately.
+
+### Live verification
+
+- Kelley GPT API `gpt-oss-20b` detected zero sections for the tabular paste in
+  1.99 seconds. Whole-document extraction completed in 33.22 seconds.
+- All 25 item lines were interpreted. Twelve became in-domain `Requirement`
+  objects. Thirteen distinct source lines were retained as catalog-unavailable
+  items; none became an extraction failure, skipped line, or uninterpreted
+  line.
+- A paired Kelley Maple run extracted 16 requirements per student with no
+  failures and no requirement-merge interrupts. At $150 the cart landed at
+  $110.04 with four interrupts. Reusing those extractions and 127 captured
+  suitability decisions at $85 retained the $110.04 required cart and produced
+  a $74.91 recommended plan with five interrupts.
+- The $110.04 landed cost matches the final A-11 live cart, not the older
+  $111.21 guard. The changed interrupt and recommended-plan figures are from
+  a fresh Kelley suitability pass, not the A-12 section rules. A-12 changed no
+  matching, gate, optimization, or money path.
+
+### Testing and architecture
+
+- Focused section, extraction, and app suite: 155 passed.
+- `py -3.12-arm64 -m pytest -q`: 357 passed, 1 skipped.
+- Static AST inspection found no model-call candidates in
+  `agent/optimize.py`. The apparent `agent/extract.py` operator candidates are
+  type-union annotations and prompt-string assembly, not numeric, quantity, or
+  money arithmetic. No code was changed to silence those false positives.
+
+### Limitation
+
+- Streamlit is unavailable on this Windows ARM64 machine, so the immediate
+  radio navigation and focused upload notice still require deployed visual
+  confirmation.

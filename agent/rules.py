@@ -86,9 +86,11 @@ SECTION_OTHER_GRADE_ACTION = "rule_out"
 SECTION_TRANSLATED_DUPLICATE_ACTION = "provenance_only"
 # BR-16: a translated duplicate is evidence for its original, never a choice.
 SECTION_WITHOUT_GRADE_ACTION = "ask_parent"
-# BR-17: only a source-language section without any grade token asks the parent.
+# BR-17 amended by BR-59: a source-language section without a grade token asks
+# the parent only when the document names at least one grade elsewhere.
 SECTION_NO_MATCH_ACTION = "stop"
-# BR-18: zero matching source-language sections stops extraction for that student.
+# BR-18 amended by BR-59: when a document names one or more grades, zero
+# matching source-language sections stops extraction for that student.
 PRIMARY_LANGUAGE_FALLBACK_INDEX = 0
 # BR-18: when the model does not name a primary language, use the first detected one.
 GRADE_TOKEN_NUMBER_INDEX = 0
@@ -297,6 +299,38 @@ CATALOG_UNAVAILABLE_SOURCE_IDENTITY_FIELDS = (
 EXTRACTED_SCOPE_LABEL = "Extracted"
 # BR-58: parent-facing document scope uses "extracted", not "read", so the
 # interface names the actual structured-output operation consistently.
+
+DOCUMENT_WITHOUT_NAMED_GRADE_ACTION = "extract_entire_document"
+# BR-59: a document that names no grade is one whole list; it is extracted
+# without a section question, grade warning, or BR-18 stop. When any grade is
+# named, matching and no-match behavior remains governed by BR-14 and BR-18.
+
+SECTION_LAYOUT_HEADER_MIN_DISTINCT_FIELDS = 2
+SECTION_LAYOUT_HEADER_FIELDS = frozenset(
+    {
+        "amount",
+        "count",
+        "description",
+        "item",
+        "items",
+        "notes",
+        "qty",
+        "quantity",
+    }
+)
+INVENTED_SECTION_LABELS = frozenset(
+    {
+        "unlabeled supply list",
+        "unlabelled supply list",
+    }
+)
+# BR-60: table and column headers are layout evidence, not parent-selectable
+# document sections. Model-invented placeholder section names are discarded.
+
+SECTION_PROCEED_UPLOAD_ACTION = "Upload a different document"
+SECTION_PROCEED_STUDENTS_ACTION_PREFIX = "Go to Your students"
+# BR-61: every grade-mismatch proceed control performs its named navigation
+# immediately; the screen never presents a control that has no effect.
 
 PARENT_BOOLEAN_ATTRIBUTE_LABELS = {
     "sharpened": {
@@ -1061,3 +1095,22 @@ def document_section_action(
     ):
         return SECTION_MATCHING_GRADE_ACTION
     return SECTION_OTHER_GRADE_ACTION
+
+
+def section_is_layout_artifact(label: str, source_line: str) -> bool:
+    """Reject BR-60 table headers and invented pseudo-sections."""
+
+    normalized_label = " ".join(label.casefold().split())
+    if normalized_label in INVENTED_SECTION_LABELS:
+        return True
+    for candidate in (source_line, label):
+        tokens = frozenset(
+            re.findall(r"[a-z]+", candidate.casefold())
+        )
+        if (
+            tokens
+            and tokens.issubset(SECTION_LAYOUT_HEADER_FIELDS)
+            and len(tokens) >= SECTION_LAYOUT_HEADER_MIN_DISTINCT_FIELDS
+        ):
+            return True
+    return False

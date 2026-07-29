@@ -114,6 +114,8 @@ from agent.rules import (
     PERSONALIZE_SOURCE_CONTROL_REASONS,
     PERSONALIZE_SUMMARY_COLUMNS,
     QUANTITY_WORKING_ASSUMPTION_HELP,
+    SECTION_PROCEED_STUDENTS_ACTION_PREFIX,
+    SECTION_PROCEED_UPLOAD_ACTION,
     SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX,
     SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS,
     SINGLE_INSTANCE_REQUIREMENT_ITEMS,
@@ -144,6 +146,7 @@ from agent.sections import (
     build_resolved_section_choice,
     choice_to_document_selection,
     resolve_document_sections,
+    sanitize_document_structure,
 )
 from agent.schema import (
     CatalogUnavailableItem,
@@ -5139,6 +5142,25 @@ def _render_lists(st: Any) -> None:
         "contains several grades, upload it once and choose a section for "
         "each student. Every file is checked before items are extracted."
     )
+    focused_child_id = st.session_state.pop(
+        "list_focus_child_id",
+        None,
+    )
+    if focused_child_id is not None:
+        focused_child = next(
+            (
+                child
+                for child in children
+                if str(child["child_id"]) == str(focused_child_id)
+            ),
+            None,
+        )
+        if focused_child is not None:
+            st.info(
+                escape_streamlit_dollars(
+                    f"Replace or update the list for {focused_child['label']}."
+                )
+            )
     saved_inputs = tuple(st.session_state["list_inputs"])
     expected_child_ids = tuple(
         child["child_id"] for child in children
@@ -5467,12 +5489,12 @@ def _inspect_list_inputs(
                     done_count,
                     len(list_inputs),
                     (
-                        f"Found sections in {done_count} of "
+                        f"Found the document layout in {done_count} of "
                         f"{len(list_inputs)} lists"
                     ),
                 )
             try:
-                structure = future.result()
+                structure = sanitize_document_structure(future.result())
                 for list_input in group:
                     completed[list_input.child_id] = structure
             except Exception as error:
@@ -7436,6 +7458,22 @@ def _section_display_groups(
     return selected, resolution.parent_questions
 
 
+def _apply_section_proceed_action(
+    state: MutableMapping[str, Any],
+    widget_key: str,
+    child_id: str,
+) -> None:
+    """Perform the BR-61 navigation selected on the Lists section screen."""
+
+    action = str(state.get(widget_key, ""))
+    if action == SECTION_PROCEED_UPLOAD_ACTION:
+        state["list_focus_child_id"] = child_id
+        navigate_back_to_screen(state, "lists")
+    elif action.startswith(SECTION_PROCEED_STUDENTS_ACTION_PREFIX):
+        navigate_intake_step(state, 1)
+        navigate_back_to_screen(state, "intake")
+
+
 def _render_sections(st: Any) -> None:
     """State deterministic scope and ask only unresolved section questions."""
 
@@ -7537,13 +7575,20 @@ def _render_sections(st: Any) -> None:
                         "until you choose how to proceed."
                     )
                 )
+                blocked_action_key = f"{key_prefix}:blocked-action"
                 blocked_actions[child_id] = st.radio(
                     f"How would you like to proceed for {child['label']}?",
                     (
-                        "Upload a different document",
+                        SECTION_PROCEED_UPLOAD_ACTION,
                         f"Go to Your students to remove {child['label']}",
                     ),
-                    key=f"{key_prefix}:blocked-action",
+                    key=blocked_action_key,
+                    on_change=_apply_section_proceed_action,
+                    args=(
+                        st.session_state,
+                        blocked_action_key,
+                        child_id,
+                    ),
                 )
             elif not resolution.has_grade_match and not choice.can_continue:
                 covered = (
@@ -7558,14 +7603,21 @@ def _render_sections(st: Any) -> None:
                         "how to proceed."
                     )
                 )
+                blocked_action_key = f"{key_prefix}:blocked-action"
                 blocked_actions[child_id] = st.radio(
                     f"How would you like to proceed for {child['label']}?",
                     (
                         "Pick a section manually",
-                        "Upload a different document",
+                        SECTION_PROCEED_UPLOAD_ACTION,
                         f"Go to Your students to remove {child['label']}",
                     ),
-                    key=f"{key_prefix}:blocked-action",
+                    key=blocked_action_key,
+                    on_change=_apply_section_proceed_action,
+                    args=(
+                        st.session_state,
+                        blocked_action_key,
+                        child_id,
+                    ),
                 )
             else:
                 selected_sections_by_id = {
@@ -7706,16 +7758,22 @@ def _render_sections(st: Any) -> None:
         st.rerun()
     if submitted:
         if any(
-            action == "Upload a different document"
+            action == SECTION_PROCEED_UPLOAD_ACTION
             for action in blocked_actions.values()
         ):
+            matching_child_id = next(
+                child_id
+                for child_id, action in blocked_actions.items()
+                if action == SECTION_PROCEED_UPLOAD_ACTION
+            )
+            st.session_state["list_focus_child_id"] = matching_child_id
             navigate_back_to_screen(st.session_state, "lists")
             st.rerun()
         if any(
-            action.startswith("Go to Your students")
+            action.startswith(SECTION_PROCEED_STUDENTS_ACTION_PREFIX)
             for action in blocked_actions.values()
         ):
-            st.session_state["intake_step"] = 1
+            navigate_intake_step(st.session_state, 1)
             navigate_back_to_screen(st.session_state, "intake")
             st.rerun()
         try:
@@ -9242,7 +9300,7 @@ def _render_working(st: Any) -> None:
             st.session_state["structure_cache_ready"] = True
             st.session_state["ui_error_active"] = bool(structure_errors)
             status.update(
-                label="Document sections identified",
+                label="Document layout identified",
                 state="complete",
             )
 

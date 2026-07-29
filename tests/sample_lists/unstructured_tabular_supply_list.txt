@@ -1,0 +1,26 @@
+Quantity	Item	Notes
+1	Bottle of Correction Fluid
+1	Box of Disinfecting Wipes
+1	Box of Feminine Hygiene Products for Girls
+1	Box of Kleenex Tissues
+1	Box of Pens, Blue or Black
+1	Combination Lock for Locker
+5	Folders with Pockets
+1	Graphing Calculator
+2	Highlighters
+1	Hole Puncher
+1	Pack of Graph Paper
+1	Pack of Hole Reinforcements
+1	Pack of Red Pens
+1	Pack of Sticky Flags
+1	Pack of Sticky Notes
+1	Package of No. 2 Pencils
+1	Package of College-Ruled Paper
+1	Ruler
+1	Set of Index Cards
+5	Single-Subject Notebooks
+1	Stapler, Box of Staples, and Staple Remover
+6	Stretchable Book Covers
+1	Thermal Water Bottle
+1	Three-Ring Binder with Dividers
+1	USB Flash Drive

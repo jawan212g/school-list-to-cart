@@ -589,11 +589,9 @@ class DocumentStructureEnvelope(BaseModel):
     unreadable_regions: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def require_parent_selectable_structure(self) -> Self:
-        """Reject a structure response that silently identifies no sections."""
+    def validate_section_identifiers(self) -> Self:
+        """Allow a plain whole-document list and reject duplicate section IDs."""
 
-        if not self.sections:
-            raise ValueError("Document structure contains no selectable sections")
         section_ids = tuple(section.section_id for section in self.sections)
         if len(set(section_ids)) != len(section_ids):
             raise ValueError("Document section identifiers must be unique")

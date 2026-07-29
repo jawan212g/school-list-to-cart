@@ -128,6 +128,12 @@ Security boundary:
 - Describe document organization only. Do not extract supply requirements yet.
 
 Structure rules:
+- A plain list that names no grade, teacher, classroom, or genuinely selectable
+  top-level list has no sections. Return sections as an empty collection; the
+  application will extract the whole document.
+- Column headings and table headers such as "Quantity Item Notes" describe layout.
+  Never return them as sections.
+- Never invent a placeholder section name such as "Unlabeled supply list".
 - Create one section for each grade, teacher, classroom, or other top-level list
   a parent could reasonably choose for one child.
 - For a matrix whose rows are items and columns are grades, create one section per
@@ -830,7 +836,8 @@ def _call_structure_model(
     if retry:
         instructions += (
             "\n\nThe prior response failed schema validation. Return every "
-            "required structure field and at least one selectable section."
+            "required structure field. Return an empty sections collection when "
+            "the document contains no genuine parent-selectable section."
         )
     model = (
         provider_config.vision_model

@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agent.rules import (
+    DOCUMENT_WITHOUT_NAMED_GRADE_ACTION,
     SECTION_MATCHING_GRADE_ACTION,
     SECTION_OTHER_GRADE_ACTION,
     SECTION_TRANSLATED_DUPLICATE_ACTION,
     SECTION_WITHOUT_GRADE_ACTION,
     choose_primary_document_language,
     document_section_action,
+    section_is_layout_artifact,
     section_is_in_primary_language,
 )
 from agent.schema import (
@@ -81,6 +83,24 @@ def build_document_selection(
     )
 
 
+def sanitize_document_structure(
+    structure: DocumentStructureEnvelope,
+) -> DocumentStructureEnvelope:
+    """Apply BR-60 before structure facts reach the Lists screen."""
+
+    sections = tuple(
+        section
+        for section in structure.sections
+        if not section_is_layout_artifact(
+            section.label,
+            section.source_line,
+        )
+    )
+    if sections == structure.sections:
+        return structure
+    return structure.model_copy(update={"sections": sections})
+
+
 @dataclass(frozen=True)
 class SectionResolution:
     """One student's BR-14 through BR-18 document-scope outcome."""
@@ -94,6 +114,8 @@ class SectionResolution:
     covered_grades: tuple[str, ...]
     primary_language_sections: tuple[DocumentSection, ...]
     has_primary_language_source: bool
+    document_has_named_grades: bool
+    document_action: str | None = None
 
     @property
     def has_grade_match(self) -> bool:
@@ -105,6 +127,8 @@ class SectionResolution:
     def needs_parent_screen(self) -> bool:
         """Show the screen for multi-section, unresolved, or blocked documents."""
 
+        if self.document_action == DOCUMENT_WITHOUT_NAMED_GRADE_ACTION:
+            return False
         return (
             not self.has_primary_language_source
             or not self.has_grade_match
@@ -187,6 +211,31 @@ def resolve_document_sections(
             primary_language,
         )
     )
+    document_has_named_grades = any(
+        grade.strip()
+        for section in structure.sections
+        for grade in section.grades
+    )
+    if not document_has_named_grades:
+        return SectionResolution(
+            student_grade=student_grade,
+            primary_language=primary_language,
+            auto_selected=(),
+            parent_questions=(),
+            other_grade_sections=(),
+            translated_duplicates=tuple(
+                section
+                for section in structure.sections
+                if section.duplicate_of_section_id is not None
+            ),
+            covered_grades=(),
+            primary_language_sections=primary_sections,
+            has_primary_language_source=(
+                bool(primary_sections) or not structure.sections
+            ),
+            document_has_named_grades=False,
+            document_action=DOCUMENT_WITHOUT_NAMED_GRADE_ACTION,
+        )
     translated: list[DocumentSection] = []
     selected: list[DocumentSection] = []
     questions: list[DocumentSection] = []
@@ -227,6 +276,7 @@ def resolve_document_sections(
         covered_grades=covered_grades,
         primary_language_sections=primary_sections,
         has_primary_language_source=bool(primary_sections),
+        document_has_named_grades=True,
     )
 
 

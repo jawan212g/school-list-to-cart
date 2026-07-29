@@ -178,6 +178,174 @@ def test_grade_mismatch_is_a_blocked_resolution_with_covered_grades() -> None:
     assert not build_resolved_section_choice(resolution).can_continue
 
 
+def test_unstructured_pasted_list_skips_section_resolution_screen() -> None:
+    """BR-59/BR-60: the Lists production path treats a plain table as one list."""
+
+    source = Path(
+        "tests/sample_lists/unstructured_tabular_supply_list.txt"
+    ).read_text(encoding="utf-8")
+    list_input = ListInput(
+        child_id="child-1",
+        source=source,
+        mime_type="text/plain",
+        document_name="pasted-list.txt",
+    )
+
+    def inspector(
+        inspected_source: str,
+        *,
+        mime_type: str | None,
+    ) -> DocumentStructureEnvelope:
+        assert inspected_source == source
+        assert mime_type == "text/plain"
+        return DocumentStructureEnvelope(
+            layouts=("single_section",),
+            sections=(
+                DocumentSection(
+                    section_id="table-header",
+                    label="Quantity Item Notes",
+                    page_numbers=(1,),
+                    source_line="Quantity\tItem\tNotes",
+                ),
+                DocumentSection(
+                    section_id="invented-placeholder",
+                    label="Unlabeled supply list",
+                    page_numbers=(1,),
+                    source_line="Unlabeled supply list",
+                ),
+            ),
+        )
+
+    structures, errors = app._inspect_list_inputs(
+        (list_input,),
+        (
+            {
+                "child_id": "child-1",
+                "label": "Kevin",
+                "grade": "Grade 2",
+            },
+        ),
+        inspector=inspector,
+    )
+    structure = structures["child-1"]
+    resolution = resolve_document_sections(structure, "Grade 2")
+
+    assert errors == {}
+    assert structure.sections == ()
+    assert not resolution.document_has_named_grades
+    assert not resolution.needs_parent_screen
+    assert resolution.document_action == "extract_entire_document"
+
+    extraction_options: list[dict[str, object]] = []
+
+    def extractor(
+        extracted_source: str,
+        **options: object,
+    ) -> ExtractionEnvelope:
+        assert extracted_source == source
+        extraction_options.append(options)
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="wipes",
+                    child_id="child-1",
+                    raw_text="1\tBox of Disinfecting Wipes",
+                    canonical_item="disinfecting_wipes",
+                    quantity=1,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+
+    extractions, extraction_errors = app._extract_list_inputs(
+        (list_input,),
+        extractor=extractor,
+        selections={},
+    )
+
+    assert extraction_errors == {}
+    assert tuple(extractions) == ("child-1",)
+    assert "section_selection" not in extraction_options[0]
+
+
+def test_single_mismatched_grade_section_still_requires_resolution() -> None:
+    """BR-18/BR-59: one named wrong grade still blocks whole-list extraction."""
+
+    structure = DocumentStructureEnvelope(
+        sections=(
+            DocumentSection(
+                section_id="grade-5",
+                label="5th Grade",
+                grades=("Grade 5",),
+                source_line="5th Grade",
+            ),
+        )
+    )
+
+    resolution = resolve_document_sections(structure, "Grade 2")
+
+    assert resolution.document_has_named_grades
+    assert not resolution.has_grade_match
+    assert resolution.covered_grades == ("Grade 5",)
+    assert resolution.needs_parent_screen
+
+
+def test_one_named_matching_grade_uses_current_automatic_resolution() -> None:
+    """BR-14/BR-59: one matching grade continues without a section question."""
+
+    structure = DocumentStructureEnvelope(
+        sections=(
+            DocumentSection(
+                section_id="grade-2",
+                label="2nd Grade",
+                grades=("Grade 2",),
+                source_line="2nd Grade",
+            ),
+        )
+    )
+
+    resolution = resolve_document_sections(structure, "Grade 2")
+
+    assert resolution.has_grade_match
+    assert not resolution.needs_parent_screen
+    assert tuple(
+        section.section_id for section in resolution.auto_selected
+    ) == ("grade-2",)
+
+
+def test_grade_mismatch_proceed_actions_navigate_immediately() -> None:
+    """BR-61: the exact callbacks used by the Lists screen are functional."""
+
+    upload_state: dict[str, object] = {
+        "screen": "sections",
+        "scope-action": "Upload a different document",
+    }
+    app._apply_section_proceed_action(
+        upload_state,
+        "scope-action",
+        "child-1",
+    )
+
+    assert upload_state["screen"] == "lists"
+    assert upload_state["list_focus_child_id"] == "child-1"
+
+    students_state: dict[str, object] = {
+        "screen": "sections",
+        "intake_step": 3,
+        "max_intake_step_reached": 3,
+        "scope-action": "Go to Your students to remove Kevin",
+    }
+    app._apply_section_proceed_action(
+        students_state,
+        "scope-action",
+        "child-1",
+    )
+
+    assert students_state["screen"] == "intake"
+    assert students_state["intake_step"] == 1
+    assert students_state["max_intake_step_reached"] == 3
+
+
 def test_explicit_mismatched_section_resolves_without_br18_stop() -> None:
     """BR-18: a parent-selected section is a valid resolution."""
 
