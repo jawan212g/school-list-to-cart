@@ -5,9 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import Any
+from typing import Any, Literal
 
 from agent.rules import (
+    AMBIGUOUS_DESCRIPTOR_DEFAULT,
+    INCIDENTAL_REQUIREMENT_ATTRIBUTE_FIELDS,
+    PRODUCT_DEFINING_ATTRIBUTE_FIELDS,
     REQUIREMENT_MERGE_CONFLICT_DEFAULT_ACTION,
     REQUIREMENT_CONSTRAINT_CONFLICT_ACTION,
     REQUIREMENT_ITEM_IDENTITY_FIELDS,
@@ -15,6 +18,7 @@ from agent.rules import (
     REQUIREMENT_SOURCE_DEDUPLICATION_FIELDS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
     SYSTEM_DECISION_MERGED_QUANTITY_PREFIX,
+    SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX,
     SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX,
     SYSTEM_DECISION_RECONCILED_BRAND,
     SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
@@ -95,6 +99,11 @@ class RequirementItemDecision:
     quantity_interrupt: RequirementQuantityInterrupt | None
     constraint_interrupts: tuple[RequirementConstraintInterrupt, ...]
     variants: tuple[RequirementVariant, ...]
+    conflict_type: Literal[
+        "quantity_only",
+        "different_products",
+        "ambiguous",
+    ]
 
 
 def item_decisions(
@@ -146,6 +155,16 @@ def item_decisions(
                 quantity_interrupt=quantity,
                 constraint_interrupts=constraints,
                 variants=constraints[0].variants if constraints else (),
+                conflict_type=(
+                    "ambiguous"
+                    if any(
+                        constraint.field_name == "ambiguous_descriptor"
+                        for constraint in constraints
+                    )
+                    else "different_products"
+                    if constraints
+                    else "quantity_only"
+                ),
             )
         )
     return tuple(decisions)
@@ -323,28 +342,12 @@ def _reconcile_constraints(
     brands = [requirement.brand_lock for requirement in group]
     brand_options = _constraint_options(group, brands)
     brand_lock = (
-        str(brand_options[0].value) if brand_options else None
+        str(brand_options[0].value)
+        if len(brand_options) == 1
+        else None
     )
-    if len(brand_options) == 1 and len(set(brands)) > 1:
+    if len(set(brands)) > 1:
         system_decisions.append(SYSTEM_DECISION_RECONCILED_BRAND)
-    if len(brand_options) > 1:
-        interrupt_id = _constraint_interrupt_id(
-            group[0].child_id,
-            identity,
-            "brand",
-        )
-        conflicts.append(
-            RequirementConstraintInterrupt(
-                interrupt_id=interrupt_id,
-                decision_id=_decision_id(group[0].child_id, identity),
-                child_id=group[0].child_id,
-                canonical_item=group[0].canonical_item,
-                field_name="brand",
-                options=brand_options,
-            )
-        )
-        if interrupt_id in choices:
-            brand_lock = str(choices[interrupt_id])
 
     merged_attributes: dict[str, object] = {}
     attribute_rows = [
@@ -360,25 +363,36 @@ def _reconcile_constraints(
         if not options:
             continue
         if field_name == "acceptable_colors":
-            sets = [
-                set(option.value)
+            colors = {
+                str(color)
                 for option in options
                 if isinstance(option.value, (tuple, list, set))
-            ]
-            common = set.intersection(*sets) if sets else set()
-            if common:
-                merged_attributes[field_name] = tuple(sorted(common))
-                if len(options) > 1:
-                    system_decisions.append(
-                        SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX + field_name
-                    )
-                continue
+                for color in option.value
+            }
+            if colors:
+                merged_attributes[field_name] = tuple(sorted(colors))
+            if len(options) > 1:
+                system_decisions.append(
+                    SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX + field_name
+                )
+            continue
         if len(options) == 1:
             merged_attributes[field_name] = options[0].value
             if len(set(map(repr, values))) > 1:
                 system_decisions.append(
                     SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX + field_name
                 )
+            continue
+        if field_name not in PRODUCT_DEFINING_ATTRIBUTE_FIELDS:
+            if field_name not in INCIDENTAL_REQUIREMENT_ATTRIBUTE_FIELDS:
+                # Unclassified details remain visible in provenance but do not
+                # silently become a product identity rule.
+                pass
+            if field_name not in {"count", "binding"}:
+                merged_attributes[field_name] = options[0].value
+            system_decisions.append(
+                SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX + field_name
+            )
             continue
         interrupt_id = _constraint_interrupt_id(
             group[0].child_id,
@@ -398,6 +412,55 @@ def _reconcile_constraints(
         merged_attributes[field_name] = choices.get(
             interrupt_id,
             options[0].value,
+        )
+
+    ambiguous_values = tuple(
+        dict.fromkeys(
+            descriptor
+            for requirement in group
+            for descriptor in requirement.ambiguous_descriptors
+        )
+    )
+    if ambiguous_values and any(
+        not requirement.ambiguous_descriptors for requirement in group
+    ):
+        interrupt_id = _constraint_interrupt_id(
+            group[0].child_id,
+            identity,
+            "ambiguous_descriptor",
+        )
+        conflicts.append(
+            RequirementConstraintInterrupt(
+                interrupt_id=interrupt_id,
+                decision_id=_decision_id(group[0].child_id, identity),
+                child_id=group[0].child_id,
+                canonical_item=group[0].canonical_item,
+                field_name="ambiguous_descriptor",
+                options=tuple(
+                    RequirementConstraintOption(
+                        value=value,
+                        sources=tuple(
+                            source
+                            for requirement in group
+                            if (
+                                requirement.ambiguous_descriptors[0]
+                                if requirement.ambiguous_descriptors
+                                else None
+                            )
+                            == value
+                            for source in _source_for_requirement(requirement)
+                        ),
+                    )
+                    for value in (
+                        *ambiguous_values,
+                        None,
+                    )
+                ),
+            )
+        )
+        system_decisions.append(
+            SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX
+            + AMBIGUOUS_DESCRIPTOR_DEFAULT
         )
 
     exclusions = tuple(
@@ -424,6 +487,12 @@ def _variant_value(
 ) -> object:
     if field_name == "brand":
         return requirement.brand_lock
+    if field_name == "ambiguous_descriptor":
+        return (
+            requirement.ambiguous_descriptors[0]
+            if requirement.ambiguous_descriptors
+            else None
+        )
     return getattr(requirement.attributes, field_name)
 
 
@@ -499,14 +568,21 @@ def _resolved_variant_requirements(
             raise ValueError("A variant quantity cannot be negative")
         if quantity == 0:
             continue
-        attributes = compatible_attributes.model_dump()
+        attributes = (
+            variant.attributes.model_dump()
+            if any(
+                field_name == "ambiguous_descriptor"
+                for field_name, _ in variant.details
+            )
+            else compatible_attributes.model_dump()
+        )
         brand_lock = compatible_brand
         for field_name, value in variant.details:
             if field_name == "brand":
                 brand_lock = (
                     str(value) if value not in (None, "") else None
                 )
-            else:
+            elif field_name != "ambiguous_descriptor":
                 attributes[field_name] = value
         resolved.append(
             first.model_copy(
@@ -517,6 +593,7 @@ def _resolved_variant_requirements(
                     "quantity_max": None,
                     "sources": all_sources,
                     "variant_sources": variant.sources,
+                    "product_variant_id": variant.variant_id,
                     "brand_lock": brand_lock,
                     "brand_hint": compatible_brand_hint,
                     "exclusions": tuple(
@@ -526,6 +603,21 @@ def _resolved_variant_requirements(
                     ),
                     "attributes": RequirementAttributes.model_validate(
                         attributes
+                    ),
+                    "ambiguous_descriptors": (
+                        (str(value),)
+                        if (
+                            value := next(
+                                (
+                                    detail_value
+                                    for detail_name, detail_value in variant.details
+                                    if detail_name == "ambiguous_descriptor"
+                                ),
+                                None,
+                            )
+                        )
+                        not in (None, "")
+                        else ()
                     ),
                     "system_decisions": system_decisions,
                 }
@@ -629,6 +721,27 @@ def consolidate_requirements(
                     first,
                     variants,
                     active_variant_choices[decision_id],
+                    sources,
+                    attributes,
+                    brand_lock,
+                    brand_hint,
+                    exclusions,
+                    system_decisions,
+                )
+            )
+            continue
+        if variants and all(
+            interrupt.field_name != "ambiguous_descriptor"
+            for interrupt in group_constraint_interrupts
+        ):
+            merged.extend(
+                _resolved_variant_requirements(
+                    first,
+                    variants,
+                    {
+                        variant.variant_id: variant.default_quantity
+                        for variant in variants
+                    },
                     sources,
                     attributes,
                     brand_lock,

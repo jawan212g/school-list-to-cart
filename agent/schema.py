@@ -11,9 +11,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from agent.rules import (
     ALLOWED_CATEGORIES,
+    AMBIGUOUS_PRODUCT_DESCRIPTORS,
     CANONICAL_ITEM_ALIASES,
     CORRECTED_EXTRACTION_CONFIDENCE,
+    ITEM_FULFILLMENT_PREFERENCE_DEFAULT,
     NONPAGINATED_SOURCE_PAGE,
+    PACKAGE_QUANTITY_STATE_DEFAULT,
     explicit_package_count,
     preferred_brand_from_source,
     required_brand_from_source,
@@ -24,6 +27,11 @@ UnitType = Literal["each", "pack", "box", "ream"]
 RequirementType = Literal["required", "optional", "donation"]
 ReviewStatus = Literal["pending", "confirmed", "unresolved", "deleted"]
 SupplyScope = Literal["individual", "shared", "unspecified"]
+ItemFulfillmentPreference = Literal[
+    "minimum_cost_at_least",
+    "closest_quantity",
+]
+PackageQuantityState = Literal["specified", "assumed", "any", "unspecified"]
 DocumentLayout = Literal[
     "single_section",
     "multi_section",
@@ -42,6 +50,13 @@ ATTRIBUTE_MATERIALS = frozenset(
 RULING_VALUES = {
     "wide ruled": "wide-ruled",
     "college ruled": "college-ruled",
+    "graph paper": "graph",
+    "graph ruled": "graph",
+    "quad ruled": "quad",
+    "quad paper": "quad",
+    "lined": "lined",
+    "plain paper": "plain",
+    "plain": "plain",
 }
 
 
@@ -99,9 +114,50 @@ def _correct_attribute_fields(
         if corrected.get("ruling") is None:
             corrected["ruling"] = ruling
             changed = True
-        if style == evidence:
+        if style in {evidence, ruling.replace("-", " ")}:
             corrected["style"] = None
             changed = True
+
+    if canonical_item == "composition_notebooks" and style == "regular":
+        corrected["style"] = None
+        changed = True
+
+    if re.search(r"\bultra[\s-]+fine(?:\s+tip)?\b", raw_evidence):
+        if corrected.get("tip_style") != "ultra-fine":
+            corrected["tip_style"] = "ultra-fine"
+            changed = True
+    elif re.search(r"\bfine(?:\s+tip)?\b", raw_evidence):
+        if corrected.get("tip_style") is None:
+            corrected["tip_style"] = "fine"
+            changed = True
+    if re.search(r"\bchisel(?:\s+tip)?\b", raw_evidence):
+        if corrected.get("tip_style") is None:
+            corrected["tip_style"] = "chisel"
+            changed = True
+
+    for format_value in ("wide", "narrow"):
+        if f"{format_value} format" in raw_evidence:
+            if corrected.get("format") is None:
+                corrected["format"] = format_value
+                changed = True
+            break
+
+    for binding_value in ("sewn", "spiral"):
+        if (
+            f"{binding_value} binding" in raw_evidence
+            or f"{binding_value} bound" in raw_evidence
+        ):
+            if corrected.get("binding") is None:
+                corrected["binding"] = binding_value
+                changed = True
+            if style in {
+                f"{binding_value} binding",
+                f"{binding_value} bound",
+                binding_value,
+            }:
+                corrected["style"] = None
+                changed = True
+            break
 
     if "three ring" in raw_evidence:
         if corrected.get("connector") is None:
@@ -202,6 +258,8 @@ class RequirementAttributes(BaseModel):
     ruling: str | None = None
     tab_count: int | None = Field(default=None, ge=1)
     tip_style: str | None = None
+    format: str | None = None
+    binding: str | None = None
     material: str | None = None
     style: str | None = None
     connector: str | None = None
@@ -261,6 +319,11 @@ class Requirement(BaseModel):
     is_purchasable: bool = True
     requirement_type: RequirementType = "required"
     supply_scope: SupplyScope = "unspecified"
+    package_quantity_state: PackageQuantityState = PACKAGE_QUANTITY_STATE_DEFAULT
+    item_fulfillment_preference: ItemFulfillmentPreference = (
+        ITEM_FULFILLMENT_PREFERENCE_DEFAULT
+    )
+    ambiguous_descriptors: tuple[str, ...] = ()
     provided_by_school: bool = False
     condition: str | None = None
     condition_applies: bool | None = None
@@ -273,6 +336,7 @@ class Requirement(BaseModel):
     source_language: str | None = None
     sources: tuple[RequirementSource, ...] = ()
     variant_sources: tuple[RequirementSource, ...] = ()
+    product_variant_id: str | None = None
     system_decisions: tuple[str, ...] = ()
     attributes: RequirementAttributes = Field(
         default_factory=RequirementAttributes
@@ -306,6 +370,16 @@ class Requirement(BaseModel):
             if normalized.get("requirement_type", "required") == "required":
                 normalized["requirement_type"] = "optional"
         raw_text = str(normalized.get("raw_text", ""))
+        source_category = str(normalized.get("canonical_item", ""))
+        normalized["ambiguous_descriptors"] = tuple(
+            descriptor
+            for descriptor in AMBIGUOUS_PRODUCT_DESCRIPTORS
+            if source_category == "composition_notebooks"
+            and re.search(
+                rf"\b{re.escape(descriptor)}\b",
+                _evidence_text(raw_text),
+            )
+        )
         proposed_brand = (
             str(normalized["brand_lock"])
             if normalized.get("brand_lock") is not None
@@ -578,6 +652,10 @@ class SupplyItemReview(BaseModel):
     quantity_max: int | None = Field(default=None, ge=1)
     unit: UnitType = "each"
     package_size: int | None = Field(default=None, ge=1)
+    package_quantity_state: PackageQuantityState = PACKAGE_QUANTITY_STATE_DEFAULT
+    item_fulfillment_preference: ItemFulfillmentPreference = (
+        ITEM_FULFILLMENT_PREFERENCE_DEFAULT
+    )
     brand: str | None = None
     brand_hint: str | None = None
     brand_required: bool = False
@@ -589,6 +667,7 @@ class SupplyItemReview(BaseModel):
     optional: bool = False
     is_purchasable: bool = True
     supply_scope: SupplyScope = "unspecified"
+    ambiguous_descriptors: tuple[str, ...] = ()
     provided_by_school: bool = False
     condition: str | None = None
     condition_applies: bool | None = None
@@ -601,6 +680,7 @@ class SupplyItemReview(BaseModel):
     source_language: str | None = None
     sources: tuple[RequirementSource, ...] = ()
     variant_sources: tuple[RequirementSource, ...] = ()
+    product_variant_id: str | None = None
     system_decisions: tuple[str, ...] = ()
     notes: str | None = None
     source_text: str = Field(min_length=1)
@@ -618,6 +698,15 @@ class SupplyItemReview(BaseModel):
         if not isinstance(value, Mapping):
             return value
         normalized = dict(value)
+        if (
+            normalized.get("package_size") is not None
+            and normalized.get(
+                "package_quantity_state",
+                PACKAGE_QUANTITY_STATE_DEFAULT,
+            )
+            == PACKAGE_QUANTITY_STATE_DEFAULT
+        ):
+            normalized["package_quantity_state"] = "specified"
         brand = normalized.get("brand")
         if normalized.get("brand_required") is True and not (
             isinstance(brand, str) and brand.strip()

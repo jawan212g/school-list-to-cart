@@ -2721,69 +2721,48 @@ def test_merge_quick_choices_and_quantity_field_share_one_state() -> None:
     assert state["quantity"] == 48
 
 
-def test_variant_quick_choice_updates_every_editable_quantity() -> None:
-    """BR-30: variant cards provide the same shortcuts and fine control."""
+def test_type_a_quantity_choices_do_not_repeat_source_text() -> None:
+    """BR-30: Type A labels are concise and keep evidence in the table."""
 
     merged = consolidate_requirements(
         (
             Requirement(
-                req_id="sewn",
+                req_id="page-2",
                 child_id="child-1",
-                raw_text="1 sewn composition notebook",
-                canonical_item="composition_notebooks",
+                raw_text="4 boxes of tissues for the classroom",
+                canonical_item="tissues",
+                quantity=4,
+                source_document="district.pdf",
+                source_section="Grade 5",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="page-3",
+                child_id="child-1",
+                raw_text="1 box of tissues",
+                canonical_item="tissues",
                 quantity=1,
-                attributes={"style": "sewn"},
                 source_document="district.pdf",
                 source_section="Highly Capable",
                 source_page=3,
                 extraction_confidence=1.0,
             ),
-            Requirement(
-                req_id="regular",
-                child_id="child-1",
-                raw_text="4 composition notebooks",
-                canonical_item="composition_notebooks",
-                quantity=4,
-                attributes={"style": "regular"},
-                source_document="district.pdf",
-                source_section="5th Grade",
-                source_page=2,
-                extraction_confidence=1.0,
-            ),
         )
     )
-    decision = item_decisions(merged)[0]
-    choices = app.variant_quick_choice_values(decision)
-    largest_label, total_label = tuple(choices)[:2]
-    quantity_keys = {
-        variant.variant_id: f"quantity:{index}"
-        for index, variant in enumerate(decision.variants)
-    }
-    state: dict[str, object] = {"choice": largest_label}
+    interrupt = item_decisions(merged)[0].quantity_interrupt
+    assert interrupt is not None
 
-    app.apply_merge_quick_choice(
-        state,
-        "choice",
-        quantity_keys,
-        choices,
-    )
-    assert sorted(state[key] for key in quantity_keys.values()) == [0, 4]
+    labels = tuple(app.quantity_quick_choice_values(interrupt))
 
-    state["choice"] = total_label
-    app.apply_merge_quick_choice(
-        state,
-        "choice",
-        quantity_keys,
-        choices,
+    assert labels == (
+        "Use the largest (4) — default",
+        "Add them together (5)",
+        "Use the quantity from page 2 (4)",
+        "Use the quantity from page 3 (1)",
+        "Enter my own",
     )
-    assert sorted(state[key] for key in quantity_keys.values()) == [1, 4]
-
-    app.mark_merge_quantities_custom(
-        state,
-        "choice",
-        app.MERGE_CUSTOM_VARIANT_LABEL,
-    )
-    assert state["choice"] == app.MERGE_CUSTOM_VARIANT_LABEL
+    assert all("tissues" not in label for label in labels)
 
 
 def test_saved_list_page_count_uses_retained_production_input() -> None:

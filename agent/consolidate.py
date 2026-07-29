@@ -10,6 +10,7 @@ from agent.aggregate import UnitNeed
 from agent.match import CandidateMatch, MatchResult, NeedMatches
 from agent.optimize import CartLine, OptimizationResult
 from agent.rules import (
+    PRODUCT_DEFINING_ATTRIBUTE_FIELDS,
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
     SUBSTITUTION_NONE,
@@ -70,6 +71,29 @@ def _merge_attributes(needs: Sequence[UnitNeed]) -> Mapping[str, object]:
     }
 
 
+def _product_definitions_are_compatible(
+    needs: Sequence[UnitNeed],
+) -> bool:
+    """Keep BR-31 product variants separate even when one SKU was proposed."""
+
+    variant_ids = {
+        need.product_variant_id
+        for need in needs
+        if need.product_variant_id is not None
+    }
+    if len(variant_ids) > 1:
+        return False
+    for field_name in PRODUCT_DEFINING_ATTRIBUTE_FIELDS:
+        values = {
+            repr(need.attributes.get(field_name)).casefold()
+            for need in needs
+            if need.attributes.get(field_name) not in (None, "", (), [], {})
+        }
+        if len(values) > 1:
+            return False
+    return True
+
+
 def _merge_needs(
     needs: Sequence[UnitNeed],
     selected_candidate: CandidateMatch,
@@ -109,6 +133,14 @@ def _merge_needs(
             requirement_id
             for need in needs
             for requirement_id in need.source_requirement_ids
+        ),
+        product_variant_id=(
+            needs[0].product_variant_id
+            if all(
+                need.product_variant_id == needs[0].product_variant_id
+                for need in needs
+            )
+            else None
         ),
     )
 
@@ -195,6 +227,8 @@ def consolidate_selected_skus(
         if len({need.canonical_item for need in grouped_needs}) != 1:
             continue
         if len({need.unit_type for need in grouped_needs}) != 1:
+            continue
+        if not _product_definitions_are_compatible(grouped_needs):
             continue
         grouped_candidates = tuple(
             matches.candidate(source_ids, sku)

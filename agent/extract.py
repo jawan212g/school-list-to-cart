@@ -261,10 +261,14 @@ Extraction rules:
   grade. `#2 pencils` has neither character="#2" nor size="standard"; `#2 lead`
   may be retained in other_details. Use tip_style for blunt-tip or pointed-tip
   wording. Use material only when the material itself is stated, such as plastic.
-- Attribute field mapping is literal: `wide-ruled` goes in ruling, never style;
-  `three-ring` goes in connector; `1.5 inch` goes in size; `12 count` goes in
-  count. The word `colored` in the category `colored pencils` is not a style.
-  The word `large` in `large glue sticks` goes in size.
+- Attribute field mapping is literal. Put `wide ruled`, `college ruled`, `graph
+  paper`, `quad ruled`, `lined`, and `plain` in ruling, never style. Preserve
+  `regular` in the source line but do not guess whether it means a ruling.
+  Put `fine`, `ultra fine`, and `chisel` point wording in tip_style; `wide
+  format` or `narrow format` in format; and `sewn binding` or `spiral binding`
+  in binding. Put `three-ring` in connector, `1.5 inch` in size, and `12 count`
+  in count. The word `colored` in the category `colored pencils` is not a
+  style. The word `large` in `large glue sticks` goes in size.
 - tab_count is only for divider tabs; `2-pocket folder` does not have
   tab_count=2. Brand text such as `Paper Mate` does not state material="paper".
 - Example: `1 plastic pencil box (approx. 8" — no oversized boxes)` keeps that

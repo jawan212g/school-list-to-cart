@@ -17,6 +17,7 @@ from agent.review import (
     review_issue_explanations,
     reviewed_envelopes,
     teacher_note_groups,
+    unhandled_review_flag_groups,
     unresolved_required_items,
 )
 from agent.schema import ExtractionEnvelope, Requirement, SupplyItemReview
@@ -157,6 +158,101 @@ def test_school_provided_item_stays_visible_but_never_enters_cart() -> None:
     assert confirmed[0].is_purchasable is False
     assert confirmed[0].supply_scope == "shared"
     assert confirmed[0].raw_text == requirement.raw_text
+
+
+def test_package_assumption_populates_editable_production_field() -> None:
+    """BR-35/E-02: an inferred pack count is data, not prose only."""
+
+    requirement = Requirement(
+        req_id="erasers",
+        child_id="child-1",
+        raw_text="1 pack erasers",
+        canonical_item="erasers",
+        quantity=1,
+        unit_type="pack",
+        extraction_confidence=1.0,
+    )
+
+    row = organize_extractions(
+        {
+            "child-1": ExtractionEnvelope(
+                requirements=(requirement,),
+            )
+        }
+    )[0]
+    confirmed = confirmed_requirements(
+        (row.model_copy(update={"review_status": "confirmed"}),)
+    )[0]
+
+    assert row.package_size == 3
+    assert row.package_quantity_state == "assumed"
+    assert row.item_fulfillment_preference == "minimum_cost_at_least"
+    assert confirmed.attributes.count == 3
+    assert confirmed.package_quantity_state == "assumed"
+
+
+def test_pack_quantity_any_is_distinct_from_unspecified() -> None:
+    """BR-35: parent acceptance of any pack size remains explicit data."""
+
+    row = SupplyItemReview(
+        review_id="review",
+        req_id="erasers",
+        child_id="child-1",
+        item_name="erasers",
+        required_quantity=1,
+        unit="pack",
+        package_size=3,
+        package_quantity_state="any",
+        source_page=1,
+        source_text="1 pack erasers",
+        confidence=1.0,
+        review_status="confirmed",
+    )
+
+    requirement = confirmed_requirements((row,))[0]
+
+    assert requirement.package_quantity_state == "any"
+    assert requirement.attributes.count == 3
+
+
+def test_marked_items_and_summary_count_share_one_source() -> None:
+    """FR-12: unhandled decision count equals the marked production rows."""
+
+    rows = (
+        SupplyItemReview(
+            review_id="one",
+            req_id="one",
+            child_id="child-1",
+            item_name="erasers",
+            required_quantity=1,
+            source_text="1 pack erasers",
+            confidence=0.6,
+            issue_codes=("low_confidence",),
+        ),
+        SupplyItemReview(
+            review_id="two",
+            req_id="two",
+            child_id="child-1",
+            item_name="tissues",
+            required_quantity=2,
+            source_text="2-3 tissues",
+            confidence=1.0,
+            issue_codes=("quantity_range",),
+        ),
+    )
+    groups = review_flag_groups(rows)
+
+    unhandled = unhandled_review_flag_groups(
+        rows,
+        groups,
+        acknowledged_group_ids=(groups[0].group_id,),
+    )
+    marked_row_ids = {
+        row_id for group in unhandled for row_id in group.row_ids
+    }
+
+    assert len(unhandled) == 1
+    assert len(marked_row_ids) == 1
 
 
 def test_conditional_item_requires_parent_answer_and_preserves_scope() -> None:

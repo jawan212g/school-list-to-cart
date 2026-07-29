@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from agent.match import StructuredSuitabilityJudge
+from agent.pipeline import PipelineSession, run_pipeline_from_confirmed_extractions
 from agent.requirement_merge import (
     consolidate_requirements,
     item_decisions,
@@ -153,8 +155,83 @@ def test_scissors_preferences_merge_without_inventing_brand_lock() -> None:
     assert result.constraint_interrupts == ()
 
 
-def test_genuine_attribute_conflict_becomes_one_parent_decision() -> None:
-    """BR-26: incompatible constraints merge once and produce one interrupt."""
+def test_graph_and_regular_composition_books_require_ambiguity_choice() -> None:
+    """BR-31/BR-32: regular does not silently absorb graph-paper identity."""
+
+    result = consolidate_requirements(
+        (
+            Requirement(
+                req_id="graph",
+                child_id="child-1",
+                raw_text="1 composition book - graph paper",
+                canonical_item="composition_notebooks",
+                quantity=1,
+                source_document="district.pdf",
+                source_section="Highly Capable Class",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="regular",
+                child_id="child-1",
+                raw_text="4 Regular composition books",
+                canonical_item="composition_notebooks",
+                quantity=4,
+                source_document="district.pdf",
+                source_section="5th Grade",
+                source_page=3,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    decision = item_decisions(result)[0]
+    assert decision.conflict_type == "ambiguous"
+    assert tuple(source.page_number for source in decision.sources) == (2, 3)
+    assert decision.variants[0].attributes.ruling == "graph"
+    assert decision.variants[1].details == (
+        ("ambiguous_descriptor", "regular"),
+    )
+
+
+def test_different_non_null_rulings_are_different_products() -> None:
+    """BR-31: graph and lined are Type B product variants."""
+
+    result = consolidate_requirements(
+        (
+            Requirement(
+                req_id="graph",
+                child_id="child-1",
+                raw_text="1 graph paper composition notebook",
+                canonical_item="composition_notebooks",
+                quantity=1,
+                source_document="district.pdf",
+                source_section="Section A",
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="lined",
+                child_id="child-1",
+                raw_text="4 lined composition notebooks",
+                canonical_item="composition_notebooks",
+                quantity=4,
+                source_document="district.pdf",
+                source_section="Section B",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    decision = item_decisions(result)[0]
+    assert len(result.requirements) == 2
+    assert decision.conflict_type == "different_products"
+    assert sorted(
+        variant.attributes.ruling for variant in decision.variants
+    ) == ["graph", "lined"]
+
+
+def test_color_differences_do_not_split_product_identity() -> None:
+    """BR-31: color is incidental to deterministic requirement merge."""
 
     result = consolidate_requirements(
         (
@@ -184,10 +261,80 @@ def test_genuine_attribute_conflict_becomes_one_parent_decision() -> None:
     )
 
     assert len(result.requirements) == 1
-    assert len(result.constraint_interrupts) == 1
-    assert result.constraint_interrupts[0].field_name == (
-        "acceptable_colors"
+    assert result.constraint_interrupts == ()
+    assert result.requirements[0].attributes.acceptable_colors == (
+        "blue",
+        "red",
     )
+
+
+def test_binding_and_packaging_differences_are_incidental() -> None:
+    """BR-31: manufacturing binding and package count do not split an item."""
+
+    result = consolidate_requirements(
+        (
+            Requirement(
+                req_id="sewn",
+                child_id="child-1",
+                raw_text="1 sewn binding composition notebook, 2 count",
+                canonical_item="composition_notebooks",
+                quantity=1,
+                attributes={"binding": "sewn", "count": 2},
+                source_document="district.pdf",
+                source_section="Section A",
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="spiral",
+                child_id="child-1",
+                raw_text="1 spiral binding composition notebook, 4 count",
+                canonical_item="composition_notebooks",
+                quantity=1,
+                attributes={"binding": "spiral", "count": 4},
+                source_document="district.pdf",
+                source_section="Section B",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    assert len(result.requirements) == 1
+    assert result.constraint_interrupts == ()
+    assert result.requirements[0].attributes.binding is None
+    assert result.requirements[0].attributes.count is None
+
+
+def test_one_product_definition_and_one_silent_source_keep_definition() -> None:
+    """BR-31: one specified ruling plus silence remains one specified item."""
+
+    result = consolidate_requirements(
+        (
+            Requirement(
+                req_id="graph",
+                child_id="child-1",
+                raw_text="1 graph paper composition notebook",
+                canonical_item="composition_notebooks",
+                quantity=1,
+                source_document="district.pdf",
+                source_section="Section A",
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="silent",
+                child_id="child-1",
+                raw_text="1 composition notebook",
+                canonical_item="composition_notebooks",
+                quantity=1,
+                source_document="district.pdf",
+                source_section="Section B",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    assert len(result.requirements) == 1
+    assert result.requirements[0].attributes.ruling == "graph"
+    assert result.constraint_interrupts == ()
 
 
 def test_quantity_conflict_accepts_custom_and_named_source_values() -> None:
@@ -257,8 +404,8 @@ def test_same_section_permanent_marker_variants_remain_additive() -> None:
     assert result.constraint_interrupts == ()
 
 
-def test_quantity_and_detail_conflicts_share_one_item_decision() -> None:
-    """BR-26: one item card contains its quantity and variant questions."""
+def test_quantity_and_color_difference_is_type_a_only() -> None:
+    """BR-31: incidental color does not turn a quantity choice into variants."""
 
     result = consolidate_requirements(
         (
@@ -291,8 +438,9 @@ def test_quantity_and_detail_conflicts_share_one_item_decision() -> None:
 
     assert len(decisions) == 1
     assert decisions[0].quantity_interrupt is not None
-    assert len(decisions[0].constraint_interrupts) == 1
-    assert len(decisions[0].variants) == 2
+    assert decisions[0].constraint_interrupts == ()
+    assert decisions[0].variants == ()
+    assert decisions[0].conflict_type == "quantity_only"
 
 
 def test_parent_can_split_quantity_across_conflicting_variants() -> None:
@@ -353,16 +501,16 @@ def test_parent_can_split_quantity_across_conflicting_variants() -> None:
 
 
 def test_variant_allocations_survive_as_two_cart_lines() -> None:
-    """BR-26: source-backed variants remain distinct through optimization."""
+    """BR-31: production pipeline keeps a parent-selected two-product split."""
 
     requirements = (
         Requirement(
             req_id="sewn",
             child_id="child-1",
-            raw_text="1 sewn composition notebook",
+            raw_text="1 graph paper composition notebook",
             canonical_item="composition_notebooks",
             quantity=1,
-            attributes={"style": "sewn"},
+            attributes={"ruling": "graph"},
             source_document="district.pdf",
             source_section="Highly Capable",
             source_page=3,
@@ -371,10 +519,9 @@ def test_variant_allocations_survive_as_two_cart_lines() -> None:
         Requirement(
             req_id="regular",
             child_id="child-1",
-            raw_text="4 composition notebooks",
+            raw_text="4 Regular composition notebooks",
             canonical_item="composition_notebooks",
             quantity=4,
-            attributes={"style": "regular"},
             source_document="district.pdf",
             source_section="5th Grade",
             source_page=2,
@@ -391,17 +538,6 @@ def test_variant_allocations_survive_as_two_cart_lines() -> None:
         requirements,
         variant_quantity_choices={decision.decision_id: selected},
     )
-    rows = tuple(
-        row.model_copy(update={"review_status": "confirmed"})
-        for row in organize_extractions(
-            {
-                "child-1": ExtractionEnvelope(
-                    requirements=merged.requirements,
-                )
-            }
-        )
-    )
-    needs = aggregate_requirements(confirmed_requirements(rows))
     store = Store(
         store_id="store",
         name="Fixture Store",
@@ -417,65 +553,63 @@ def test_variant_allocations_survive_as_two_cart_lines() -> None:
             sku="sewn-sku",
             store_id="store",
             brand="Fixture",
-            title="Sewn composition notebook",
+            title="Graph composition notebook",
             category="composition_notebooks",
             pack_size=1,
             unit_price=100,
             pack_price=100,
             stock_qty=10,
             is_returnable=True,
-            attributes={"style": "sewn"},
+            attributes={"ruling": "graph"},
         ),
         Offer(
             sku="regular-sku",
             store_id="store",
             brand="Fixture",
-            title="Regular composition notebook",
+            title="Wide-ruled composition notebook",
             category="composition_notebooks",
             pack_size=1,
             unit_price=80,
             pack_price=80,
             stock_qty=10,
             is_returnable=True,
-            attributes={"style": "regular"},
+            attributes={"ruling": "wide"},
         ),
     )
-    candidates = {
-        need.source_requirement_ids: frozenset(
-            ("sewn-sku",)
-            if need.attributes.get("style") == "sewn"
-            else ("regular-sku",)
-        )
-        for need in needs
-    }
-
-    result = optimize_cart(
-        needs,
-        offers,
-        (store,),
-        OptimizationConfig(
-            fulfillment_preference="pickup",
+    result = run_pipeline_from_confirmed_extractions(
+        PipelineSession(
+            session_id="variant-cart",
+            children=("child-1",),
+            budget_total=1_000,
+            shopping_mode="budget",
+            fulfillment_pref="pickup",
             tax_basis_points=0,
         ),
-        candidate_skus_by_need=candidates,
+        {
+            "child-1": ExtractionEnvelope(
+                requirements=merged.requirements,
+            )
+        },
+        stores=(store,),
+        offers=offers,
+        suitability_judge=StructuredSuitabilityJudge(),
     )
 
-    assert tuple(sorted(line.units_needed for line in result.plan.lines)) == (
+    assert tuple(
+        sorted(line.units_needed for line in result.proposed_cart.plan.lines)
+    ) == (
         1,
         4,
     )
-    assert tuple(sorted(line.sku for line in result.plan.lines)) == (
-        "regular-sku",
-        "sewn-sku",
-    )
+    assert len(result.proposed_cart.plan.lines) == 2
 
 
 @pytest.mark.parametrize(
     ("canonical_item", "source_line"),
     (
         ("backpacks", "1 backpack"),
-        ("composition_notebooks", "2 composition notebooks"),
-        ("folders", "4 folders"),
+        ("tissues", "2 tissues"),
+        ("glue_sticks", "4 glue sticks"),
     ),
 )
 def test_listed_cross_section_restatements_merge_once(

@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from agent.rules import (
     CLEAR_EXTRACTION_CONFIDENCE,
     CONFIDENCE_FLOOR,
+    ITEM_FULFILLMENT_PREFERENCE_DEFAULT,
+    NONPAGINATED_SOURCE_PAGE,
+    PACKAGE_QUANTITY_STATE_DEFAULT,
     STANDARD_CONTAINER_CONTENT_COUNTS,
     STANDARD_PACK_COUNTS,
 )
@@ -158,8 +161,14 @@ def review_issue_explanations(
                 )
         elif issue == "ambiguous_package_size":
             assumed_count = (
-                STANDARD_PACK_COUNTS.get(row.item_name)
-                or STANDARD_CONTAINER_CONTENT_COUNTS.get(row.item_name)
+                row.package_size
+                if row.package_quantity_state == "assumed"
+                else (
+                    STANDARD_PACK_COUNTS.get(row.item_name)
+                    or STANDARD_CONTAINER_CONTENT_COUNTS.get(row.item_name)
+                    if row.package_quantity_state == "unspecified"
+                    else None
+                )
             )
             if assumed_count is None:
                 messages.append(
@@ -202,6 +211,7 @@ def review_flag_groups(
             row.required_quantity,
             row.unit,
             row.package_size,
+            row.package_quantity_state,
             row.brand,
             row.brand_required,
             row.size,
@@ -233,6 +243,27 @@ def review_flag_groups(
             )
         )
     return tuple(groups)
+
+
+def unhandled_review_flag_groups(
+    rows: Iterable[SupplyItemReview],
+    flag_groups: Iterable[ReviewFlagGroup],
+    acknowledged_group_ids: Iterable[str] = (),
+) -> tuple[ReviewFlagGroup, ...]:
+    """Return the single source for marked-item and summary decision counts."""
+
+    rows_by_id = {row.review_id: row for row in rows}
+    acknowledged = frozenset(acknowledged_group_ids)
+    return tuple(
+        group
+        for group in flag_groups
+        if group.group_id not in acknowledged
+        and not all(
+            rows_by_id[row_id].review_status == "confirmed"
+            for row_id in group.row_ids
+            if row_id in rows_by_id
+        )
+    )
 
 
 def teacher_note_groups(
@@ -320,67 +351,104 @@ def _review_issues(requirement: Requirement) -> tuple[str, ...]:
     return tuple(issues)
 
 
+def _review_package_quantity(
+    requirement: Requirement,
+) -> tuple[int | None, str]:
+    """Expose E-02's deterministic assumption in its editable data field."""
+
+    explicit = requirement.attributes.count
+    if explicit is not None:
+        return explicit, "specified"
+    if requirement.unit_type not in {"pack", "box"}:
+        return None, PACKAGE_QUANTITY_STATE_DEFAULT
+    assumed = (
+        STANDARD_PACK_COUNTS.get(requirement.canonical_item)
+        or STANDARD_CONTAINER_CONTENT_COUNTS.get(requirement.canonical_item)
+    )
+    if assumed is None:
+        return None, PACKAGE_QUANTITY_STATE_DEFAULT
+    return assumed, "assumed"
+
+
 def organize_extractions(
     extractions: dict[str, ExtractionEnvelope],
 ) -> tuple[SupplyItemReview, ...]:
     """Create stable, sorted review rows without model calls (FR-07–FR-12)."""
 
-    rows = [
-        SupplyItemReview(
-            review_id=f"{requirement.child_id}:{requirement.req_id}",
-            req_id=requirement.req_id,
-            child_id=requirement.child_id,
-            item_name=requirement.canonical_item,
-            required_quantity=(
-                requirement.quantity if requirement.quantity > 0 else None
-            ),
-            quantity_is_range=requirement.quantity_is_range,
-            quantity_max=requirement.quantity_max,
-            unit=requirement.unit_type,
-            package_size=requirement.attributes.count,
-            brand=requirement.brand_lock or requirement.brand_hint,
-            brand_hint=requirement.brand_hint,
-            brand_required=requirement.brand_lock is not None,
-            size=requirement.attributes.size,
-            color=requirement.attributes.acceptable_colors,
-            material=requirement.attributes.material,
-            required_attributes=requirement.attributes.model_dump(
-                exclude_none=True,
-                exclude={
-                    "acceptable_colors",
-                    "count",
-                    "size",
-                    "material",
-                },
-            ),
-            exclusions=requirement.exclusions,
-            optional=not requirement.is_required,
-            is_purchasable=requirement.is_purchasable,
-            supply_scope=requirement.supply_scope,
-            provided_by_school=requirement.provided_by_school,
-            condition=requirement.condition,
-            condition_applies=requirement.condition_applies,
-            condition_group_id=requirement.condition_group_id,
-            condition_question=requirement.condition_question,
-            condition_option=requirement.condition_option,
-            source_document=requirement.source_document,
-            source_section=requirement.source_section,
-            source_page=requirement.source_page,
-            source_language=requirement.source_language,
-            sources=requirement.sources,
-            variant_sources=requirement.variant_sources,
-            system_decisions=requirement.system_decisions,
-            notes=None,
-            source_text=requirement.raw_text,
-            confidence=requirement.extraction_confidence,
-            review_status="pending",
-            already_owned=False,
-            allow_equivalents=requirement.brand_lock is None,
-            issue_codes=_review_issues(requirement),
-        )
-        for child_id in sorted(extractions)
-        for requirement in extractions[child_id].requirements
-    ]
+    rows: list[SupplyItemReview] = []
+    for child_id in sorted(extractions):
+        for requirement in extractions[child_id].requirements:
+            package_size, package_quantity_state = _review_package_quantity(
+                requirement
+            )
+            rows.append(
+                SupplyItemReview(
+                    review_id=(
+                        f"{requirement.child_id}:{requirement.req_id}"
+                    ),
+                    req_id=requirement.req_id,
+                    child_id=requirement.child_id,
+                    item_name=requirement.canonical_item,
+                    required_quantity=(
+                        requirement.quantity
+                        if requirement.quantity > 0
+                        else None
+                    ),
+                    quantity_is_range=requirement.quantity_is_range,
+                    quantity_max=requirement.quantity_max,
+                    unit=requirement.unit_type,
+                    package_size=package_size,
+                    package_quantity_state=package_quantity_state,
+                    item_fulfillment_preference=(
+                        requirement.item_fulfillment_preference
+                    ),
+                    brand=(
+                        requirement.brand_lock or requirement.brand_hint
+                    ),
+                    brand_hint=requirement.brand_hint,
+                    brand_required=requirement.brand_lock is not None,
+                    size=requirement.attributes.size,
+                    color=requirement.attributes.acceptable_colors,
+                    material=requirement.attributes.material,
+                    required_attributes=requirement.attributes.model_dump(
+                        exclude_none=True,
+                        exclude={
+                            "acceptable_colors",
+                            "count",
+                            "size",
+                            "material",
+                        },
+                    ),
+                    exclusions=requirement.exclusions,
+                    optional=not requirement.is_required,
+                    is_purchasable=requirement.is_purchasable,
+                    supply_scope=requirement.supply_scope,
+                    ambiguous_descriptors=(
+                        requirement.ambiguous_descriptors
+                    ),
+                    provided_by_school=requirement.provided_by_school,
+                    condition=requirement.condition,
+                    condition_applies=requirement.condition_applies,
+                    condition_group_id=requirement.condition_group_id,
+                    condition_question=requirement.condition_question,
+                    condition_option=requirement.condition_option,
+                    source_document=requirement.source_document,
+                    source_section=requirement.source_section,
+                    source_page=requirement.source_page,
+                    source_language=requirement.source_language,
+                    sources=requirement.sources,
+                    variant_sources=requirement.variant_sources,
+                    product_variant_id=requirement.product_variant_id,
+                    system_decisions=requirement.system_decisions,
+                    notes=None,
+                    source_text=requirement.raw_text,
+                    confidence=requirement.extraction_confidence,
+                    review_status="pending",
+                    already_owned=False,
+                    allow_equivalents=requirement.brand_lock is None,
+                    issue_codes=_review_issues(requirement),
+                )
+            )
     return tuple(
         sorted(
             rows,
@@ -702,7 +770,11 @@ def confirmed_requirements(
         attributes.update(
             {
                 "acceptable_colors": row.color,
-                "count": row.package_size,
+                "count": (
+                    row.package_size
+                    if row.package_quantity_state != "unspecified"
+                    else None
+                ),
                 "size": row.size,
                 "material": row.material,
             }
@@ -725,6 +797,12 @@ def confirmed_requirements(
                     "required" if is_required else "optional"
                 ),
                 supply_scope=row.supply_scope,
+                package_quantity_state=row.package_quantity_state,
+                item_fulfillment_preference=(
+                    row.item_fulfillment_preference
+                    or ITEM_FULFILLMENT_PREFERENCE_DEFAULT
+                ),
+                ambiguous_descriptors=row.ambiguous_descriptors,
                 provided_by_school=row.provided_by_school,
                 condition=row.condition,
                 condition_applies=row.condition_applies,
@@ -733,10 +811,11 @@ def confirmed_requirements(
                 condition_option=row.condition_option,
                 source_document=row.source_document,
                 source_section=row.source_section,
-                source_page=row.source_page,
+                source_page=row.source_page or NONPAGINATED_SOURCE_PAGE,
                 source_language=row.source_language,
                 sources=row.sources,
                 variant_sources=row.variant_sources,
+                product_variant_id=row.product_variant_id,
                 system_decisions=(),
                 attributes=RequirementAttributes(),
                 extraction_confidence=row.confidence,

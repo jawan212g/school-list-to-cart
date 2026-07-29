@@ -837,3 +837,48 @@ def test_selected_section_sends_only_its_pdf_pages(
     assert sum(block["type"] == "input_image" for block in content) == 1
     assert any(block.get("text") == "[PDF PAGE 2]" for block in content)
     assert not any(block.get("text") == "[PDF PAGE 1]" for block in content)
+@pytest.mark.parametrize(
+    ("source_line", "expected_ruling"),
+    (
+        ("1 wide ruled composition notebook", "wide-ruled"),
+        ("1 college ruled composition notebook", "college-ruled"),
+        ("1 graph paper composition notebook", "graph"),
+        ("1 quad ruled composition notebook", "quad"),
+        ("1 lined composition notebook", "lined"),
+        ("1 plain composition notebook", "plain"),
+    ),
+)
+def test_production_schema_captures_product_defining_rulings(
+    source_line: str,
+    expected_ruling: str,
+) -> None:
+    """BR-31: stated ruling values survive the validated Requirement."""
+
+    requirement = Requirement(
+        req_id="notebook",
+        child_id="child-1",
+        raw_text=source_line,
+        canonical_item="composition_notebooks",
+        quantity=1,
+        extraction_confidence=1.0,
+    )
+
+    assert requirement.attributes.ruling == expected_ruling
+
+
+def test_regular_composition_descriptor_remains_explicitly_ambiguous() -> None:
+    """BR-32: regular is preserved for a parent question, not guessed."""
+
+    requirement = Requirement(
+        req_id="regular",
+        child_id="child-1",
+        raw_text="4 Regular composition books",
+        canonical_item="composition_notebooks",
+        quantity=4,
+        attributes={"style": "regular"},
+        extraction_confidence=1.0,
+    )
+
+    assert requirement.attributes.ruling is None
+    assert requirement.attributes.style is None
+    assert requirement.ambiguous_descriptors == ("regular",)

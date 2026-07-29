@@ -80,6 +80,7 @@ from agent.review import (
     review_issue_explanations,
     reviewed_envelopes,
     teacher_note_groups,
+    unhandled_review_flag_groups,
     unresolved_required_items,
 )
 from agent.provider import (
@@ -100,6 +101,7 @@ from agent.rules import (
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     PARENT_EDITABLE_DETAIL_FIELDS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
+    SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX,
     SYSTEM_DECISION_MERGED_QUANTITY_PREFIX,
     SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX,
     SYSTEM_DECISION_RECONCILED_BRAND,
@@ -3001,6 +3003,8 @@ def _initialize_state(st: Any) -> None:
         "requirement_merge_choices": {},
         "requirement_constraint_choices": {},
         "requirement_variant_quantity_choices": {},
+        "parent_added_review_items": (),
+        "last_added_review_item": None,
         "requirement_merge_validation_errors": (),
         "review_items": (),
         "organized_list_confirmed": False,
@@ -5232,6 +5236,8 @@ def _render_lists(st: Any) -> None:
         st.session_state["requirement_variant_quantity_choices"] = {}
         st.session_state["requirement_merge_validation_errors"] = ()
         st.session_state["review_items"] = ()
+        st.session_state["parent_added_review_items"] = ()
+        st.session_state["last_added_review_item"] = None
         st.session_state["organized_list_confirmed"] = False
         _limit_reached_stage(st.session_state, 2)
         st.session_state["allow_unresolved_items"] = False
@@ -5785,7 +5791,6 @@ def _review_editor_rows(
                 item.required_attributes.get("other_details") or ""
             ),
             "Optional": item.optional,
-            "Supply use": item.supply_scope.title(),
             "Provided by school": item.provided_by_school,
             "Condition": item.condition or "",
             "Condition applies": (
@@ -5918,9 +5923,9 @@ def _review_items_from_editor(
                 ),
                 optional=bool(record.get("Optional")),
                 is_purchasable=is_purchasable,
-                supply_scope=str(
-                    record.get("Supply use") or "Unspecified"
-                ).casefold(),  # type: ignore[arg-type]
+                supply_scope=(
+                    prior.supply_scope if prior is not None else "unspecified"
+                ),
                 provided_by_school=provided_by_school,
                 condition=condition,
                 condition_applies=condition_applies,
@@ -6091,31 +6096,40 @@ def review_system_decision_messages(
     """Translate BR-29 interpretation choices into one factual line."""
 
     messages: list[str] = []
+    decision_sources = item.variant_sources or item.sources
     if item.already_owned:
         messages.append(
             "You marked this item as already owned, so the cart quantity is 0."
         )
     if (
         SYSTEM_DECISION_CONSOLIDATED_SOURCES in item.system_decisions
-        and len(item.sources) > 1
+        and len(decision_sources) > 1
         and not item.already_owned
     ):
-        source_quantities = tuple(source.quantity for source in item.sources)
+        source_quantities = tuple(
+            source.quantity for source in decision_sources
+        )
         locations = _join_names(
             tuple(
                 f"page {source.page_number} asks for {source.quantity}"
-                for source in item.sources
+                for source in decision_sources
             )
         )
         if len(set(source_quantities)) == 1:
             messages.append(
-                f"This item appears in {len(item.sources)} places; {locations}, "
+                f"This item appears in {len(decision_sources)} places; {locations}, "
                 f"so {item.required_quantity or source_quantities[0]} is used."
             )
         else:
             messages.append(
-                f"This item appears in {len(item.sources)} places; {locations}. "
+                f"This item appears in {len(decision_sources)} places; {locations}. "
                 f"The cart uses {item.required_quantity or max(source_quantities)}."
+            )
+    for decision in item.system_decisions:
+        if decision.startswith(SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX):
+            messages.append(
+                "The wording was ambiguous. It was treated as the same product "
+                "using the stated default."
             )
     if SYSTEM_DECISION_RECONCILED_BRAND in item.system_decisions:
         if item.brand:
@@ -6171,6 +6185,7 @@ def review_child_framing(
     child_label: str,
     envelope: ExtractionEnvelope,
     items: Sequence[SupplyItemReview],
+    unhandled_row_ids: frozenset[str] | None = None,
 ) -> str:
     """Frame extracted items as choices about what enters the cart."""
 
@@ -6182,13 +6197,17 @@ def review_child_framing(
         and not item.provided_by_school
         and item.review_status != "deleted"
     )
-    needs_check = sum(
-        bool(review_issue_explanations(item))
-        or (
-            item.condition is not None
-            and item.condition_applies is None
+    needs_check = (
+        sum(item.review_id in unhandled_row_ids for item in child_items)
+        if unhandled_row_ids is not None
+        else sum(
+            bool(review_issue_explanations(item))
+            or (
+                item.condition is not None
+                and item.condition_applies is None
+            )
+            for item in child_items
         )
-        for item in child_items
     )
     clear_count = len(child_items) - needs_check
     selection = envelope.document_selection
@@ -6225,11 +6244,13 @@ def _review_control_update(
     colors: str,
     required_details: str,
     optional: bool,
-    supply_scope: str,
     allow_equivalents: bool,
     already_owned: bool,
     notes: str,
     delete: bool,
+    package_quantity_state: str | None = None,
+    item_fulfillment_preference: str | None = None,
+    supply_scope: str | None = None,
 ) -> SupplyItemReview:
     """Apply secondary form controls without changing source evidence."""
 
@@ -6246,6 +6267,13 @@ def _review_control_update(
             "required_quantity": 0 if already_owned else max(quantity, 1),
             "unit": unit,
             "package_size": package_size,
+            "package_quantity_state": (
+                package_quantity_state or item.package_quantity_state
+            ),
+            "item_fulfillment_preference": (
+                item_fulfillment_preference
+                or item.item_fulfillment_preference
+            ),
             "brand": normalized_brand,
             "brand_hint": (
                 normalized_brand if not exact_brand_required else item.brand_hint
@@ -6260,7 +6288,7 @@ def _review_control_update(
             ),
             "required_attributes": required_attributes,
             "optional": optional,
-            "supply_scope": supply_scope,
+            "supply_scope": supply_scope or item.supply_scope,
             "already_owned": already_owned,
             "allow_equivalents": (
                 allow_equivalents and not exact_brand_required
@@ -6358,13 +6386,61 @@ def _render_review_detail_controls(
             index=("each", "pack", "box", "ream").index(item.unit),
             key=f"{key_prefix}:unit",
         )
-        package_size_value = second.number_input(
-            "Units in one package",
-            min_value=1,
-            value=item.package_size,
-            step=1,
-            key=f"{key_prefix}:package",
+        fulfillment_labels = {
+            "minimum_cost_at_least": (
+                "Buy at least this many, cheapest combination"
+            ),
+            "closest_quantity": "Get as close to this many as possible",
+        }
+        fulfillment_values = tuple(fulfillment_labels)
+        item_fulfillment_preference = second.selectbox(
+            "Package fulfillment preference",
+            options=fulfillment_values,
+            index=fulfillment_values.index(
+                item.item_fulfillment_preference
+            ),
+            format_func=fulfillment_labels.__getitem__,
+            key=f"{key_prefix}:fulfillment-preference",
         )
+        package_state_labels = {
+            "specified": "The list gives a package quantity",
+            "assumed": "Use the shown assumption",
+            "any": "Any pack size is fine",
+            "unspecified": "The list does not specify a package quantity",
+        }
+        package_quantity_state = item.package_quantity_state
+        package_size_value = item.package_size
+        if (
+            unit in {"pack", "box"}
+            or package_quantity_state != "unspecified"
+        ):
+            package_states = tuple(package_state_labels)
+            package_quantity_state = st.selectbox(
+                "Package quantity in the list",
+                options=package_states,
+                index=package_states.index(package_quantity_state),
+                format_func=package_state_labels.__getitem__,
+                key=f"{key_prefix}:package-state",
+            )
+            if package_quantity_state in {"specified", "assumed"}:
+                if package_quantity_state == "assumed":
+                    st.warning(
+                        "This number was assumed because the list did not "
+                        "state it. Change it if needed."
+                    )
+                package_size_value = st.number_input(
+                    (
+                        "Items per listed package — assumed"
+                        if package_quantity_state == "assumed"
+                        else "Items per listed package"
+                    ),
+                    min_value=1,
+                    value=package_size_value,
+                    step=1,
+                    key=f"{key_prefix}:package",
+                )
+            elif package_quantity_state == "unspecified":
+                package_size_value = None
         brand = first.text_input(
             "Brand",
             value=item.brand or "",
@@ -6398,14 +6474,6 @@ def _render_review_detail_controls(
             ),
             key=f"{key_prefix}:required-details",
         )
-        supply_scope = second.selectbox(
-            "Supply use",
-            options=("individual", "shared", "unspecified"),
-            index=("individual", "shared", "unspecified").index(
-                item.supply_scope
-            ),
-            key=f"{key_prefix}:scope",
-        )
         brand_options = (
             (
                 "Equivalent brands are okay",
@@ -6414,22 +6482,19 @@ def _render_review_detail_controls(
             if brand.strip()
             else ("Equivalent brands are okay",)
         )
-        brand_mode = first.radio(
-            "Brand choice",
-            brand_options,
-            index=(
-                1
-                if item.brand_required
-                and "Exact brand required" in brand_options
-                else 0
-            ),
-            key=f"{key_prefix}:brand-choice",
-            help=(
-                "Enter a brand before requiring an exact brand."
-                if not brand.strip()
-                else None
-            ),
-        )
+        if len(brand_options) == 1:
+            first.caption(
+                "Equivalent brands are okay. Enter a brand to require an "
+                "exact match."
+            )
+            brand_mode = brand_options[0]
+        else:
+            brand_mode = first.radio(
+                "Brand choice",
+                brand_options,
+                index=1 if item.brand_required else 0,
+                key=f"{key_prefix}:brand-choice",
+            )
         brand_required = brand_mode == "Exact brand required"
         allow_equivalents = not brand_required
         optional = second.checkbox(
@@ -6462,6 +6527,8 @@ def _render_review_detail_controls(
             if package_size_value is not None
             else None
         ),
+        package_quantity_state=package_quantity_state,
+        item_fulfillment_preference=item_fulfillment_preference,
         brand=brand,
         brand_required=brand_required,
         size=size,
@@ -6469,7 +6536,6 @@ def _render_review_detail_controls(
         colors=colors,
         required_details=required_details,
         optional=optional,
-        supply_scope=supply_scope,
         allow_equivalents=allow_equivalents,
         already_owned=already_owned,
         notes=notes,
@@ -6491,6 +6557,10 @@ def _copy_shared_review_edits(
             "quantity_max": source.quantity_max,
             "unit": source.unit,
             "package_size": source.package_size,
+            "package_quantity_state": source.package_quantity_state,
+            "item_fulfillment_preference": (
+                source.item_fulfillment_preference
+            ),
             "brand": source.brand,
             "brand_hint": source.brand_hint,
             "brand_required": source.brand_required,
@@ -6507,6 +6577,8 @@ def _copy_shared_review_edits(
             "review_status": source.review_status,
             "system_decisions": source.system_decisions,
             "variant_sources": source.variant_sources,
+            "product_variant_id": source.product_variant_id,
+            "ambiguous_descriptors": source.ambiguous_descriptors,
         }
     )
 
@@ -6544,9 +6616,16 @@ def _render_compact_review_row(
             ): list_input
             for list_input in st.session_state.get("list_inputs", ())
         }
+        show_item_source_control = (
+            bool(flag_messages)
+            or representative.package_quantity_state == "assumed"
+            or len(representative.sources) > 1
+            or SYSTEM_DECISION_CONSOLIDATED_SOURCES
+            in representative.system_decisions
+        )
         rendered_sources: set[tuple[object, ...]] = set()
         for member in members:
-            sources = member.sources or (
+            sources = member.variant_sources or member.sources or (
                 RequirementSource(
                     source_req_id=member.req_id,
                     document_name=member.source_document,
@@ -6591,7 +6670,7 @@ def _render_compact_review_row(
                     ),
                     None,
                 )
-                if list_input is not None:
+                if list_input is not None and show_item_source_control:
                     _render_source_reference(
                         st,
                         list_input,
@@ -6614,11 +6693,14 @@ def _render_compact_review_row(
             dict.fromkeys((*decision_messages, *flag_messages))
         )
         if combined_decision:
-            st.info(escape_streamlit_dollars(combined_decision))
+            if flag_messages:
+                st.warning(escape_streamlit_dollars(combined_decision))
+            else:
+                st.caption(escape_streamlit_dollars(combined_decision))
 
         if flag_messages:
             confirmed = st.checkbox(
-                "Use this in the cart",
+                "I have checked this choice",
                 value=all(
                     member.review_status == "confirmed"
                     for member in members
@@ -6626,7 +6708,6 @@ def _render_compact_review_row(
                 key=f"{key_prefix}:confirmed",
             )
         else:
-            st.caption("Use this in the cart")
             confirmed = True
         edited_representative = _render_review_detail_controls(
             st,
@@ -6651,26 +6732,28 @@ def _render_compact_review_row(
 def _new_review_item_from_controls(
     st: Any,
     child_id: str,
+    child_label: str,
     *,
     key_prefix: str,
 ) -> SupplyItemReview | None:
-    """Offer one secondary form for adding a missing item."""
+    """Offer repeatable, student-scoped controls for a missing item."""
 
-    with st.expander("Add a missing item"):
-        add_item = st.checkbox(
-            "Add this item to the list",
-            key=f"{key_prefix}:add",
-        )
+    with st.expander(f"Add an item for {child_label}"):
         first, second = st.columns(2)
+        category_options = ("", *tuple(sorted(ALLOWED_CATEGORIES)))
         item_name = first.selectbox(
-            "Item",
-            options=tuple(sorted(ALLOWED_CATEGORIES)),
-            format_func=_item_display_name,
+            "Item (required)",
+            options=category_options,
+            format_func=lambda value: (
+                "Choose an item"
+                if not value
+                else _item_display_name(value)
+            ),
             key=f"{key_prefix}:item",
         )
         quantity = int(
             second.number_input(
-                "Quantity",
+                "Quantity (required)",
                 min_value=1,
                 value=1,
                 step=1,
@@ -6678,28 +6761,66 @@ def _new_review_item_from_controls(
             )
         )
         unit = first.selectbox(
-            "Unit",
+            "Unit (optional)",
             options=("each", "pack", "box", "ream"),
             key=f"{key_prefix}:unit",
         )
-        scope = second.selectbox(
-            "Supply use",
-            options=("individual", "shared", "unspecified"),
-            index=2,
-            key=f"{key_prefix}:scope",
+        fulfillment_labels = {
+            "minimum_cost_at_least": (
+                "Buy at least this many, cheapest combination"
+            ),
+            "closest_quantity": "Get as close to this many as possible",
+        }
+        fulfillment_preference = second.selectbox(
+            "Package fulfillment preference (optional)",
+            options=tuple(fulfillment_labels),
+            format_func=fulfillment_labels.__getitem__,
+            key=f"{key_prefix}:fulfillment",
+        )
+        brand = first.text_input(
+            "Brand (optional)",
+            key=f"{key_prefix}:brand",
+        )
+        brand_required = second.checkbox(
+            "Exact brand required",
+            disabled=not brand.strip(),
+            key=f"{key_prefix}:brand-required",
+        )
+        size = first.text_input("Size (optional)", key=f"{key_prefix}:size")
+        material = second.text_input(
+            "Material (optional)",
+            key=f"{key_prefix}:material",
+        )
+        colors = first.text_input(
+            "Acceptable colors, separated by commas (optional)",
+            key=f"{key_prefix}:colors",
+        )
+        details = second.text_input(
+            "Other required details (optional)",
+            key=f"{key_prefix}:details",
+        )
+        exclusions = st.text_input(
+            "Must not include, separated by commas (optional)",
+            key=f"{key_prefix}:exclusions",
         )
         optional = first.checkbox(
             "Optional item",
             key=f"{key_prefix}:optional",
         )
-        source_text = st.text_input(
-            "What the list says",
-            value="Added by parent during review",
-            key=f"{key_prefix}:source",
+        add_item = st.button(
+            f"Add this item for {child_label}",
+            key=f"{key_prefix}:add",
+            type="primary",
         )
     if not add_item:
         return None
+    if not item_name:
+        st.error("Choose an item before adding it.")
+        return None
     identifier = str(uuid4())
+    required_attributes = (
+        {"other_details": details.strip()} if details.strip() else {}
+    )
     return SupplyItemReview(
         review_id=f"parent:{child_id}:{identifier}",
         req_id=f"parent-{identifier}",
@@ -6707,12 +6828,29 @@ def _new_review_item_from_controls(
         item_name=item_name,
         required_quantity=quantity,
         unit=unit,  # type: ignore[arg-type]
+        item_fulfillment_preference=fulfillment_preference,  # type: ignore[arg-type]
+        brand=brand.strip() or None,
+        brand_hint=brand.strip() or None,
+        brand_required=bool(brand.strip()) and brand_required,
+        size=size.strip() or None,
+        material=material.strip() or None,
+        color=tuple(
+            value.strip()
+            for value in colors.split(",")
+            if value.strip()
+        ),
+        required_attributes=required_attributes,
+        exclusions=tuple(
+            value.strip()
+            for value in exclusions.split(",")
+            if value.strip()
+        ),
         optional=optional,
-        supply_scope=scope,  # type: ignore[arg-type]
-        source_text=source_text.strip() or "Added by parent during review",
+        supply_scope="unspecified",
+        source_text="Added by parent during personalization",
         confidence=1.0,
         review_status="confirmed",
-        allow_equivalents=True,
+        allow_equivalents=not brand_required,
     )
 
 
@@ -7203,8 +7341,7 @@ def _variant_detail_label(details: Sequence[tuple[str, object]]) -> str:
     return "; ".join(parts)
 
 
-MERGE_CUSTOM_QUANTITY_LABEL = "Enter my own quantity"
-MERGE_CUSTOM_VARIANT_LABEL = "Enter my own quantities"
+MERGE_CUSTOM_QUANTITY_LABEL = "Enter my own"
 
 
 def quantity_quick_choice_values(
@@ -7214,72 +7351,25 @@ def quantity_quick_choice_values(
 
     values: dict[str, int | None] = {
         (
-            "Use the largest requested quantity "
+            "Use the largest "
             f"({interrupt.default_quantity}) — default"
         ): interrupt.default_quantity,
         (
-            "Add every source quantity "
+            "Add them together "
             f"({sum(source.quantity for source in interrupt.sources)})"
         ): sum(source.quantity for source in interrupt.sources),
     }
     for source in interrupt.sources:
+        source_name = (
+            f"page {source.page_number}"
+            if source.page_number
+            else source.section_name or "this source"
+        )
         values[
-            "Use the quantity from "
-            f"{_requirement_source_label(source)} — "
-            f"{_display_source_line(source.exact_line)} "
+            f"Use the quantity from {source_name} "
             f"({source.quantity})"
         ] = source.quantity
-    values[MERGE_CUSTOM_QUANTITY_LABEL] = None
-    return values
-
-
-def variant_quick_choice_values(
-    decision: Any,
-) -> dict[str, dict[str, int] | None]:
-    """Build BR-30 shortcuts without flattening source-backed variants."""
-
-    sources = decision.sources
-    largest_source = max(
-        sources,
-        key=lambda source: source.quantity,
-    )
-
-    def allocation_for_source(source: RequirementSource) -> dict[str, int]:
-        return {
-            variant.variant_id: (
-                source.quantity
-                if any(
-                    candidate.source_req_id == source.source_req_id
-                    for candidate in variant.sources
-                )
-                else 0
-            )
-            for variant in decision.variants
-        }
-
-    values: dict[str, dict[str, int] | None] = {
-        (
-            "Use the largest requested quantity "
-            f"({largest_source.quantity}) — default"
-        ): allocation_for_source(largest_source),
-        (
-            "Add every source quantity "
-            f"({sum(source.quantity for source in sources)})"
-        ): {
-            variant.variant_id: sum(
-                source.quantity for source in variant.sources
-            )
-            for variant in decision.variants
-        },
-    }
-    for source in sources:
-        values[
-            "Use the quantity from "
-            f"{_requirement_source_label(source)} — "
-            f"{_display_source_line(source.exact_line)} "
-            f"({source.quantity})"
-        ] = allocation_for_source(source)
-    values[MERGE_CUSTOM_VARIANT_LABEL] = None
+    values["Enter my own"] = None
     return values
 
 
@@ -7311,6 +7401,162 @@ def mark_merge_quantities_custom(
     state[choice_key] = custom_label
 
 
+def _render_merge_source_rows(
+    st: Any,
+    decision: Any,
+    list_input: ListInput | None,
+) -> None:
+    """Show quantity, exact source line, and link-out in one readable row."""
+
+    heading_quantity, heading_line, heading_source = st.columns(
+        [0.8, 3.2, 1.2]
+    )
+    heading_quantity.markdown("**Quantity**")
+    heading_line.markdown("**What the list says**")
+    heading_source.markdown("**Source**")
+    for index, source in enumerate(decision.sources, start=1):
+        quantity_column, line_column, source_column = st.columns(
+            [0.8, 3.2, 1.2]
+        )
+        quantity_column.write(str(source.quantity))
+        line_column.write(
+            escape_streamlit_dollars(
+                _display_source_line(source.exact_line)
+            )
+        )
+        if list_input is None:
+            source_column.caption(f"Page {source.page_number}")
+            continue
+        with source_column:
+            _render_source_reference(
+                st,
+                list_input,
+                page_number=source.page_number,
+                source_line=source.exact_line,
+                key=(
+                    f"{decision.decision_id}:source-row:"
+                    f"{source.source_req_id}:{index}"
+                ),
+            )
+
+
+def _merge_product_difference(decision: Any) -> str:
+    """Name the actual product-defining values in a Type B conflict."""
+
+    parts: list[str] = []
+    for constraint in decision.constraint_interrupts:
+        if constraint.field_name == "ambiguous_descriptor":
+            continue
+        values = tuple(
+            str(option.value).replace("-", " ")
+            for option in constraint.options
+            if option.value not in (None, "", (), [])
+        )
+        if len(values) > 1:
+            parts.append(_join_names(values))
+    return "; ".join(parts) or "different required details"
+
+
+def _render_merge_quantity_controls(
+    st: Any,
+    interrupt: Any,
+) -> tuple[str, int] | None:
+    """Render synchronized Type A quantity shortcuts and editable value."""
+
+    if interrupt is None:
+        return None
+    quick_choices = quantity_quick_choice_values(interrupt)
+    choice_key = f"{interrupt.interrupt_id}:choice"
+    quantity_key = f"{interrupt.interrupt_id}:quantity"
+    quantity_keys = {interrupt.interrupt_id: quantity_key}
+    if choice_key not in st.session_state:
+        st.session_state[choice_key] = next(iter(quick_choices))
+    if quantity_key not in st.session_state:
+        st.session_state[quantity_key] = interrupt.default_quantity
+    st.radio(
+        "Choose a quantity",
+        tuple(quick_choices),
+        key=choice_key,
+        on_change=apply_merge_quick_choice,
+        args=(
+            st.session_state,
+            choice_key,
+            quantity_keys,
+            quick_choices,
+        ),
+    )
+    selected_quantity = int(
+        st.number_input(
+            "Quantity for the cart",
+            min_value=1,
+            step=1,
+            key=quantity_key,
+            on_change=mark_merge_quantities_custom,
+            args=(
+                st.session_state,
+                choice_key,
+                MERGE_CUSTOM_QUANTITY_LABEL,
+            ),
+        )
+    )
+    selected_label = str(st.session_state[choice_key])
+    action = (
+        "custom"
+        if selected_label == MERGE_CUSTOM_QUANTITY_LABEL
+        else "total"
+        if selected_label.startswith("Add them")
+        else "largest"
+        if selected_label.startswith("Use the largest")
+        else "source"
+    )
+    return action, selected_quantity
+
+
+def _render_merge_variant_controls(
+    st: Any,
+    decision: Any,
+) -> dict[str, int]:
+    """Render one editable quantity per distinct product variant."""
+
+    selected: dict[str, int] = {}
+    for variant in decision.variants:
+        quantity_key = f"{variant.variant_id}:quantity"
+        if quantity_key not in st.session_state:
+            st.session_state[quantity_key] = variant.default_quantity
+        variant_values = [
+            str(value).replace("-", " ")
+            for field_name, value in (
+                ("ruling", variant.attributes.ruling),
+                ("tip", variant.attributes.tip_style),
+                ("format", variant.attributes.format),
+                ("size", variant.attributes.size),
+                *variant.details,
+            )
+            if field_name != "ambiguous_descriptor"
+            and value not in (None, "", (), [])
+        ]
+        variant_values.extend(
+            str(value)
+            for field_name, value in variant.details
+            if field_name == "ambiguous_descriptor"
+            and value not in (None, "", (), [])
+        )
+        variant_label = (
+            " · ".join(dict.fromkeys(variant_values))
+            or "Other listed kind"
+        )
+        selected[variant.variant_id] = int(
+            st.number_input(
+                f"{variant_label.title()} quantity",
+                min_value=0,
+                step=1,
+                key=quantity_key,
+                help="Set a kind to zero if you do not want it in the cart.",
+            )
+        )
+    return selected
+
+
 def _render_requirement_merge(st: Any) -> None:
     """Resolve same-item quantity or constraint disagreements."""
 
@@ -7336,7 +7582,7 @@ def _render_requirement_merge(st: Any) -> None:
     st.header("Choose what goes in the cart")
     st.write(
         "The same item appears differently in more than one part of a list. "
-        "Choose once before it enters your cart."
+        "Choose which items to include and what quantity belongs in the cart."
     )
     pending_errors = tuple(
         st.session_state.get("requirement_merge_validation_errors", ())
@@ -7370,162 +7616,66 @@ def _render_requirement_merge(st: Any) -> None:
                     unsafe_allow_html=True,
                 )
                 first_error_anchor_added = True
-            st.subheader(
-                escape_streamlit_dollars(
-                    f"{_item_display_name(decision.canonical_item)} "
-                    f"for {child_label}"
-                )
-            )
-            st.caption("What each source requested")
-            for source in decision.sources:
+            item_name = _item_display_name(decision.canonical_item)
+            if decision.conflict_type == "quantity_only":
+                st.subheader(f"How many {item_name} for {child_label}?")
+                quantities = tuple(source.quantity for source in decision.sources)
                 st.write(
-                    escape_streamlit_dollars(
-                        f"{_requirement_source_label(source)} — "
-                        f"{source.quantity}: "
-                        f"{_display_source_line(source.exact_line)}"
-                    )
+                    f"One part of the list asks for {quantities[0]} and "
+                    f"another asks for {quantities[1]}."
                 )
-
-            if decision.variants:
-                st.caption(
-                    "Choose a quick starting point or adjust each version "
-                    "directly."
+            elif decision.conflict_type == "different_products":
+                st.subheader(
+                    f"{item_name} for {child_label} — "
+                    "the list asks for two different kinds"
                 )
-                quick_choices = variant_quick_choice_values(decision)
-                choice_key = f"{decision.decision_id}:quantity-choice"
-                quantity_keys = {
-                    variant.variant_id: f"{variant.variant_id}:quantity"
-                    for variant in decision.variants
-                }
-                if choice_key not in st.session_state:
-                    st.session_state[choice_key] = next(iter(quick_choices))
-                apply_merge_quick_choice(
-                    st.session_state,
-                    choice_key,
-                    quantity_keys,
-                    quick_choices,
+                st.write(
+                    "The list specifies "
+                    + _merge_product_difference(decision)
+                    + ". These are different products."
                 )
-                st.radio(
-                    "Quick quantity choices",
-                    tuple(quick_choices),
-                    key=choice_key,
-                    on_change=apply_merge_quick_choice,
-                    args=(
-                        st.session_state,
-                        choice_key,
-                        quantity_keys,
-                        quick_choices,
-                    ),
-                )
-                selected_variants: dict[str, int] = {}
-                for variant in decision.variants:
-                    quantity_key = quantity_keys[variant.variant_id]
-                    if quantity_key not in st.session_state:
-                        st.session_state[quantity_key] = 0
-                    variant_quantity = int(
-                        st.number_input(
-                            _variant_detail_label(variant.details),
-                            min_value=0,
-                            step=1,
-                            key=quantity_key,
-                            on_change=mark_merge_quantities_custom,
-                            args=(
-                                st.session_state,
-                                choice_key,
-                                MERGE_CUSTOM_VARIANT_LABEL,
-                            ),
-                            help=(
-                                "Change any version directly to build your own "
-                                "quantity."
-                            ),
-                        )
-                    )
-                    selected_variants[variant.variant_id] = variant_quantity
-                    for source in variant.sources:
-                        st.caption(
-                            escape_streamlit_dollars(
-                                f"{_requirement_source_label(source)}: "
-                                f"{_display_source_line(source.exact_line)}"
-                            )
-                        )
-                variant_quantity_choices[decision.decision_id] = (
-                    selected_variants
-                )
-                if not any(selected_variants.values()):
-                    validation_errors.append(
-                        _item_display_name(decision.canonical_item)
-                    )
             else:
-                interrupt = decision.quantity_interrupt
-                if interrupt is None:
-                    continue
-                quick_choices = quantity_quick_choice_values(interrupt)
-                choice_key = f"{interrupt.interrupt_id}:choice"
-                quantity_key = f"{interrupt.interrupt_id}:quantity"
-                quantity_keys = {interrupt.interrupt_id: quantity_key}
-                if choice_key not in st.session_state:
-                    st.session_state[choice_key] = next(iter(quick_choices))
-                if quantity_key not in st.session_state:
-                    st.session_state[quantity_key] = interrupt.default_quantity
-                st.radio(
-                    "Quick quantity choices",
-                    tuple(quick_choices),
-                    key=choice_key,
-                    on_change=apply_merge_quick_choice,
-                    args=(
-                        st.session_state,
-                        choice_key,
-                        quantity_keys,
-                        quick_choices,
+                st.subheader(
+                    f"{item_name} for {child_label} — "
+                    "are these the same thing?"
+                )
+                st.write(
+                    "One description uses a word that could mean a product "
+                    "difference or could simply be general wording."
+                )
+
+            list_input = input_by_child.get(decision.child_id)
+            _render_merge_source_rows(st, decision, list_input)
+
+            render_as_variants = decision.conflict_type == "different_products"
+            if decision.conflict_type == "ambiguous":
+                ambiguity_key = f"{decision.decision_id}:same-or-different"
+                ambiguity_choice = st.radio(
+                    "Do these source lines describe the same item?",
+                    (
+                        "Treat them as the same item — default",
+                        "They are two different kinds",
+                    ),
+                    key=ambiguity_key,
+                    help=(
+                        "The default treats them as one item because that is "
+                        "the smaller error. You can choose two kinds instead."
                     ),
                 )
-                selected_quantity = int(
-                    st.number_input(
-                        "Cart quantity",
-                        min_value=1,
-                        step=1,
-                        key=quantity_key,
-                        on_change=mark_merge_quantities_custom,
-                        args=(
-                            st.session_state,
-                            choice_key,
-                            MERGE_CUSTOM_QUANTITY_LABEL,
-                        ),
-                    )
-                )
-                selected_label = str(st.session_state[choice_key])
-                action = (
-                    "custom"
-                    if selected_label == MERGE_CUSTOM_QUANTITY_LABEL
-                    else (
-                        "total"
-                        if selected_label.startswith("Add every")
-                        else (
-                            "largest"
-                            if selected_label.startswith("Use the largest")
-                            else "source"
-                        )
-                    )
-                )
-                selections[interrupt.interrupt_id] = (
-                    action,
-                    selected_quantity,
-                )
-                st.caption(f"The cart quantity will be {selected_quantity}.")
+                render_as_variants = ambiguity_choice.startswith("They are")
 
-            for source in decision.sources:
-                list_input = input_by_child.get(decision.child_id)
-                if list_input is not None:
-                    _render_source_reference(
-                        st,
-                        list_input,
-                        page_number=source.page_number,
-                        source_line=source.exact_line,
-                        key=(
-                            f"{decision.decision_id}:"
-                            f"{source.source_req_id}"
-                        )
-                    )
+            if render_as_variants:
+                selected_variants = _render_merge_variant_controls(st, decision)
+                variant_quantity_choices[decision.decision_id] = selected_variants
+                if not any(selected_variants.values()):
+                    validation_errors.append(item_name)
+            else:
+                selection = _render_merge_quantity_controls(
+                    st,
+                    decision.quantity_interrupt,
+                )
+                if selection is not None and decision.quantity_interrupt is not None:
+                    selections[decision.quantity_interrupt.interrupt_id] = selection
 
     submitted = st.button(
         "Continue with these choices",
@@ -7618,8 +7768,6 @@ def _personalize_source_summary(
     if not documents and list_input is not None:
         documents = (list_input.resolved_document_name,)
     summary_parts = []
-    if documents:
-        summary_parts.append("Document: " + _join_names(documents))
     if sections:
         summary_parts.append("Sections: " + _join_names(sections))
     if pages:
@@ -7627,8 +7775,20 @@ def _personalize_source_summary(
     if summary_parts:
         st.caption(
             escape_streamlit_dollars(
-                "Extracted from " + " · ".join(summary_parts)
+                "Read " + " · ".join(summary_parts)
             )
+        )
+    if list_input is not None:
+        _render_source_reference(
+            st,
+            list_input,
+            page_number=pages[0] if pages else None,
+            source_line=(
+                "Selected sections: " + _join_names(sections)
+                if sections
+                else list_input.resolved_document_name
+            ),
+            key=f"document-source:{child_id}",
         )
 
     ignored = (
@@ -7760,10 +7920,31 @@ def _render_review(st: Any) -> None:
         str(child["child_id"]): index
         for index, child in enumerate(children)
     }
-    items = tuple(st.session_state["review_items"])
+    pending_added_items = tuple(
+        st.session_state.get("parent_added_review_items", ())
+    )
+    items = tuple(st.session_state["review_items"]) + pending_added_items
     review_offers = tuple(load_catalog())
     item_by_id = {item.review_id: item for item in items}
     flag_groups = review_flag_groups(items)
+    acknowledged_group_ids = tuple(
+        group.group_id
+        for group in flag_groups
+        if bool(
+            st.session_state.get(f"{group.group_id}:confirmed", False)
+        )
+    )
+    unhandled_groups = unhandled_review_flag_groups(
+        items,
+        flag_groups,
+        acknowledged_group_ids,
+    )
+    unhandled_group_ids = frozenset(
+        group.group_id for group in unhandled_groups
+    )
+    unhandled_row_ids = frozenset(
+        row_id for group in unhandled_groups for row_id in group.row_ids
+    )
     flagged_row_ids = frozenset(
         row_id for group in flag_groups for row_id in group.row_ids
     )
@@ -7806,13 +7987,25 @@ def _render_review(st: Any) -> None:
         "Products and prices come next, after you choose what belongs in the "
         "cart."
     )
+    if unhandled_groups:
+        st.warning(
+            f"{len(unhandled_groups)} "
+            f"{'item needs' if len(unhandled_groups) == 1 else 'items need'} "
+            "a decision before moving on."
+        )
+        if st.button(
+            "Approve all remaining defaults",
+            key="approve-all-review-defaults",
+        ):
+            for group in unhandled_groups:
+                st.session_state[f"{group.group_id}:confirmed"] = True
+            st.rerun()
 
     condition_answers: dict[str, str | None] = {}
     confirmed_flag_group_ids: list[str] = []
     edited_by_id: dict[str, SupplyItemReview] = {}
-    added_items: list[SupplyItemReview] = []
 
-    with st.form("compact_extraction_review"):
+    with st.container():
         for child in children:
             child_id = str(child["child_id"])
             st.subheader(
@@ -7825,9 +8018,10 @@ def _render_review(st: Any) -> None:
                         review_child_framing(
                             child_id,
                             child_labels[child_id],
-                            envelope,
-                            items,
-                        )
+                        envelope,
+                        items,
+                        unhandled_row_ids,
+                    )
                     )
                 )
                 _personalize_source_summary(
@@ -7917,7 +8111,11 @@ def _render_review(st: Any) -> None:
                     child_labels,
                     key_prefix=group.group_id,
                     offers=review_offers,
-                    flag_messages=group.messages,
+                    flag_messages=(
+                        group.messages
+                        if group.group_id in unhandled_group_ids
+                        else ()
+                    ),
                 )
                 edited_by_id.update(edited)
                 if confirmed:
@@ -8004,20 +8202,39 @@ def _render_review(st: Any) -> None:
                             )
                         )
 
+            last_added = st.session_state.get("last_added_review_item")
+            if (
+                isinstance(last_added, tuple)
+                and len(last_added) == 2
+                and last_added[0] == child_id
+            ):
+                st.success(
+                    f"{last_added[1]} was added for "
+                    f"{child_labels[child_id]}. You can add another item."
+                )
             added = _new_review_item_from_controls(
                 st,
                 child_id,
+                child_labels[child_id],
                 key_prefix=f"add:{child_id}",
             )
             if added is not None:
-                added_items.append(added)
+                st.session_state["parent_added_review_items"] = (
+                    *pending_added_items,
+                    added,
+                )
+                st.session_state["last_added_review_item"] = (
+                    child_id,
+                    _item_display_name(added.item_name),
+                )
+                st.rerun()
 
         back_column, continue_column = _navigation_button_columns(st)
-        return_to_lists = back_column.form_submit_button(
+        return_to_lists = back_column.button(
             "Back to lists",
             use_container_width=True,
         )
-        submitted = continue_column.form_submit_button(
+        submitted = continue_column.button(
             "Use these choices and build my shopping plan",
             type="primary",
             use_container_width=True,
@@ -8032,7 +8249,7 @@ def _render_review(st: Any) -> None:
         reviewed = tuple(
             edited_by_id.get(item.review_id, item)
             for item in items
-        ) + tuple(added_items)
+        )
         reviewed = apply_conditional_answers(
             reviewed,
             condition_answers,
@@ -8063,6 +8280,7 @@ def _render_review(st: Any) -> None:
         st.error(escape_streamlit_dollars(str(error)))
         return
     st.session_state["review_items"] = reviewed
+    st.session_state["parent_added_review_items"] = ()
     st.session_state["extracted_lists"] = confirmed
     st.session_state["organized_list_confirmed"] = True
     st.session_state["allow_unresolved_items"] = False

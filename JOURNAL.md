@@ -1982,3 +1982,60 @@ cards around the facts a parent needs to verify.
 Deploy Part A-5 and exercise one cross-section quantity conflict, one two-variant
 composition-notebook conflict, an owned item, and an out-of-catalog item before
 starting the next Personalize revision.
+
+## 2026-07-29 — Part A-6 product identity and Personalize revision
+
+### What changed
+
+- Added BR-31 through BR-35 for product-defining attributes, ambiguous
+  descriptors, classroom shared-item scaling, the per-item package preference
+  default, and explicit package-quantity states.
+- Captured graph, quad, lined, plain, wide-ruled, college-ruled, point style,
+  format, and binding evidence in the validated production Requirement.
+- Split requirement conflicts into quantity-only, different-product, and
+  ambiguous decisions. Product variants now retain a production variant identity
+  through review, aggregation, matching, selected-SKU consolidation, and cart lines.
+- Rebuilt the conflict cards around a source table and type-appropriate controls.
+- Made inferred package counts visible and editable, removed the per-item Supply
+  use control, exposed exact-brand choice whenever a brand is present, and added
+  a per-item package fulfillment preference without changing optimizer code.
+- Added live acknowledgment counts, approve-all-defaults, student-scoped repeatable
+  missing-item entry, and narrower source link-outs.
+- Changed classroom aggregation so explicit shared supplies do not scale by
+  classroom size; individual and unspecified supplies retain scaling.
+
+### Diagnosis and limitations
+
+- The prior two-cart-line test was not a production proof: it forced separate
+  candidate SKUs. In the live path both composition variants could select the same
+  wide-ruled SKU, after which selected-SKU consolidation recombined them. Product
+  variant identity now prevents that recombination.
+- Supply scope still comes from model interpretation of explicit headings. It is
+  not reliable enough to infer every real-world shared item; unspecified scope
+  conservatively retains the existing individual scaling default.
+- The new closest-quantity preference is preserved in production review and
+  Requirement objects, but does not alter package arithmetic because Part A-6
+  explicitly required `agent/optimize.py` to remain unchanged.
+- Streamlit is unavailable on this Windows ARM64 machine, so the deployed visual
+  layout still needs a browser review. The one Streamlit lifecycle suite remains
+  skipped locally.
+
+### Verification
+
+- `py -3.12-arm64 -m pytest -q`: 311 passed, 1 skipped.
+- Static architecture inspection: `agent/optimize.py` has no model calls;
+  `agent/extract.py` has zero arithmetic binary operations.
+- Kelley GPT API (`gpt-oss-20b`) live retry completed in 52.14 seconds after the
+  first concurrent attempt timed out.
+- The shared extraction produced no merge conflicts. At $150, landed cost was
+  $110.04 with three interrupts. Reusing it at $85 kept the $110.04 base cart and
+  produced a $76.97 recommended plan with four interrupts.
+- These differ from A-5's $109.83 and $71.47, but the A-6 product-identity rules
+  were not exercised by this Maple extraction. The change cannot honestly be
+  attributed to code rather than Kelley extraction nondeterminism.
+
+### Recommended next step
+
+Visually exercise all three conflict-card types and the repeatable missing-item
+flow in deployed Streamlit, then decide whether a later scoped change may update
+optimizer package-selection behavior for the recorded closest-quantity preference.

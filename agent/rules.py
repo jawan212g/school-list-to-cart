@@ -174,6 +174,71 @@ SYSTEM_DECISION_RECONCILED_EXCLUSIONS = "reconciled_exclusions"
 SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX = "reconciled_attribute:"
 # BR-29: every deterministic choice made while interpreting an item is visible beside that item.
 
+PRODUCT_DEFINING_ATTRIBUTE_FIELDS = frozenset(
+    {
+        "ruling",
+        "tip_style",
+        "format",
+        "size",
+        "material",
+        "style",
+        "tab_count",
+        "connector",
+        "character",
+        "sharpened",
+    }
+)
+PRODUCT_DEFINING_ATTRIBUTE_VALUES = {
+    "ruling": frozenset(
+        {
+            "graph",
+            "quad",
+            "wide-ruled",
+            "college-ruled",
+            "lined",
+            "plain",
+        }
+    ),
+    "tip_style": frozenset(
+        {"fine", "ultra-fine", "chisel", "pointed", "blunt"}
+    ),
+    "format": frozenset({"wide", "narrow"}),
+}
+INCIDENTAL_REQUIREMENT_ATTRIBUTE_FIELDS = frozenset(
+    {"binding", "acceptable_colors", "count"}
+)
+AMBIGUOUS_PRODUCT_DESCRIPTORS = frozenset({"regular"})
+# BR-31: different non-null product-defining values are different products.
+# Binding, brand preference, color, and packaging are incidental to merge identity.
+
+AMBIGUOUS_DESCRIPTOR_DEFAULT = "same_product"
+SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX = "ambiguous_descriptor_default:"
+# BR-32: an unclassifiable descriptor becomes one parent question; the stated
+# default treats the rows as one product because that is the smaller error.
+
+CLASSROOM_SHARED_SCOPE = "shared"
+CLASSROOM_UNSPECIFIED_SCOPE_DEFAULT = "individual"
+# BR-33: classroom-group individual items scale by student count; shared items
+# do not. An unspecified scope retains the conservative individual-item default.
+
+ITEM_FULFILLMENT_PREFERENCE_DEFAULT = "minimum_cost_at_least"
+ITEM_FULFILLMENT_PREFERENCES = (
+    ITEM_FULFILLMENT_PREFERENCE_DEFAULT,
+    "closest_quantity",
+)
+# BR-34: per-item fulfillment defaults to meeting at least the requested units
+# with the cheapest package combination.
+
+PACKAGE_QUANTITY_STATE_DEFAULT = "unspecified"
+PACKAGE_QUANTITY_STATES = (
+    "specified",
+    "assumed",
+    "any",
+    PACKAGE_QUANTITY_STATE_DEFAULT,
+)
+# BR-35: package quantity distinguishes an explicit number, a visible editable
+# assumption, "any pack size is fine", and genuinely unspecified source data.
+
 SectionResolutionAction = Literal[
     "auto_select",
     "rule_out",
@@ -334,6 +399,7 @@ ATTRIBUTE_SENSITIVE_FIELDS = frozenset(
         "ruling",
         "tab_count",
         "tip_style",
+        "format",
         "material",
         "style",
         "connector",

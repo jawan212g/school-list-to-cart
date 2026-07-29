@@ -11,6 +11,7 @@ from agent.normalize import NormalizedRequirement
 from agent.rules import (
     CATEGORY_IMPLIED_ATTRIBUTE_TERMS,
     CATEGORY_IMPLIED_EXCLUSION_TERMS,
+    CLASSROOM_SHARED_SCOPE,
 )
 from agent.schema import Requirement
 
@@ -28,6 +29,7 @@ class UnitNeed:
     attributes: Mapping[str, Any]
     allocated_to: Mapping[str, int]
     source_requirement_ids: tuple[str, ...]
+    product_variant_id: str | None = None
 
     @property
     def label(self) -> str:
@@ -49,6 +51,7 @@ class _NeedAccumulator:
     quantity: int = 0
     allocated_to: dict[str, int] = field(default_factory=dict)
     source_requirement_ids: list[str] = field(default_factory=list)
+    product_variant_id: str | None = None
 
 
 def _freeze(value: Any) -> Any:
@@ -96,6 +99,7 @@ def _effective_attributes(
     attributes: Mapping[str, Any],
 ) -> dict[str, Any]:
     effective = dict(attributes)
+    effective.pop("binding", None)
     implied_terms = CATEGORY_IMPLIED_ATTRIBUTE_TERMS.get(
         canonical_item,
         frozenset(),
@@ -138,6 +142,7 @@ def normalized_requirement_identity(
         _effective_exclusions(canonical_item, requirement.exclusions),
         requirement.is_required,
         _freeze(requirement_attributes),
+        requirement.product_variant_id,
     )
 
 
@@ -182,7 +187,8 @@ def aggregate_requirements(
         student_count = student_counts.get(requirement.child_id, 1)
         if student_count <= 0:
             raise ValueError("Classroom student counts must be positive")
-        quantity *= student_count
+        if requirement.supply_scope != CLASSROOM_SHARED_SCOPE:
+            quantity *= student_count
 
         key = normalized_requirement_identity(item)
         normalized_brand = key[1]
@@ -201,6 +207,7 @@ def aggregate_requirements(
                 exclusions=normalized_exclusions,
                 is_required=requirement.is_required,
                 attributes=requirement_attributes,
+                product_variant_id=requirement.product_variant_id,
             )
             grouped[key] = accumulator
 
@@ -222,6 +229,7 @@ def aggregate_requirements(
             attributes=accumulator.attributes,
             allocated_to=dict(accumulator.allocated_to),
             source_requirement_ids=tuple(accumulator.source_requirement_ids),
+            product_variant_id=accumulator.product_variant_id,
         )
         for accumulator in grouped.values()
     )

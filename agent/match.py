@@ -55,6 +55,7 @@ ATTRIBUTE_OFFER_KEYS: Mapping[str, tuple[str, ...]] = {
     "ruling": ("ruling",),
     "tab_count": ("tab_count", "tabs_per_set"),
     "tip_style": ("tip_style", "tip"),
+    "format": ("format",),
     "material": ("material",),
     "style": ("style",),
     "connector": ("connector",),
