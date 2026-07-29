@@ -2288,3 +2288,120 @@ keep source-backed product identity when a parent merges different products.
 
 Deploy Part A-9 and visually verify the folders, composition notebook, exclusion,
 and long-filename source interactions before changing another screen.
+
+## 2026-07-29 — Part A-10 source evidence and durable-item correction
+
+### Objective
+
+Repair the reversed-matrix source-line regression on Lists and Personalize,
+prevent repeated durable goods from defaulting to summed quantities, and make
+all decision rationale appropriately cautious and parent-facing.
+
+### Diagnosis before the fix
+
+- BR-36 was still active and passing because the stored source was not numeric
+  only. Live extraction produced evidence such as
+  `4 | Regular composition books`.
+- BR-42 then displayed only the segment before `|`, turning that complete
+  stored evidence into the visible value `4`. The stored provenance remained
+  complete; the display boundary was wrong.
+- The A-7 test used hand-authored `4 Regular composition books`, called the
+  intermediate row builder, and never called the screen renderer with the
+  reversed matrix shape. It therefore proved its fixture rather than the
+  deployed path.
+- The A-5 end-to-end SKU fixture still uses distinct invented SKUs and does not
+  reproduce the real same-SKU variant case. A-6 added production protection
+  through `product_variant_id`, but that exact same-SKU path remains a coverage
+  gap.
+- The A-9 state test uses a real merge decision but a plain dictionary and the
+  resolver directly. It proves the deterministic helper, not Streamlit widget
+  remount behavior. The true Streamlit lifecycle test remains skipped on this
+  ARM64 environment.
+
+### Work completed
+
+- Added BR-46 through BR-50 without changing model prompts, matching, approval,
+  setup, or optimizer behavior.
+- Made source display and identity comparison choose the descriptive matrix
+  segment regardless of whether quantity appears before or after `|`; complete
+  source evidence remains unchanged.
+- Replaced the A-7 regression test with one that creates production
+  Requirements, consolidates them, invokes the actual conflict-row renderer,
+  and records the values sent to the screen.
+- Added a reusable single-instance category for backpacks, headphones, pencil
+  boxes, pencil pouches, pencil sharpeners, rulers, scissors, and water
+  bottles. Repeated mentions preselect the largest source quantity, including
+  when quantities agree, while keeping the summed option available.
+- Rewrote quantity and product-identity rationale to describe implications
+  rather than assert teacher intent.
+- Made unresolved identity questions inline and rule-resolved identity controls
+  consistently collapsed with their rationale inside the same expander.
+- Moved completed Lists decision explanations into Personalize's collapsed
+  detail. The main item card retains only outcome, quantity, and source lines;
+  unresolved extraction checks remain visible.
+- Added one shared parent-facing attribute formatter and removed raw boolean
+  output from reconciliation messages, product-difference summaries, and
+  variant labels.
+- Widened the Source column while retaining BR-41's complete hover reference.
+
+### Decisions made
+
+- BR-20 amended by BR-47: equal repeated single-instance goods remain one
+  default requirement but expose the summed quantity for explicit parent
+  selection.
+- BR-45 amended by BR-48: rationale remains visible only for the current
+  preselection and now uses hedged deterministic wording.
+- Binders, dividers, and folders remain additive because one student can need
+  several simultaneously by subject, even though the objects themselves are
+  durable.
+- Watercolor paints remain additive because paint is consumed, but this
+  classification is less certain than the clearly reusable categories and
+  should be revisited with real-list evidence rather than guessed into the
+  single-instance set.
+
+### Live verification
+
+- OpenAI `gpt-5.6-sol` identified the Machias structure in 10.58 seconds and
+  extracted the selected Grade 5 plus Highly Capable pages in 113.23 seconds.
+- Live source evidence reproduced the failing shape, including
+  `1 | Backpack or book bag`, `4 | Regular composition books`,
+  `2 | Pocket folder w/ fasteners`, and `3 | Glue sticks`.
+- After the fix, backpack, pencils, scissors, glue sticks, and tissues were
+  rule-resolved as the same product; composition notebooks and folders were
+  rule-resolved as different products. All used the collapsed resolved control;
+  no live card required an inline unresolved identity question.
+- A controlled paired Maple run reused one OpenAI extraction containing 16
+  requirements per child. At $150 the plan landed at $109.83 with three
+  interrupts. At $85 the base plan remained $109.83 with four interrupts and
+  the recommended plan landed at $69.24. Both had zero requirement-merge
+  interrupts and match the A-9 paired baseline.
+- A separate provider pass returned $110.04 at $150, further demonstrating
+  live extraction/matching nondeterminism; it was not used as the paired
+  regression comparison.
+
+### Files changed
+
+- Updated `agent/rules.py`, `agent/requirement_merge.py`, `app.py`,
+  `tests/test_app.py`, and `tests/test_requirement_merge.py`.
+
+### Testing performed
+
+- Focused Lists/Personalize suite: 184 passed.
+- `py -3.12-arm64 -m pytest -q`: 345 passed, 1 skipped.
+- Static AST inspection found no arithmetic operation in `agent/extract.py`
+  and no model-call match in `agent/optimize.py`; neither file was modified.
+
+### Problems or limitations
+
+- Streamlit is unavailable on Windows ARM64. The actual renderer is now covered
+  with production objects and an output recorder, but final browser spacing,
+  expander placement, and hover width still require deployed visual review.
+- The A-5 same-SKU fixture and A-9 widget-remount coverage gaps were reported,
+  not expanded in this Lists/Personalize-only revision.
+- Live model-assisted baselines remain nondeterministic.
+
+### Recommended next step
+
+Deploy Part A-10 and visually verify the Machias backpack, folders,
+composition-notebook, scissors, and glue-stick cards plus one reconciled
+sharpening note in Personalize.

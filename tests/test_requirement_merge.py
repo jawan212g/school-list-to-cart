@@ -12,7 +12,11 @@ from agent.requirement_merge import (
     resolve_item_decision_state,
     same_product_override_notice,
 )
-from agent.rules import AMBIGUOUS_PRODUCT_DESCRIPTORS
+from agent.rules import (
+    AMBIGUOUS_PRODUCT_DESCRIPTORS,
+    PLAUSIBLE_ANNUAL_MAXIMUM_BY_ITEM,
+    SINGLE_INSTANCE_REQUIREMENT_ITEMS,
+)
 from agent.aggregate import aggregate_requirements
 from agent.optimize import OptimizationConfig, optimize_cart
 from agent.review import confirmed_requirements, organize_extractions
@@ -39,8 +43,8 @@ def _requirement(
     )
 
 
-def test_equal_quantities_merge_once_without_interrupt() -> None:
-    """BR-20: agreeing duplicates become one same-student requirement."""
+def test_equal_durable_quantities_merge_once_with_parent_total_option() -> None:
+    """BR-20/BR-47: one backpack is default while two remains available."""
 
     result = consolidate_requirements(
         (
@@ -51,7 +55,10 @@ def test_equal_quantities_merge_once_without_interrupt() -> None:
 
     assert len(result.requirements) == 1
     assert result.requirements[0].quantity == 1
-    assert result.interrupts == ()
+    assert len(result.interrupts) == 1
+    assert result.interrupts[0].default_action == "largest"
+    assert result.interrupts[0].default_quantity == 1
+    assert result.interrupts[0].combined_quantity == 2
 
 
 def test_different_quantities_produce_exactly_one_interrupt() -> None:
@@ -109,6 +116,8 @@ def test_quantity_total_remains_an_explicit_parent_choice() -> None:
         ("tissues", (4, 1), "total", 5, 6),
         ("folders", (6, 2), "total", 8, 10),
         ("composition_notebooks", (1, 4), "total", 5, 10),
+        ("backpacks", (1, 1), "largest", 1, 2),
+        ("scissors", (1, 1), "largest", 1, 2),
     ),
 )
 def test_plausible_annual_maximum_selects_named_item_default(
@@ -148,6 +157,24 @@ def test_plausible_annual_maximum_selects_named_item_default(
     assert interrupt.default_quantity == expected_quantity
     assert interrupt.combined_quantity == sum(quantities)
     assert interrupt.plausible_annual_maximum == expected_maximum
+
+
+def test_quantity_classification_covers_the_full_plausible_maximum_table() -> None:
+    """BR-47: every single-instance category is an explicit table entry."""
+
+    assert SINGLE_INSTANCE_REQUIREMENT_ITEMS == {
+        "backpacks",
+        "headphones",
+        "pencil_boxes",
+        "pencil_pouches",
+        "pencil_sharpeners",
+        "rulers",
+        "scissors",
+        "water_bottles",
+    }
+    assert SINGLE_INSTANCE_REQUIREMENT_ITEMS <= (
+        PLAUSIBLE_ANNUAL_MAXIMUM_BY_ITEM.keys()
+    )
 
 
 def test_parent_can_exclude_an_entire_conflicted_item() -> None:
@@ -231,7 +258,10 @@ def test_scissors_preferences_merge_without_inventing_brand_lock() -> None:
     assert result.requirements[0].attributes.size == "adult"
     assert result.requirements[0].attributes.tip_style == "pointed"
     assert len(result.requirements[0].sources) == 2
-    assert result.interrupts == ()
+    assert len(result.interrupts) == 1
+    assert result.interrupts[0].default_action == "largest"
+    assert result.interrupts[0].default_quantity == 1
+    assert result.interrupts[0].combined_quantity == 2
     assert result.constraint_interrupts == ()
 
 
@@ -278,7 +308,7 @@ def test_graph_and_regular_composition_books_are_different_products() -> None:
     assert resolved.quantity_control == "variants"
     assert resolved.rationale == (
         "Graph paper and lined paper are used for different work, so the "
-        "teacher likely wants both products."
+        "list may be asking for both products."
     )
     assert AMBIGUOUS_PRODUCT_DESCRIPTORS == frozenset()
 
@@ -352,6 +382,74 @@ def test_word_order_and_resolved_details_never_ask_product_identity() -> None:
     assert not resolve_item_decision_state(decision).show_identity_on_main
 
 
+@pytest.mark.parametrize(
+    (
+        "canonical_item",
+        "first_line",
+        "first_quantity",
+        "second_line",
+        "second_quantity",
+    ),
+    (
+        ("glue_sticks", "4 Glue sticks", 4, "3 | Glue sticks", 3),
+        (
+            "tissues",
+            "4 Boxes of facial tissues",
+            4,
+            "1 | Box of facial tissues",
+            1,
+        ),
+        ("backpacks", "1 Backpack", 1, "1 | Backpack or book bag", 1),
+        (
+            "scissors",
+            "1 Fiskars blunt-tip scissors",
+            1,
+            "1 | Blunt tip Fiskars scissors",
+            1,
+        ),
+    ),
+)
+def test_equivalent_reversed_matrix_wording_never_asks_identity(
+    canonical_item: str,
+    first_line: str,
+    first_quantity: int,
+    second_line: str,
+    second_quantity: int,
+) -> None:
+    """BR-43/BR-46: screen evidence order cannot create a question."""
+
+    result = consolidate_requirements(
+        (
+            Requirement(
+                req_id="first",
+                child_id="child-1",
+                raw_text=first_line,
+                canonical_item=canonical_item,
+                quantity=first_quantity,
+                source_document="district.pdf",
+                source_section="5th Grade",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="second",
+                child_id="child-1",
+                raw_text=second_line,
+                canonical_item=canonical_item,
+                quantity=second_quantity,
+                source_document="district.pdf",
+                source_section="Highly Capable Class",
+                source_page=3,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    decision = item_decisions(result)[0]
+    assert decision.conflict_type == "quantity_only"
+    assert not resolve_item_decision_state(decision).show_identity_on_main
+
+
 def test_different_non_null_rulings_are_different_products() -> None:
     """BR-31: graph and lined are Type B product variants."""
 
@@ -387,6 +485,48 @@ def test_different_non_null_rulings_are_different_products() -> None:
     assert sorted(
         variant.attributes.ruling for variant in decision.variants
     ) == ["graph", "lined"]
+
+
+def test_boolean_product_difference_uses_parent_language() -> None:
+    """BR-48/BR-50: rule rationale never exposes True or schema names."""
+
+    result = consolidate_requirements(
+        (
+            Requirement(
+                req_id="sharpened",
+                child_id="child-1",
+                raw_text="12 pre-sharpened pencils",
+                canonical_item="pencils",
+                quantity=12,
+                attributes={"sharpened": True},
+                source_document="district.pdf",
+                source_section="5th Grade",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="unsharpened",
+                child_id="child-1",
+                raw_text="12 unsharpened pencils",
+                canonical_item="pencils",
+                quantity=12,
+                attributes={"sharpened": False},
+                source_document="district.pdf",
+                source_section="Highly Capable Class",
+                source_page=3,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    rationale = resolve_item_decision_state(item_decisions(result)[0]).rationale
+
+    assert rationale == (
+        "The list names pre sharpened and unsharpened for sharpening. Those "
+        "details suggest the list may be asking for different products."
+    )
+    assert "True" not in rationale
+    assert "False" not in rationale
 
 
 def test_color_differences_do_not_split_product_identity() -> None:
@@ -930,5 +1070,8 @@ def test_merge_decision_metadata_reaches_production_review_rows() -> None:
         }
     )
 
-    assert rows[0].system_decisions == ("consolidated_sources",)
+    assert rows[0].system_decisions == (
+        "consolidated_sources",
+        "merged_quantity:1",
+    )
     assert len(rows[0].sources) == 2

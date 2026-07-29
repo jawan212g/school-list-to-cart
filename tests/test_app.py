@@ -2710,9 +2710,9 @@ def test_merge_quick_choices_and_quantity_field_share_one_state() -> None:
     ) == largest_label
     assert all("selected" not in label for label in choices)
     assert app.quantity_preselection_rationale(interrupt) == (
-        "Added together, the list asks for 84 pencils. That is more than one "
-        "student usually uses in a year, so the larger single amount is "
-        "preselected."
+        "Adding the amounts would make 84 pencils, above the usual yearly "
+        "amount for one student. The lines may repeat the same need, so the "
+        "largest single amount is preselected."
     )
     state: dict[str, object] = {"choice": total_label, "quantity": 48}
 
@@ -2740,6 +2740,50 @@ def test_merge_quick_choices_and_quantity_field_share_one_state() -> None:
         choices,
     )
     assert state["quantity"] == 48
+
+
+def test_durable_quantity_default_keeps_combined_choice_without_selecting_it() -> None:
+    """BR-47: repeated backpacks default to one, with two still available."""
+
+    merged = consolidate_requirements(
+        (
+            Requirement(
+                req_id="grade",
+                child_id="child-1",
+                raw_text="1 Backpack",
+                canonical_item="backpacks",
+                quantity=1,
+                source_document="district.pdf",
+                source_section="5th Grade",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="capable",
+                child_id="child-1",
+                raw_text="1 | Backpack or book bag",
+                canonical_item="backpacks",
+                quantity=1,
+                source_document="district.pdf",
+                source_section="Highly Capable Class",
+                source_page=3,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    interrupt = merged.interrupts[0]
+    choices = app.quantity_quick_choice_values(interrupt)
+
+    assert tuple(choices.values())[0] == 2
+    assert app.quantity_quick_choice_default_label(
+        interrupt,
+        choices,
+    ) == "**1** — Quantity from 5th Grade"
+    assert app.quantity_preselection_rationale(interrupt) == (
+        "A backpack is normally reused rather than used up. When more than "
+        "one part of a list mentions it, the largest single amount is "
+        "preselected instead of adding the amounts."
+    )
 
 
 def test_type_a_quantity_choices_do_not_repeat_source_text() -> None:
@@ -2791,9 +2835,9 @@ def test_type_a_quantity_choices_do_not_repeat_source_text() -> None:
     )
     assert all("tissues" not in label for label in labels)
     assert app.quantity_preselection_rationale(interrupt) == (
-        "Two separate parts of the list ask for tissues. Added together, "
-        "they come to 5, which is within the usual yearly amount of 6 for "
-        "one student."
+        "Tissues are used up over time, so requests in separate parts of the "
+        "list may both apply. Added together, they come to 5, within the "
+        "usual yearly amount of 6 for one student."
     )
     assert app.visible_quantity_preselection_rationale(
         interrupt,
@@ -2917,7 +2961,7 @@ def test_identity_rationale_radio_and_quantity_share_resolved_state() -> None:
     assert resolved.quantity_control == "variants"
     assert resolved.rationale == (
         "The list names cardboard and plastic for material. Those details "
-        "require different products, so the teacher likely wants both."
+        "suggest the list may be asking for different products."
     )
 
     state[identity_key] = "The same product"
@@ -2987,7 +3031,38 @@ def test_same_product_override_remains_explained_in_personalize() -> None:
 
 
 def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> None:
-    """BR-22/BR-36: every production conflict row retains item wording."""
+    """BR-22/BR-36/BR-46: the actual renderer shows matrix item wording."""
+
+    class RenderedMergeRecorder:
+        def __init__(self) -> None:
+            self.writes: list[str] = []
+
+        def __enter__(self) -> "RenderedMergeRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def container(self, **kwargs: object) -> "RenderedMergeRecorder":
+            del kwargs
+            return self
+
+        def columns(self, spec: object) -> tuple[RenderedColumn, ...]:
+            del spec
+            return tuple(RenderedColumn(self) for _ in range(3))
+
+    class RenderedColumn:
+        def __init__(self, recorder: RenderedMergeRecorder) -> None:
+            self.recorder = recorder
+
+        def markdown(self, value: object) -> None:
+            del value
+
+        def write(self, value: object) -> None:
+            self.recorder.writes.append(str(value))
+
+        def caption(self, value: object) -> None:
+            del value
 
     def extractor(
         source: object,
@@ -3001,7 +3076,10 @@ def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> N
                 Requirement(
                     req_id="grade-five",
                     child_id=child_id,
-                    raw_text="1 Composition book (sewn binding) - graph paper",
+                    raw_text=(
+                        "Composition book (sewn binding) - graph paper "
+                        "| 5th Grade: 1"
+                    ),
                     canonical_item="composition_notebooks",
                     quantity=1,
                     attributes={"ruling": "graph"},
@@ -3012,7 +3090,7 @@ def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> N
                 Requirement(
                     req_id="highly-capable",
                     child_id=child_id,
-                    raw_text="4 Regular composition books",
+                    raw_text="4 | Regular composition books",
                     canonical_item="composition_notebooks",
                     quantity=4,
                     source_section="Highly Capable Class",
@@ -3034,16 +3112,21 @@ def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> N
         extractor=extractor,
     )
     _, result = consolidate_extractions(extracted)
-    rows = app.conflict_source_rows(item_decisions(result)[0])
+    decision = item_decisions(result)[0]
+    recorder = RenderedMergeRecorder()
+    app._render_merge_source_rows(recorder, decision, None)
 
     assert errors == {}
-    assert tuple(row.quantity for row in rows) == (1, 4)
-    assert tuple(row.exact_line for row in rows) == (
-        "1 Composition book (sewn binding) - graph paper",
-        "4 Regular composition books",
+    assert tuple(source.exact_line for source in decision.sources) == (
+        "Composition book (sewn binding) - graph paper | 5th Grade: 1",
+        "4 | Regular composition books",
     )
-    assert all(not row.display_line.strip().isnumeric() for row in rows)
-    assert rows[1].exact_line != str(rows[1].quantity)
+    assert recorder.writes == [
+        "1",
+        "Composition book (sewn binding) - graph paper",
+        "4",
+        "Regular composition books",
+    ]
 
 
 def test_custom_quantity_choice_highlights_until_parent_enters_value() -> None:
@@ -3235,6 +3318,25 @@ def test_leading_source_quantity_is_hidden_only_at_display_edge() -> None:
     assert source.exact_line == exact_line
 
 
+@pytest.mark.parametrize(
+    ("exact_line", "expected"),
+    (
+        ("1 box | Ziploc quart gallon sized", "Ziploc quart gallon sized"),
+        (
+            "1 set | Colored markers (wide or thin)",
+            "Colored markers (wide or thin)",
+        ),
+    ),
+)
+def test_source_description_prefers_item_wording_over_container_only_segment(
+    exact_line: str,
+    expected: str,
+) -> None:
+    """BR-46: a generic quantity container cannot hide item wording."""
+
+    assert app._display_source_line(exact_line) == expected
+
+
 def test_source_button_filename_is_bounded_and_keeps_extension() -> None:
     """BR-41: long source names stay within the parent-facing column."""
 
@@ -3320,6 +3422,72 @@ def test_system_merge_decisions_are_plainly_visible() -> None:
         "This item appears in 2 places; page 2 asks for 1 and page 3 asks "
         "for 1, so 1 is used."
     )
+
+
+def test_personalize_keeps_resolved_decisions_in_more_detail() -> None:
+    """BR-49: completed Lists explanations do not repeat in the main card."""
+
+    item = SupplyItemReview(
+        review_id="review-folder",
+        req_id="folder",
+        child_id="child-1",
+        item_name="folders",
+        required_quantity=1,
+        sources=(
+            RequirementSource(
+                source_req_id="folder-1",
+                document_name="district.pdf",
+                section_name="5th Grade",
+                page_number=2,
+                exact_line="1 folder",
+                quantity=1,
+            ),
+            RequirementSource(
+                source_req_id="folder-2",
+                document_name="district.pdf",
+                section_name="Highly Capable",
+                page_number=3,
+                exact_line="1 | folder",
+                quantity=1,
+            ),
+        ),
+        system_decisions=("consolidated_sources",),
+        source_text="1 folder",
+        confidence=1.0,
+    )
+
+    main_messages, detail_messages = app.review_message_placement((item,))
+
+    assert main_messages == ()
+    assert detail_messages == (
+        "This item appears in 2 places; page 2 asks for 1 and page 3 asks "
+        "for 1, so 1 is used.",
+    )
+
+
+def test_reconciled_boolean_attribute_uses_product_language() -> None:
+    """BR-50: Personalize never exposes raw booleans or schema names."""
+
+    item = SupplyItemReview(
+        review_id="review-pencil",
+        req_id="pencil",
+        child_id="child-1",
+        item_name="pencils",
+        required_quantity=12,
+        required_attributes={"sharpened": True},
+        system_decisions=("reconciled_attribute:sharpened",),
+        source_text="12 sharpened pencils",
+        confidence=1.0,
+    )
+
+    messages = app.review_system_decision_messages(item)
+
+    assert messages == (
+        "One part of the list specifies sharpening as pre-sharpened; another "
+        "leaves it open, so pre-sharpened is kept.",
+    )
+    assert "True" not in messages[0]
+    assert "sharpened:" not in messages[0]
 
 
 def test_grade_preselection_handles_ordinals_and_preserves_parent_changes() -> None:

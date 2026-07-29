@@ -95,7 +95,6 @@ from agent.rules import (
     DEFAULT_TAX_BASIS_POINTS,
     CONFLICT_IDENTITY_DIFFERENT,
     CONFLICT_IDENTITY_SAME,
-    DISPLAY_LEADING_QUANTITY_PATTERN,
     FAILED_DOCUMENT_SEQUENTIAL_FALLBACK,
     MAX_CHILDREN_PER_SESSION,
     MAX_UPLOAD_BYTES,
@@ -104,6 +103,7 @@ from agent.rules import (
     NONPAGINATED_SOURCE_PAGE,
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     PARENT_EDITABLE_DETAIL_FIELDS,
+    PERSONALIZE_DECISION_DETAIL_LABEL,
     SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX,
     SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
@@ -114,8 +114,10 @@ from agent.rules import (
     SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
     SUBSTITUTION_NONE,
     grade_token_identifier,
+    parent_attribute_value as rule_parent_attribute_value,
     quantity_preselection_rationale as rule_quantity_preselection_rationale,
     same_product_override_rationale as rule_same_product_override_rationale,
+    source_item_description,
 )
 from agent.requirement_merge import (
     RequirementMergeResult,
@@ -6170,6 +6172,12 @@ def review_understanding_text(item: SupplyItemReview) -> str:
     return ", ".join((text, *details))
 
 
+def _parent_attribute_value(field_name: str, value: object) -> str:
+    """Translate BR-50 schema values into product language."""
+
+    return rule_parent_attribute_value(field_name, value)
+
+
 def review_system_decision_messages(
     item: SupplyItemReview,
 ) -> tuple[str, ...]:
@@ -6239,7 +6247,7 @@ def review_system_decision_messages(
                 retained_details.append(f"size: {item.size}")
             retained_details.extend(
                 f"{ATTRIBUTE_DISPLAY_NAMES.get(field, field.replace('_', ' '))}: "
-                f"{value}"
+                f"{_parent_attribute_value(field, value)}"
                 for field, value in item.required_attributes.items()
                 if value not in (None, "", (), [])
             )
@@ -6283,11 +6291,7 @@ def review_system_decision_messages(
             field_value = item.material
         elif field_name == "acceptable_colors":
             field_value = item.color
-        value_text = (
-            " or ".join(map(str, field_value))
-            if isinstance(field_value, (tuple, list, set))
-            else str(field_value or "").strip()
-        )
+        value_text = _parent_attribute_value(field_name, field_value)
         if value_text:
             messages.append(
                 f"One part of the list specifies {field_label} as {value_text}; "
@@ -6472,11 +6476,16 @@ def _render_review_detail_controls(
     *,
     key_prefix: str,
     offers: Sequence[Offer],
+    decision_messages: Sequence[str] = (),
 ) -> SupplyItemReview:
     """Render secondary item editing controls inside a collapsed expander."""
 
     visibility = review_detail_field_visibility(item, offers)
-    with st.expander("More detail"):
+    with st.expander(PERSONALIZE_DECISION_DETAIL_LABEL):
+        if decision_messages:
+            st.caption(
+                escape_streamlit_dollars(" ".join(decision_messages))
+            )
         first, second = st.columns(2)
         item_name = first.selectbox(
             "Item",
@@ -6701,6 +6710,23 @@ def _copy_shared_review_edits(
     )
 
 
+def review_message_placement(
+    members: Sequence[SupplyItemReview],
+    flag_messages: Sequence[str] = (),
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Separate unresolved checks from BR-49's completed decision detail."""
+
+    main_messages = tuple(dict.fromkeys(flag_messages))
+    detail_messages = tuple(
+        dict.fromkeys(
+            message
+            for member in members
+            for message in review_system_decision_messages(member)
+        )
+    )
+    return main_messages, detail_messages
+
+
 def _render_compact_review_row(
     st: Any,
     members: Sequence[SupplyItemReview],
@@ -6800,21 +6826,16 @@ def _render_compact_review_row(
                         ),
                     )
 
-        decision_messages = tuple(
-            dict.fromkeys(
-                message
-                for member in members
-                for message in review_system_decision_messages(member)
+        main_messages, decision_messages = review_message_placement(
+            members,
+            flag_messages,
+        )
+        if main_messages:
+            st.warning(
+                escape_streamlit_dollars(
+                    " ".join(main_messages)
+                )
             )
-        )
-        combined_decision = " ".join(
-            dict.fromkeys((*decision_messages, *flag_messages))
-        )
-        if combined_decision:
-            if flag_messages:
-                st.warning(escape_streamlit_dollars(combined_decision))
-            else:
-                st.caption(escape_streamlit_dollars(combined_decision))
 
         if flag_messages:
             confirmed = st.checkbox(
@@ -6832,6 +6853,7 @@ def _render_compact_review_row(
             representative,
             key_prefix=key_prefix,
             offers=offers,
+            decision_messages=decision_messages,
         )
     edited = {
         member.review_id: (
@@ -7457,14 +7479,9 @@ def _requirement_source_label(source: Any) -> str:
 
 
 def _display_source_line(source_line: str) -> str:
-    """Hide display-only annotations and a duplicated leading quantity."""
+    """Show BR-46 item wording without changing exact source evidence."""
 
-    display_line = source_line.split("|", 1)[0].strip()
-    return DISPLAY_LEADING_QUANTITY_PATTERN.sub(
-        "",
-        display_line,
-        count=1,
-    ).strip()
+    return source_item_description(source_line)
 
 
 @dataclass(frozen=True)
@@ -7503,11 +7520,7 @@ def _variant_detail_label(details: Sequence[tuple[str, object]]) -> str:
         value_label = (
             "not specified"
             if value in (None, (), "")
-            else (
-                " or ".join(map(str, value))
-                if isinstance(value, (tuple, list, set))
-                else str(value)
-            )
+            else _parent_attribute_value(field_name, value)
         )
         parts.append(f"{field_label}: {value_label}")
     return "; ".join(parts)
@@ -7572,6 +7585,7 @@ def quantity_preselection_rationale(interrupt: Any) -> str:
         _item_display_name(interrupt.canonical_item).casefold(),
     )
     return rule_quantity_preselection_rationale(
+        interrupt.canonical_item,
         item_name,
         int(interrupt.combined_quantity),
         int(interrupt.plausible_annual_maximum),
@@ -7638,7 +7652,7 @@ def _render_merge_source_rows(
     """Show quantity, exact source line, and link-out in one readable row."""
 
     heading_quantity, heading_line, heading_source = st.columns(
-        [0.7, 3.1, 2.2]
+        [0.7, 2.9, 2.4]
     )
     heading_quantity.markdown("**Quantity**")
     heading_line.markdown("**What the list says**")
@@ -7649,7 +7663,7 @@ def _render_merge_source_rows(
     ):
         with st.container(border=True):
             quantity_column, line_column, source_column = st.columns(
-                [0.7, 3.1, 2.2]
+                [0.7, 2.9, 2.4]
             )
             quantity_column.write(str(row.quantity))
             line_column.write(
@@ -7681,7 +7695,10 @@ def _merge_product_difference(decision: Any) -> str:
         if constraint.field_name == "ambiguous_descriptor":
             continue
         values = tuple(
-            str(option.value).replace("-", " ")
+            _parent_attribute_value(
+                constraint.field_name,
+                option.value,
+            )
             for option in constraint.options
             if option.value not in (None, "", (), [])
         )
@@ -7819,10 +7836,10 @@ def _render_merge_variant_controls(
         if quantity_key not in st.session_state:
             st.session_state[quantity_key] = variant.default_quantity
         variant_values = [
-            str(value).replace("-", " ")
+            _parent_attribute_value(field_name, value)
             for field_name, value in (
                 ("ruling", variant.attributes.ruling),
-                ("tip", variant.attributes.tip_style),
+                ("tip_style", variant.attributes.tip_style),
                 ("format", variant.attributes.format),
                 ("size", variant.attributes.size),
                 *variant.details,
@@ -7831,7 +7848,7 @@ def _render_merge_variant_controls(
             and value not in (None, "", (), [])
         ]
         variant_values.extend(
-            str(value)
+            _parent_attribute_value(field_name, value)
             for field_name, value in variant.details
             if field_name == "ambiguous_descriptor"
             and value not in (None, "", (), [])
@@ -7929,7 +7946,7 @@ def _render_requirement_merge(st: Any) -> None:
                 st.write(
                     "The list specifies "
                     + _merge_product_difference(decision)
-                    + ", which usually means two different kinds."
+                    + ", which may call for different products."
                 )
             else:
                 st.write(
@@ -7957,34 +7974,53 @@ def _render_requirement_merge(st: Any) -> None:
                     identity_labels,
                     key=identity_key,
                 )
+                selected_identity = next(
+                    identity
+                    for identity, label in MERGE_IDENTITY_LABELS.items()
+                    if label == identity_choice
+                )
+                resolved_identity = resolve_item_decision_state(
+                    decision,
+                    selected_identity,
+                )
+                if resolved_identity.rationale is not None:
+                    st.caption(
+                        escape_streamlit_dollars(
+                            f"Rationale: {resolved_identity.rationale}"
+                        )
+                    )
             else:
                 identity_choice = str(st.session_state[identity_key])
                 with st.expander(
                     "More detail · same product or different products"
                 ):
+                    st.caption(
+                        "This was resolved from the product details in the "
+                        "list. You can change it here."
+                    )
                     identity_choice = st.radio(
                         identity_question,
                         identity_labels,
                         key=identity_key,
                     )
-            selected_identity = next(
-                identity
-                for identity, label in MERGE_IDENTITY_LABELS.items()
-                if label == identity_choice
-            )
-            resolved_identity = resolve_item_decision_state(
-                decision,
-                selected_identity,
-            )
+                    selected_identity = next(
+                        identity
+                        for identity, label in MERGE_IDENTITY_LABELS.items()
+                        if label == identity_choice
+                    )
+                    resolved_identity = resolve_item_decision_state(
+                        decision,
+                        selected_identity,
+                    )
+                    if resolved_identity.rationale is not None:
+                        st.caption(
+                            escape_streamlit_dollars(
+                                f"Rationale: {resolved_identity.rationale}"
+                            )
+                        )
             product_identity_choices[decision.decision_id] = (
                 resolved_identity.selected_identity
             )
-            if resolved_identity.rationale is not None:
-                st.caption(
-                    escape_streamlit_dollars(
-                        f"Rationale: {resolved_identity.rationale}"
-                    )
-                )
             if (
                 resolved_identity.selected_identity
                 == CONFLICT_IDENTITY_SAME

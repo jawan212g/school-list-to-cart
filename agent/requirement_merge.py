@@ -23,6 +23,7 @@ from agent.rules import (
     REQUIREMENT_ITEM_IDENTITY_FIELDS,
     REQUIREMENT_MERGE_ORIGIN_FIELDS,
     REQUIREMENT_SOURCE_DEDUPLICATION_FIELDS,
+    SINGLE_INSTANCE_REQUIREMENT_ITEMS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
     SYSTEM_DECISION_MERGED_QUANTITY_PREFIX,
     SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX,
@@ -30,9 +31,12 @@ from agent.rules import (
     SYSTEM_DECISION_RECONCILED_BRAND,
     SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
     SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX,
+    PARENT_ATTRIBUTE_NAMES,
+    parent_attribute_value,
     product_identity_rationale,
     requirement_quantity_default,
     same_product_override_rationale,
+    source_item_description,
 )
 from agent.schema import (
     ExtractionEnvelope,
@@ -137,7 +141,12 @@ class ResolvedRequirementItemDecision:
 def _description_tokens(requirement: Requirement) -> tuple[str, ...]:
     """Remove BR-43's non-identifying words from one source description."""
 
-    tokens = set(re.findall(r"[a-z0-9]+", requirement.raw_text.casefold()))
+    tokens = set(
+        re.findall(
+            r"[a-z0-9]+",
+            source_item_description(requirement.raw_text).casefold(),
+        )
+    )
     ignored = set(REQUIREMENT_DESCRIPTION_IGNORED_WORDS)
     ignored.update(
         token
@@ -194,7 +203,10 @@ def _decision_differences(
         (
             constraint.field_name,
             tuple(
-                str(option.value)
+                parent_attribute_value(
+                    constraint.field_name,
+                    option.value,
+                )
                 for option in constraint.options
                 if option.value not in (None, "", (), [])
             ),
@@ -276,7 +288,8 @@ def same_product_override_notice(
         else "the first list section"
     )
     details = tuple(
-        f"{field_name.replace('_', ' ')}: {value}"
+        f"{PARENT_ATTRIBUTE_NAMES.get(field_name, field_name.replace('_', ' '))}: "
+        f"{parent_attribute_value(field_name, value)}"
         for field_name, value in retained.attributes.model_dump(
             exclude_none=True
         ).items()
@@ -977,6 +990,8 @@ def consolidate_requirements(
         if (
             len(set(quantities)) == 1
             and not group_constraint_interrupts
+            and first.canonical_item
+            not in SINGLE_INSTANCE_REQUIREMENT_ITEMS
         ):
             quantity = quantities[0]
             quantity_interrupt = None

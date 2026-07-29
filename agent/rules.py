@@ -94,7 +94,9 @@ NONPAGINATED_SOURCE_PAGE = 1
 # BR-19: pasted and TXT source evidence uses page 1 for uniform provenance.
 
 REQUIREMENT_MERGE_EQUAL_QUANTITY_ACTION = "use_once"
-# BR-20: the same normalized item for one student with agreeing quantities is one requirement.
+# BR-20 amended by BR-47: agreeing duplicates are one requirement. Repeated
+# single-instance goods still expose the combined quantity as a parent option
+# while preselecting the largest one-source amount.
 
 REQUIREMENT_MERGE_CONFLICT_DEFAULT_ACTION = "plausible_annual_max"
 # BR-30: cross-section/document restatements offer combined, named-source, and
@@ -184,6 +186,85 @@ DISPLAY_LEADING_QUANTITY_PATTERN = re.compile(r"^\s*\d+\s+")
 # BR-42: parent-facing source descriptions omit a duplicated leading quantity;
 # BR-22/BR-36 stored exact evidence remains unchanged.
 
+SOURCE_EVIDENCE_SEPARATOR = "|"
+SOURCE_NONDESCRIPTIVE_WORDS = frozenset(
+    {
+        "box",
+        "boxes",
+        "count",
+        "ct",
+        "each",
+        "grade",
+        "item",
+        "items",
+        "nd",
+        "pack",
+        "package",
+        "pkg",
+        "rd",
+        "set",
+        "st",
+        "th",
+    }
+)
+# BR-46: matrix evidence may place the selected quantity on either side of the
+# separator. Display and identity comparison use the side containing item
+# wording while the complete exact source evidence remains stored unchanged.
+
+SINGLE_INSTANCE_REQUIREMENT_ITEMS = frozenset(
+    {
+        "backpacks",
+        "headphones",
+        "pencil_boxes",
+        "pencil_pouches",
+        "pencil_sharpeners",
+        "rulers",
+        "scissors",
+        "water_bottles",
+    }
+)
+SINGLE_INSTANCE_ITEM_LABELS = {
+    "backpacks": "backpack",
+    "headphones": "set of headphones",
+    "pencil_boxes": "pencil box",
+    "pencil_pouches": "pencil pouch",
+    "pencil_sharpeners": "pencil sharpener",
+    "rulers": "ruler",
+    "scissors": "pair of scissors",
+    "water_bottles": "water bottle",
+}
+# BR-47: a reusable single-instance item defaults to the largest quantity from
+# one source, never the sum of repeated mentions. The combined choice remains
+# available to the parent.
+
+PERSONALIZE_DECISION_DETAIL_LABEL = "More detail"
+# BR-49: a completed Lists decision appears in Personalize as its outcome,
+# quantity, and sources. Its earlier rationale remains available only in the
+# item's collapsed detail under this label.
+
+PARENT_BOOLEAN_ATTRIBUTE_LABELS = {
+    "sharpened": {
+        True: "pre-sharpened",
+        False: "unsharpened",
+    },
+}
+PARENT_ATTRIBUTE_NAMES = {
+    "acceptable_colors": "color",
+    "character": "character",
+    "connector": "connector",
+    "format": "format",
+    "material": "material",
+    "ruling": "ruling",
+    "sharpened": "sharpening",
+    "size": "size",
+    "style": "style",
+    "tab_count": "tab count",
+    "tip_style": "tip style",
+}
+# BR-50: parent-facing explanations translate booleans and schema field names
+# into product language; raw True/False values and internal identifiers never
+# appear.
+
 
 @dataclass(frozen=True)
 class RequirementQuantityDefault:
@@ -210,9 +291,13 @@ def requirement_quantity_default(
         PLAUSIBLE_ANNUAL_MAXIMUM_FALLBACK,
     )
     selected_action: Literal["total", "largest"] = (
-        "total"
-        if combined_quantity <= plausible_maximum
-        else "largest"
+        "largest"
+        if canonical_item in SINGLE_INSTANCE_REQUIREMENT_ITEMS
+        else (
+            "total"
+            if combined_quantity <= plausible_maximum
+            else "largest"
+        )
     )
     return RequirementQuantityDefault(
         selected_action=selected_action,
@@ -223,6 +308,34 @@ def requirement_quantity_default(
         ),
         combined_quantity=combined_quantity,
         plausible_annual_maximum=plausible_maximum,
+    )
+
+
+def source_item_description(source_line: str) -> str:
+    """Return BR-46's descriptive evidence without altering provenance."""
+
+    segments = tuple(
+        segment.strip()
+        for segment in source_line.split(SOURCE_EVIDENCE_SEPARATOR)
+        if segment.strip()
+    )
+    if not segments:
+        return ""
+
+    def descriptive_text(segment: str) -> str:
+        return DISPLAY_LEADING_QUANTITY_PATTERN.sub(
+            "",
+            segment,
+            count=1,
+        ).strip()
+
+    descriptions = tuple(descriptive_text(segment) for segment in segments)
+    return max(
+        descriptions,
+        key=lambda description: sum(
+            token not in SOURCE_NONDESCRIPTIVE_WORDS
+            for token in re.findall(r"[a-z]+", description.casefold())
+        ),
     )
 
 EXPLICIT_PACKAGE_COUNT_PATTERNS = (
@@ -404,26 +517,49 @@ SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX = "same_product_override_source:"
 
 
 def quantity_preselection_rationale(
+    canonical_item: str,
     item_name: str,
     combined_quantity: int,
     plausible_annual_maximum: int,
     selected_action: Literal["total", "largest"],
 ) -> str:
-    """Generate BR-40's parent-facing quantity rationale."""
+    """Generate BR-40/BR-47/BR-48's parent-facing quantity rationale."""
 
+    if canonical_item in SINGLE_INSTANCE_REQUIREMENT_ITEMS:
+        single_item_name = SINGLE_INSTANCE_ITEM_LABELS[canonical_item]
+        return (
+            f"A {single_item_name} is normally reused rather than used "
+            "up. When more than one part of a list mentions it, the largest "
+            "single amount is preselected instead of adding the amounts."
+        )
     if selected_action == "total":
         return (
-            "Two separate parts of the list ask for "
-            f"{item_name}. Added together, they come to "
-            f"{combined_quantity}, which is within the usual yearly amount "
-            f"of {plausible_annual_maximum} for one student."
+            f"{item_name.capitalize()} are used up over time, so requests in "
+            "separate parts of the list may both apply. Added together, they "
+            f"come to {combined_quantity}, within the usual yearly amount of "
+            f"{plausible_annual_maximum} for one student."
         )
     return (
-        f"Added together, the list asks for {combined_quantity} {item_name}. "
-        "That is more than one student usually uses in a year, so the larger "
-        "single amount is preselected."
+        f"Adding the amounts would make {combined_quantity} {item_name}, above "
+        "the usual yearly amount for one student. The lines may repeat the "
+        "same need, so the largest single amount is preselected."
     )
 
+
+def parent_attribute_value(field_name: str, value: object) -> str:
+    """Translate BR-50 schema values into product language."""
+
+    if isinstance(value, bool):
+        field_labels = PARENT_BOOLEAN_ATTRIBUTE_LABELS.get(field_name)
+        if field_labels is not None:
+            return field_labels[value]
+        return "included" if value else "not included"
+    if isinstance(value, (tuple, list, set)):
+        return " or ".join(
+            parent_attribute_value(field_name, member)
+            for member in value
+        )
+    return str(value or "").strip()
 
 def product_identity_rationale(
     conflict_type: Literal[
@@ -443,8 +579,8 @@ def product_identity_rationale(
         )
     if conflict_type == "quantity_only":
         return (
-            "Both lines describe the same product; their wording does not "
-            "change what you would buy."
+            "The wording points to the same product; no stated detail requires "
+            "separate products."
         )
     for field_name, values in differences:
         normalized_values = tuple(
@@ -455,7 +591,7 @@ def product_identity_rationale(
         } == {"graph", "lined"}:
             return (
                 "Graph paper and lined paper are used for different work, "
-                "so the teacher likely wants both products."
+                "so the list may be asking for both products."
             )
         if len(normalized_values) >= 2:
             joined_values = (
@@ -464,15 +600,18 @@ def product_identity_rationale(
                 else ", ".join(normalized_values[:-1])
                 + f", and {normalized_values[-1]}"
             )
-            detail_name = field_name.replace("_", " ")
+            detail_name = PARENT_ATTRIBUTE_NAMES.get(
+                field_name,
+                field_name.replace("_", " "),
+            )
             return (
                 f"The list names {joined_values} for {detail_name}. Those "
-                "details require different products, so the teacher likely "
-                "wants both."
+                "details suggest the list may be asking for different "
+                "products."
             )
     return (
-        "The two lines require different product details, so the teacher "
-        "likely wants both products."
+        "The two lines name different product details, which suggests the "
+        "list may be asking for different products."
     )
 
 
@@ -494,8 +633,9 @@ def same_product_override_rationale(
     )
 
 
-# BR-45: rationale uses the deterministic templates above and is visible only
-# while the rule's preselected identity or quantity option remains selected.
+# BR-45 amended/BR-48: rationale uses the deterministic, appropriately hedged
+# templates above and is visible only while the rule's preselected identity or
+# quantity option remains selected.
 
 CLASSROOM_SHARED_SCOPE = "shared"
 CLASSROOM_UNSPECIFIED_SCOPE_DEFAULT = "individual"
@@ -613,6 +753,7 @@ CANONICAL_ITEM_ALIASES = {
     "eraser": "erasers",
     "pencil_box": "pencil_boxes",
     "backpack": "backpacks",
+    "book_bag": "backpacks",
     "headphone": "headphones",
     "ruler": "rulers",
     "folder": "folders",
