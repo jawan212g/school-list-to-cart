@@ -96,7 +96,8 @@ PRIMARY_LANGUAGE_FALLBACK_INDEX = 0
 GRADE_TOKEN_NUMBER_INDEX = 0
 # BR-14: when a grade token contains a number, its first number is the grade.
 NONPAGINATED_SOURCE_PAGE = 1
-# BR-19: pasted and TXT source evidence uses page 1 for uniform provenance.
+# BR-19: source evidence without page boundaries uses page 1 for uniform
+# provenance. BR-64 adds deterministic page boundaries for direct paste.
 
 REQUIREMENT_MERGE_EQUAL_QUANTITY_ACTION = "use_once"
 # BR-20 amended by BR-47: agreeing duplicates are one requirement. Repeated
@@ -345,13 +346,9 @@ STUDENT_SCOPED_LIST_REPLACEMENT = True
 # section choice remain intact.
 
 PASTED_SOURCE_LINES_PER_PAGE = 48
-PASTED_SOURCE_PAGE_WIDTH_PIXELS = 1200
-PASTED_SOURCE_PAGE_MARGIN_PIXELS = 64
-PASTED_SOURCE_FONT_SIZE_PIXELS = 20
-PASTED_SOURCE_LINE_HEIGHT_PIXELS = 28
 # BR-64: pasted text is retained byte-for-byte as session provenance and
-# deterministically paginated into viewable source pages without wrapping or
-# rewriting its lines. Every downstream source control uses those pages.
+# deterministically paginated into text-backed source pages without wrapping
+# or rewriting its lines. Every downstream source control uses those pages.
 
 PARENT_BOOLEAN_ATTRIBUTE_LABELS = {
     "sharpened": {

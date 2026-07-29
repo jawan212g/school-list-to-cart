@@ -17,7 +17,6 @@ from typing import Any, Callable
 from uuid import uuid4
 
 import pypdfium2 as pdfium
-from PIL import Image, ImageDraw, ImageFont
 
 from agent.aggregate import UnitNeed
 from agent.addons import AddOnSelectionEvaluation, evaluate_addon_selection
@@ -114,11 +113,7 @@ from agent.rules import (
     PERSONALIZE_DECISION_DETAIL_LABEL,
     PERSONALIZE_SOURCE_CONTROL_REASONS,
     PERSONALIZE_SUMMARY_COLUMNS,
-    PASTED_SOURCE_FONT_SIZE_PIXELS,
-    PASTED_SOURCE_LINE_HEIGHT_PIXELS,
     PASTED_SOURCE_LINES_PER_PAGE,
-    PASTED_SOURCE_PAGE_MARGIN_PIXELS,
-    PASTED_SOURCE_PAGE_WIDTH_PIXELS,
     QUANTITY_WORKING_ASSUMPTION_HELP,
     DOCUMENT_GRADE_SCOPE_MISMATCH,
     DOCUMENT_GRADE_SCOPE_NO_GRADE,
@@ -3378,6 +3373,7 @@ class SourceReference:
     page_number: int | None
     source_line: str
     rendered_page: bytes | None
+    text_page: str | None
     mime_type: str | None
 
 
@@ -3396,50 +3392,6 @@ def _pasted_source_page_texts(text: str) -> tuple[str, ...]:
     return pages
 
 
-def _render_pasted_source_page(page_text: str) -> bytes:
-    """Render one exact, unwrapped pasted-text page as a PNG."""
-
-    font = ImageFont.load_default(size=PASTED_SOURCE_FONT_SIZE_PIXELS)
-    visible_lines = page_text.splitlines() or [""]
-    measurement = Image.new("RGB", (1, 1), "white")
-    measure_draw = ImageDraw.Draw(measurement)
-    widest_line = max(
-        (
-            int(measure_draw.textlength(line, font=font))
-            for line in visible_lines
-        ),
-        default=0,
-    )
-    measurement.close()
-    page_width = max(
-        PASTED_SOURCE_PAGE_WIDTH_PIXELS,
-        widest_line + (2 * PASTED_SOURCE_PAGE_MARGIN_PIXELS),
-    )
-    page_height = (
-        2 * PASTED_SOURCE_PAGE_MARGIN_PIXELS
-        + PASTED_SOURCE_LINES_PER_PAGE
-        * PASTED_SOURCE_LINE_HEIGHT_PIXELS
-    )
-    image = Image.new("RGB", (page_width, page_height), "#fffef8")
-    draw = ImageDraw.Draw(image)
-    for line_number, line in enumerate(visible_lines):
-        draw.text(
-            (
-                PASTED_SOURCE_PAGE_MARGIN_PIXELS,
-                PASTED_SOURCE_PAGE_MARGIN_PIXELS
-                + line_number * PASTED_SOURCE_LINE_HEIGHT_PIXELS,
-            ),
-            line,
-            fill="#17201d",
-            font=font,
-        )
-    output = BytesIO()
-    image.save(output, format="PNG")
-    rendered = output.getvalue()
-    image.close()
-    return rendered
-
-
 def _build_pasted_list_input(
     *,
     child_id: str,
@@ -3455,10 +3407,6 @@ def _build_pasted_list_input(
         mime_type="text/plain",
         document_name=document_name,
         source_page_texts=page_texts,
-        rendered_source_pages=tuple(
-            _render_pasted_source_page(page_text)
-            for page_text in page_texts
-        ),
     )
 
 
@@ -3489,24 +3437,25 @@ def build_source_reference(
 
     data = _list_input_bytes(list_input)
     rendered_page: bytes | None = None
+    text_page: str | None = None
     resolved_page_number = list_input.resolved_source_page(
         source_line,
         page_number,
     )
-    if list_input.rendered_source_pages:
+    if list_input.source_page_texts:
         resolved_page_number = (
             resolved_page_number or NONPAGINATED_SOURCE_PAGE
         )
         page_index = resolved_page_number - 1
         if (
             page_index < 0
-            or page_index >= len(list_input.rendered_source_pages)
+            or page_index >= len(list_input.source_page_texts)
         ):
             raise ValueError(
                 f"Page {resolved_page_number} is not present in the source "
                 "document."
             )
-        rendered_page = list_input.rendered_source_pages[page_index]
+        text_page = list_input.source_page_texts[page_index]
     elif (
         data is not None
         and list_input.mime_type == "application/pdf"
@@ -3544,6 +3493,7 @@ def build_source_reference(
         page_number=resolved_page_number,
         source_line=source_line,
         rendered_page=rendered_page,
+        text_page=text_page,
         mime_type=list_input.mime_type,
     )
 
@@ -3600,7 +3550,7 @@ def _render_source_reference(
         source_line,
         page_number,
     )
-    if list_input.rendered_source_pages and resolved_page_number is None:
+    if list_input.source_page_texts and resolved_page_number is None:
         resolved_page_number = NONPAGINATED_SOURCE_PAGE
     cache = st.session_state.setdefault("source_reference_cache", {})
     cache_key = _source_reference_cache_key(
@@ -3643,6 +3593,12 @@ def _render_source_reference(
                     "Use the exact line above to locate the source."
                 ),
                 use_container_width=True,
+            )
+        elif reference.text_page is not None:
+            st.code(
+                reference.text_page,
+                language=None,
+                wrap_lines=False,
             )
         else:
             st.info(
@@ -4227,8 +4183,9 @@ def commit_budget_mode_drafts(
     current_mode: str,
     entry_count: int,
 ) -> tuple[str, ...]:
-    """Clear unused FR-03 fields after the parent confirms a budget mode."""
+    """Clear unused FR-03 fields and name only a parent-visible consequence."""
 
+    notices: list[str] = []
     clear_combined = current_mode != "One combined budget"
     clear_allocations = (
         current_mode != "A budget for each student or classroom"
@@ -4243,13 +4200,43 @@ def commit_budget_mode_drafts(
                 ),
             )
         ).strip()
+        combined_was_entered = bool(
+            state.get(
+                INTAKE_WIDGET_TOUCHED_PREFIX + "combined_budget_text",
+                False,
+            )
+        )
         if combined_value:
             _delete_navigation_value(state, "combined_budget_text")
+            if combined_was_entered:
+                notices.append(
+                    "The combined amount you entered no longer applies "
+                    "because you chose a budget for each student or classroom."
+                )
     if clear_allocations:
+        entered_allocations = False
         for index in range(entry_count):
             key = f"budget_{index}"
+            value = str(
+                state.get(
+                    key,
+                    state.get(NAVIGATION_STATE_PREFIX + key, ""),
+                )
+            ).strip()
+            entered_allocations = entered_allocations or bool(
+                value
+                and state.get(
+                    INTAKE_WIDGET_TOUCHED_PREFIX + key,
+                    False,
+                )
+            )
             _delete_navigation_value(state, key)
-    return ()
+        if entered_allocations:
+            notices.append(
+                "The individual amounts you entered no longer apply because "
+                "you chose one combined budget."
+            )
+    return tuple(notices)
 
 
 def update_pickup_radius_for_fulfillment(
@@ -4784,11 +4771,15 @@ def _render_budget_step(st: Any) -> None:
         st.rerun()
     else:
         st.session_state["budget_validation_attempted"] = False
-        commit_budget_mode_drafts(
+        notices = commit_budget_mode_drafts(
             st.session_state,
             str(budget_mode_label),
             len(students),
         )
+        if notices:
+            st.session_state["pending_intake_notices"] = notices
+        else:
+            st.session_state.pop("pending_intake_notices", None)
         navigate_intake_step(st.session_state, 3)
         st.session_state["ui_error_active"] = False
         st.rerun()
@@ -4825,6 +4816,10 @@ def _render_preferences_step(st: Any) -> None:
         st.session_state,
         int(st.session_state["child_count"]),
     )
+    for notice in tuple(
+        st.session_state.pop("pending_intake_notices", ())
+    ):
+        st.info(escape_streamlit_dollars(str(notice)))
     st.caption(
         "Choose how you want the plan to balance cost, stores, and "
         "convenience."
@@ -5250,7 +5245,7 @@ def _build_list_inputs(
 def _saved_list_page_count(list_input: ListInput) -> int:
     """Return the visible page count for one retained session-only list."""
 
-    if list_input.rendered_source_pages:
+    if list_input.source_page_texts:
         return list_input.source_page_count
     if list_input.mime_type != "application/pdf":
         return NONPAGINATED_SOURCE_PAGE

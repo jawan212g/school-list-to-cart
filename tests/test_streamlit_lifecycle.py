@@ -256,6 +256,61 @@ def test_preferences_do_not_narrate_unused_budget_state() -> None:
     )
 
 
+def test_preferences_explain_discarded_entered_individual_budgets() -> None:
+    """FR-03: the screen names a real consequence without internal vocabulary."""
+
+    test_app = _complete_students(_run_app(), ("Maya",))
+    _set_widget(
+        test_app,
+        "radio",
+        "budget_mode_label",
+        "A budget for each student or classroom",
+    )
+    _set_widget(test_app, "text_input", "budget_0", "42.00")
+    _set_widget(
+        test_app,
+        "radio",
+        "budget_mode_label",
+        "One combined budget",
+    )
+    _click_label(test_app, "Continue to shopping preferences")
+
+    assert any(
+        str(message.value) == (
+            "The individual amounts you entered no longer apply because "
+            "you chose one combined budget."
+        )
+        for message in test_app.info
+    )
+
+
+def test_preferences_explain_discarded_entered_combined_budget() -> None:
+    """FR-03: the reverse mode change explains only the amount affected."""
+
+    test_app = _complete_students(_run_app(), ("Maya",))
+    _set_widget(
+        test_app,
+        "text_input",
+        "combined_budget_text",
+        "125.00",
+    )
+    _set_widget(
+        test_app,
+        "radio",
+        "budget_mode_label",
+        "A budget for each student or classroom",
+    )
+    _click_label(test_app, "Continue to shopping preferences")
+
+    assert any(
+        str(message.value) == (
+            "The combined amount you entered no longer applies because you "
+            "chose a budget for each student or classroom."
+        )
+        for message in test_app.info
+    )
+
+
 def test_preferences_survive_banner_widget_cleanup_and_remount() -> None:
     """FR-04: advanced settings survive a real section banner round-trip."""
 

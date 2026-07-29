@@ -2689,3 +2689,66 @@ page-linked source evidence as uploaded documents.
 
 Run the existing and new AppTests in the deployed x86 environment, then use
 that lifecycle evidence before choosing another Continue-caption approach.
+
+## 2026-07-29 - Setup notices and text-backed pasted-list provenance
+
+### Objective
+
+Finish the three outstanding Setup and Lists behaviors: meaningful budget-mode
+consequences, quiet BR-59 case (a), and a viewable exact source for direct paste.
+
+### Work completed
+
+- Budget-mode cleanup now distinguishes an amount the parent edited from an
+  untouched default or generated allocation. Untouched values are discarded
+  silently. Entered amounts produce one plain-language consequence after the
+  parent continues.
+- BR-59 case (a) proceeds without narrating grade detection. The section-screen
+  explanation renders only when at least one student has an actual section
+  decision.
+- Direct paste retains the exact original string, paginates only at existing
+  line boundaries, and opens in the same source popover used by uploaded
+  documents. The page body is text-backed and displayed without wrapping.
+- Requirement and catalog-unavailable provenance is stamped with the retained
+  document label and resolved source page before downstream screens use it.
+
+### Decisions made
+
+- Widget touch state is the boundary between a generated/default budget value
+  and a parent-entered amount; internal draft creation is never narrated.
+- Pasted evidence remains text rather than being converted to PDF or an image,
+  preserving whitespace and characters without adding a dependency.
+- BR-64 remains the deterministic rule for direct-paste source pagination.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 machine. The production
+  AppTest module exists on disk and covers the real setup screen, but is skipped
+  locally and must run in the deployed x86 environment.
+
+### Files changed
+
+- `agent/pipeline.py`
+- `agent/rules.py`
+- `app.py`
+- `tests/test_app.py`
+- `tests/test_streamlit_lifecycle.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused production-path suite: 131 passed, 1 skipped.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 362 passed, 1 skipped.
+- Static architecture inspection found zero model-call candidates in
+  `agent/optimize.py`. The reported `agent/extract.py` binary operators were
+  type-union annotations, not arithmetic.
+
+### Remaining work
+
+- Run the Streamlit AppTests in the deployed x86 environment to verify the
+  mounted-widget notice behavior visually.
+
+### Recommended next step
+
+Deploy the current changes and verify one untouched and one edited budget-mode
+round trip, then open a pasted list's source popover on a later page.

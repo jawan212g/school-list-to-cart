@@ -904,6 +904,46 @@ def test_per_entry_drafts_seed_empty_combined_without_overwriting() -> None:
     ) == ()
 
 
+def test_budget_cleanup_names_only_parent_entered_amounts() -> None:
+    """FR-03: the production cleanup distinguishes edits from seeded values."""
+
+    untouched_state: dict[str, object] = {
+        "budget_0": "75.00",
+        "navigation_saved::budget_0": "75.00",
+    }
+    assert app.commit_budget_mode_drafts(
+        untouched_state,
+        "One combined budget",
+        1,
+    ) == ()
+
+    entered_allocations: dict[str, object] = {
+        "budget_0": "42.00",
+        "intake_widget_touched::budget_0": True,
+    }
+    assert app.commit_budget_mode_drafts(
+        entered_allocations,
+        "One combined budget",
+        1,
+    ) == (
+        "The individual amounts you entered no longer apply because you "
+        "chose one combined budget.",
+    )
+
+    entered_combined: dict[str, object] = {
+        "combined_budget_text": "125.00",
+        "intake_widget_touched::combined_budget_text": True,
+    }
+    assert app.commit_budget_mode_drafts(
+        entered_combined,
+        "A budget for each student or classroom",
+        1,
+    ) == (
+        "The combined amount you entered no longer applies because you chose "
+        "a budget for each student or classroom.",
+    )
+
+
 def test_deliberate_removal_clears_saved_navigation_values() -> None:
     """FR-01: navigation snapshots cannot resurrect a removed entry."""
 
@@ -3725,6 +3765,7 @@ def test_source_button_filename_is_bounded_and_keeps_extension() -> None:
         page_number=3,
         source_line="3 glue sticks",
         rendered_page=None,
+        text_page=None,
         mime_type="application/pdf",
     )
     assert app._source_reference_hover_text(reference) == (
@@ -3765,10 +3806,6 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
     assert list_input.resolved_document_name == "Maya's pasted list"
     assert list_input.source_page_count == 2
     assert app._saved_list_page_count(list_input) == 2
-    assert all(
-        page.startswith(b"\x89PNG\r\n\x1a\n")
-        for page in list_input.rendered_source_pages
-    )
 
     source_line = "49\tItem 49\tkeep typoo 49"
     extracted, errors = app._extract_list_inputs(
@@ -3809,7 +3846,8 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
     )
     assert reference.page_number == 2
     assert reference.source_line == source_line
-    assert reference.rendered_page == list_input.rendered_source_pages[1]
+    assert reference.rendered_page is None
+    assert reference.text_page == list_input.source_page_texts[1]
 
     class Popover:
         def __enter__(self) -> None:
@@ -3821,7 +3859,7 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
     class SourceControl:
         session_state: dict[str, object] = {}
         popover_labels: list[str] = []
-        rendered_images: list[bytes] = []
+        rendered_text_pages: list[tuple[str, bool]] = []
 
         @classmethod
         def popover(cls, label: str, **kwargs: object) -> Popover:
@@ -3834,9 +3872,20 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
             del value
 
         @classmethod
-        def image(cls, value: bytes, **kwargs: object) -> None:
-            del kwargs
-            cls.rendered_images.append(value)
+        def code(
+            cls,
+            value: str,
+            *,
+            language: str | None,
+            wrap_lines: bool,
+        ) -> None:
+            assert language is None
+            cls.rendered_text_pages.append((value, wrap_lines))
+
+        @staticmethod
+        def image(value: bytes, **kwargs: object) -> None:
+            del value, kwargs
+            raise AssertionError("Pasted text must not be converted to an image")
 
         @staticmethod
         def info(value: str) -> None:
@@ -3855,8 +3904,8 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
     assert source_label.startswith("View source")
     assert "Maya's pasted list" in source_label
     assert source_label.endswith("page 2")
-    assert SourceControl.rendered_images == [
-        list_input.rendered_source_pages[1]
+    assert SourceControl.rendered_text_pages == [
+        (list_input.source_page_texts[1], False)
     ]
 
 

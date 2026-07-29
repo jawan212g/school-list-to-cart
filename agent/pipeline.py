@@ -104,7 +104,6 @@ class ListInput:
     mime_type: str | None = None
     document_name: str | None = None
     source_page_texts: tuple[str, ...] = ()
-    rendered_source_pages: tuple[bytes, ...] = ()
 
     @property
     def resolved_document_name(self) -> str:
@@ -130,7 +129,6 @@ class ListInput:
 
         return max(
             len(self.source_page_texts),
-            len(self.rendered_source_pages),
             1,
         )
 
@@ -139,9 +137,15 @@ class ListInput:
         source_line: str,
         fallback_page: int | None,
     ) -> int | None:
-        """Locate an exact pasted source line without a downstream type branch."""
+        """Locate an exact retained source line without a downstream type branch."""
 
         if self.source_page_texts and source_line:
+            if (
+                fallback_page is not None
+                and 1 <= fallback_page <= len(self.source_page_texts)
+                and source_line in self.source_page_texts[fallback_page - 1]
+            ):
+                return fallback_page
             for page_number, page_text in enumerate(
                 self.source_page_texts,
                 start=1,
