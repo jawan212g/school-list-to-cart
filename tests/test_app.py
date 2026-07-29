@@ -20,6 +20,7 @@ from agent.requirement_merge import (
     consolidate_extractions,
     consolidate_requirements,
     item_decisions,
+    resolve_item_decision_state,
 )
 from agent.review import confirmed_requirements, organize_extractions
 from agent.schema import (
@@ -2699,13 +2700,19 @@ def test_merge_quick_choices_and_quantity_field_share_one_state() -> None:
     interrupt = merged.interrupts[0]
     choices = app.quantity_quick_choice_values(interrupt)
     total_label, largest_label = tuple(choices)[:2]
-    assert total_label == "**84** — both lists combined"
-    assert largest_label == "**48** — 5th Grade only — selected"
-    assert sum("selected" in label for label in choices) == 1
+    assert total_label == (
+        "**84** — Quantities from both lists added together"
+    )
+    assert largest_label == "**48** — Quantity from 5th Grade"
+    assert app.quantity_quick_choice_default_label(
+        interrupt,
+        choices,
+    ) == largest_label
+    assert all("selected" not in label for label in choices)
     assert app.quantity_preselection_rationale(interrupt) == (
-        "Both lists combined comes to 84 pencils, which is more than one "
-        "student usually needs in a year, so the larger single amount is "
-        "selected."
+        "Added together, the list asks for 84 pencils. That is more than one "
+        "student usually uses in a year, so the larger single amount is "
+        "preselected."
     )
     state: dict[str, object] = {"choice": total_label, "quantity": 48}
 
@@ -2770,12 +2777,12 @@ def test_type_a_quantity_choices_do_not_repeat_source_text() -> None:
     labels = tuple(app.quantity_quick_choice_values(interrupt))
 
     assert labels == (
-        "**5** — both lists combined — selected",
-        "**4** — Grade 5 only",
-        "**1** — Highly Capable only",
+        "**5** — Quantities from both lists added together",
+        "**4** — Quantity from Grade 5",
+        "**1** — Quantity from Highly Capable",
         "Enter my own",
     )
-    assert sum("selected" in label for label in labels) == 1
+    assert all("selected" not in label for label in labels)
     assert all("page " not in label for label in labels)
     assert all("larger of the listed amounts" not in label for label in labels)
     assert all(
@@ -2784,13 +2791,24 @@ def test_type_a_quantity_choices_do_not_repeat_source_text() -> None:
     )
     assert all("tissues" not in label for label in labels)
     assert app.quantity_preselection_rationale(interrupt) == (
-        "Both lists combined comes to 5 tissues, which is within the usual "
-        "yearly amount of 6 for one student, so both amounts are selected."
+        "Two separate parts of the list ask for tissues. Added together, "
+        "they come to 5, which is within the usual yearly amount of 6 for "
+        "one student."
     )
+    assert app.visible_quantity_preselection_rationale(
+        interrupt,
+        labels[0],
+        app.quantity_quick_choice_values(interrupt),
+    ) is not None
+    assert app.visible_quantity_preselection_rationale(
+        interrupt,
+        labels[1],
+        app.quantity_quick_choice_values(interrupt),
+    ) is None
 
 
-def test_only_ambiguous_merge_asks_identity_on_main_card() -> None:
-    """BR-37: obvious identity classifications move override to detail."""
+def test_only_unresolved_wording_asks_identity_on_main_card() -> None:
+    """BR-43: only unresolved residual wording asks on the main card."""
 
     quantity_only = item_decisions(
         consolidate_requirements(
@@ -2820,19 +2838,18 @@ def test_only_ambiguous_merge_asks_identity_on_main_card() -> None:
         consolidate_requirements(
             (
                 Requirement(
-                    req_id="graph",
+                    req_id="homework",
                     child_id="child-1",
-                    raw_text="1 graph composition book",
+                    raw_text="1 homework composition book",
                     canonical_item="composition_notebooks",
                     quantity=1,
-                    attributes={"ruling": "graph"},
                     source_section="5th Grade",
                     extraction_confidence=1.0,
                 ),
                 Requirement(
-                    req_id="regular",
+                    req_id="class",
                     child_id="child-1",
-                    raw_text="4 regular composition books",
+                    raw_text="4 class composition books",
                     canonical_item="composition_notebooks",
                     quantity=4,
                     source_section="Highly Capable",
@@ -2842,8 +2859,131 @@ def test_only_ambiguous_merge_asks_identity_on_main_card() -> None:
         )
     )[0]
 
-    assert not app._merge_identity_control_on_main(quantity_only)
-    assert app._merge_identity_control_on_main(ambiguous)
+    assert not resolve_item_decision_state(
+        quantity_only
+    ).show_identity_on_main
+    assert resolve_item_decision_state(ambiguous).show_identity_on_main
+
+
+def test_identity_rationale_radio_and_quantity_share_resolved_state() -> None:
+    """BR-44: stale widget state cannot contradict a Type B decision."""
+
+    result = consolidate_requirements(
+        (
+            Requirement(
+                req_id="cardboard",
+                child_id="child-1",
+                raw_text="3 cardboard pocket folders",
+                canonical_item="folders",
+                quantity=3,
+                attributes={"material": "cardboard"},
+                source_document="district.pdf",
+                source_section="5th Grade",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="plastic",
+                child_id="child-1",
+                raw_text="2 plastic pocket folders with fasteners",
+                canonical_item="folders",
+                quantity=2,
+                attributes={
+                    "material": "plastic",
+                    "connector": "fasteners",
+                },
+                source_document="district.pdf",
+                source_section="Highly Capable Class",
+                source_page=3,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    decision = item_decisions(result)[0]
+    identity_key = f"{decision.decision_id}:same-or-different"
+    state: dict[str, object] = {
+        identity_key: "The same product",
+        f"{identity_key}:facts": "stale-fingerprint",
+    }
+
+    resolved = app.resolve_merge_identity_widget_state(
+        state,
+        decision,
+        identity_key,
+    )
+
+    assert state[identity_key] == "Different products"
+    assert resolved.selected_identity == "different"
+    assert resolved.quantity_control == "variants"
+    assert resolved.rationale == (
+        "The list names cardboard and plastic for material. Those details "
+        "require different products, so the teacher likely wants both."
+    )
+
+    state[identity_key] = "The same product"
+    overridden = app.resolve_merge_identity_widget_state(
+        state,
+        decision,
+        identity_key,
+    )
+
+    assert overridden.selected_identity == "same"
+    assert overridden.quantity_control == "combined"
+    assert overridden.rationale is None
+
+
+def test_same_product_override_remains_explained_in_personalize() -> None:
+    """BR-44: the retained source-backed product remains visible afterward."""
+
+    requirements = (
+        Requirement(
+            req_id="cardboard",
+            child_id="child-1",
+            raw_text="3 cardboard pocket folders",
+            canonical_item="folders",
+            quantity=3,
+            attributes={"material": "cardboard"},
+            source_document="district.pdf",
+            source_section="5th Grade",
+            source_page=2,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="plastic",
+            child_id="child-1",
+            raw_text="2 plastic pocket folders with fasteners",
+            canonical_item="folders",
+            quantity=2,
+            attributes={
+                "material": "plastic",
+                "connector": "fasteners",
+            },
+            source_document="district.pdf",
+            source_section="Highly Capable Class",
+            source_page=3,
+            extraction_confidence=1.0,
+        ),
+    )
+    initial = consolidate_requirements(requirements)
+    decision = item_decisions(initial)[0]
+    resolved = consolidate_requirements(
+        requirements,
+        product_identity_choices={decision.decision_id: "same"},
+    )
+    review_item = organize_extractions(
+        {
+            "child-1": ExtractionEnvelope(
+                requirements=resolved.requirements
+            )
+        }
+    )[0]
+
+    assert app.review_system_decision_messages(review_item) == (
+        "This item appears in 2 places; page 2 asks for 3 and page 3 asks "
+        "for 2. The cart uses 5. You chose one product, so the cart will use "
+        "material: cardboard from 5th Grade. This keeps one real source "
+        "description instead of mixing details from different products.",
+    )
 
 
 def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> None:
@@ -3105,6 +3245,19 @@ def test_source_button_filename_is_bounded_and_keeps_extension() -> None:
     assert len(label) <= 30
     assert label.endswith(".pdf")
     assert "…" in label
+    reference = app.SourceReference(
+        document_name=(
+            "very-long-district-school-supply-list-for-every-grade.pdf"
+        ),
+        page_number=3,
+        source_line="3 glue sticks",
+        rendered_page=None,
+        mime_type="application/pdf",
+    )
+    assert app._source_reference_hover_text(reference) == (
+        "View source · "
+        "very-long-district-school-supply-list-for-every-grade.pdf · page 3"
+    )
 
 
 def test_review_understanding_pluralizes_composition_notebooks() -> None:

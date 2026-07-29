@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
+import re
 from typing import Any, Literal
 
 from agent.rules import (
     AMBIGUOUS_DESCRIPTOR_DEFAULT,
+    CANONICAL_ITEM_ALIASES,
     CONFLICT_IDENTITY_DEFAULTS,
     CONFLICT_IDENTITY_DIFFERENT,
     CONFLICT_IDENTITY_SAME,
     INCIDENTAL_REQUIREMENT_ATTRIBUTE_FIELDS,
     PRODUCT_DEFINING_ATTRIBUTE_FIELDS,
+    REQUIREMENT_ATTRIBUTE_EVIDENCE_WORDS,
+    REQUIREMENT_DESCRIPTION_IGNORED_WORDS,
     REQUIREMENT_MERGE_CONFLICT_DEFAULT_ACTION,
     REQUIREMENT_CONSTRAINT_CONFLICT_ACTION,
     REQUIREMENT_ITEM_IDENTITY_FIELDS,
@@ -25,7 +29,10 @@ from agent.rules import (
     SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX,
     SYSTEM_DECISION_RECONCILED_BRAND,
     SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
+    SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX,
+    product_identity_rationale,
     requirement_quantity_default,
+    same_product_override_rationale,
 )
 from agent.schema import (
     ExtractionEnvelope,
@@ -112,6 +119,170 @@ class RequirementItemDecision:
         "ambiguous",
     ]
     default_identity: Literal["same", "different"]
+
+
+@dataclass(frozen=True)
+class ResolvedRequirementItemDecision:
+    """One identity state consumed by rationale, radio, and quantities."""
+
+    selected_identity: Literal["same", "different"]
+    default_identity: Literal["same", "different"]
+    is_preselected: bool
+    show_identity_on_main: bool
+    quantity_control: Literal["combined", "variants"]
+    rationale: str | None
+    state_fingerprint: str
+
+
+def _description_tokens(requirement: Requirement) -> tuple[str, ...]:
+    """Remove BR-43's non-identifying words from one source description."""
+
+    tokens = set(re.findall(r"[a-z0-9]+", requirement.raw_text.casefold()))
+    ignored = set(REQUIREMENT_DESCRIPTION_IGNORED_WORDS)
+    ignored.update(
+        token
+        for token in requirement.canonical_item.casefold().split("_")
+    )
+    ignored.update(
+        token.removesuffix("s")
+        for token in tuple(ignored)
+        if token.endswith("s")
+    )
+    for alias, canonical_item in CANONICAL_ITEM_ALIASES.items():
+        if canonical_item != requirement.canonical_item:
+            continue
+        ignored.update(re.findall(r"[a-z0-9]+", alias.casefold()))
+    ignored.update(REQUIREMENT_ATTRIBUTE_EVIDENCE_WORDS)
+    for value in (
+        requirement.brand_lock,
+        requirement.brand_hint,
+        *requirement.exclusions,
+        *requirement.attributes.model_dump(exclude_none=True).values(),
+    ):
+        if isinstance(value, (tuple, list, set)):
+            values = value
+        else:
+            values = (value,)
+        for item in values:
+            if item is None:
+                continue
+            ignored.update(re.findall(r"[a-z0-9]+", str(item).casefold()))
+    return tuple(
+        sorted(
+            token
+            for token in tokens
+            if token not in ignored and not token.isdigit()
+        )
+    )
+
+
+def _descriptions_need_identity_question(
+    group: Sequence[Requirement],
+) -> bool:
+    """Apply BR-43 after product-defining constraints are reconciled."""
+
+    descriptions = tuple(_description_tokens(requirement) for requirement in group)
+    return len(set(descriptions)) > 1
+
+
+def _decision_differences(
+    decision: RequirementItemDecision,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Return source-backed product differences for deterministic rationale."""
+
+    return tuple(
+        (
+            constraint.field_name,
+            tuple(
+                str(option.value)
+                for option in constraint.options
+                if option.value not in (None, "", (), [])
+            ),
+        )
+        for constraint in decision.constraint_interrupts
+        if constraint.field_name != "ambiguous_descriptor"
+    )
+
+
+def item_decision_state_fingerprint(
+    decision: RequirementItemDecision,
+) -> str:
+    """Fingerprint the facts that determine BR-44's default state."""
+
+    facts = (
+        decision.decision_id,
+        decision.conflict_type,
+        decision.default_identity,
+        tuple(
+            (
+                constraint.field_name,
+                tuple(repr(option.value) for option in constraint.options),
+            )
+            for constraint in decision.constraint_interrupts
+        ),
+    )
+    return sha256(repr(facts).encode("utf-8")).hexdigest()[:16]
+
+
+def resolve_item_decision_state(
+    decision: RequirementItemDecision,
+    selected_identity: Literal["same", "different"] | None = None,
+) -> ResolvedRequirementItemDecision:
+    """Resolve every BR-44 consumer from one selected identity (FR-12)."""
+
+    selected = selected_identity or decision.default_identity
+    if selected not in {CONFLICT_IDENTITY_SAME, CONFLICT_IDENTITY_DIFFERENT}:
+        raise ValueError("Unknown product identity")
+    is_preselected = selected == decision.default_identity
+    return ResolvedRequirementItemDecision(
+        selected_identity=selected,
+        default_identity=decision.default_identity,
+        is_preselected=is_preselected,
+        show_identity_on_main=(decision.conflict_type == "ambiguous"),
+        quantity_control=(
+            "variants"
+            if selected == CONFLICT_IDENTITY_DIFFERENT
+            else "combined"
+        ),
+        rationale=(
+            product_identity_rationale(
+                decision.conflict_type,
+                _decision_differences(decision),
+            )
+            if is_preselected
+            else None
+        ),
+        state_fingerprint=item_decision_state_fingerprint(decision),
+    )
+
+
+def same_product_override_notice(
+    decision: RequirementItemDecision,
+) -> str | None:
+    """Name BR-44's retained complete variant after a parent override."""
+
+    if (
+        decision.default_identity != CONFLICT_IDENTITY_DIFFERENT
+        or not decision.variants
+    ):
+        return None
+    retained = decision.variants[0]
+    source = retained.sources[0] if retained.sources else None
+    source_name = (
+        source.section_name
+        if source is not None and source.section_name
+        else source.document_name
+        if source is not None and source.document_name
+        else "the first list section"
+    )
+    details = tuple(
+        f"{field_name.replace('_', ' ')}: {value}"
+        for field_name, value in retained.attributes.model_dump(
+            exclude_none=True
+        ).items()
+        if field_name in PRODUCT_DEFINING_ATTRIBUTE_FIELDS
+    )
+    return same_product_override_rationale(source_name, details)
 
 
 def item_decisions(
@@ -482,6 +653,31 @@ def _reconcile_constraints(
             SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX
             + AMBIGUOUS_DESCRIPTOR_DEFAULT
         )
+    if not conflicts and _descriptions_need_identity_question(group):
+        descriptor_values = [
+            " ".join(_description_tokens(requirement))
+            or "general product wording"
+            for requirement in group
+        ]
+        interrupt_id = _constraint_interrupt_id(
+            group[0].child_id,
+            identity,
+            "ambiguous_descriptor",
+        )
+        conflicts.append(
+            RequirementConstraintInterrupt(
+                interrupt_id=interrupt_id,
+                decision_id=_decision_id(group[0].child_id, identity),
+                child_id=group[0].child_id,
+                canonical_item=group[0].canonical_item,
+                field_name="ambiguous_descriptor",
+                options=_constraint_options(group, descriptor_values),
+            )
+        )
+        system_decisions.append(
+            SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX
+            + AMBIGUOUS_DESCRIPTOR_DEFAULT
+        )
 
     exclusions = tuple(
         dict.fromkeys(
@@ -511,7 +707,8 @@ def _variant_value(
         return (
             requirement.ambiguous_descriptors[0]
             if requirement.ambiguous_descriptors
-            else None
+            else " ".join(_description_tokens(requirement))
+            or "general product wording"
         )
     return getattr(requirement.attributes, field_name)
 
@@ -819,6 +1016,14 @@ def consolidate_requirements(
                 )
             )
         )
+        if selected_identity != default_identity:
+            system_decisions = tuple(
+                decision
+                for decision in system_decisions
+                if not decision.startswith(
+                    SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX
+                )
+            )
         if (
             selected_identity == CONFLICT_IDENTITY_DIFFERENT
             and decision_id in active_variant_choices
@@ -855,6 +1060,28 @@ def consolidate_requirements(
                 )
             )
             continue
+        if (
+            default_identity == CONFLICT_IDENTITY_DIFFERENT
+            and selected_identity == CONFLICT_IDENTITY_SAME
+        ):
+            retained_variant = variants[0]
+            brand_lock = retained_variant.brand_lock
+            exclusions = retained_variant.exclusions
+            attributes = retained_variant.attributes
+            retained_source_id = (
+                retained_variant.sources[0].source_req_id
+                if retained_variant.sources
+                else retained_variant.variant_id
+            )
+            system_decisions = tuple(
+                dict.fromkeys(
+                    (
+                        *system_decisions,
+                        SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX
+                        + retained_source_id,
+                    )
+                )
+            )
         if quantity_interrupt is not None:
             system_decisions = tuple(
                 dict.fromkeys(

@@ -177,7 +177,8 @@ PLAUSIBLE_ANNUAL_MAXIMUM_FALLBACK = 12
 # largest single source amount. Unlisted school supplies use the fallback.
 
 SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS = 30
-# BR-41: source controls keep document labels within a typical table column.
+# BR-41 amended: source controls keep document labels within a typical table
+# column while a hover tooltip always exposes the full document reference.
 
 DISPLAY_LEADING_QUANTITY_PATTERN = re.compile(r"^\s*\d+\s+")
 # BR-42: parent-facing source descriptions omit a duplicated leading quantity;
@@ -323,14 +324,178 @@ PRODUCT_DEFINING_ATTRIBUTE_VALUES = {
 INCIDENTAL_REQUIREMENT_ATTRIBUTE_FIELDS = frozenset(
     {"binding", "acceptable_colors", "count"}
 )
-AMBIGUOUS_PRODUCT_DESCRIPTORS = frozenset({"regular"})
+AMBIGUOUS_PRODUCT_DESCRIPTORS: frozenset[str] = frozenset()
+NOTEBOOK_REGULAR_RULING = "lined"
+REQUIREMENT_DESCRIPTION_IGNORED_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "best",
+        "box",
+        "boxes",
+        "count",
+        "ct",
+        "each",
+        "for",
+        "is",
+        "of",
+        "or",
+        "pack",
+        "package",
+        "packages",
+        "packs",
+        "pkg",
+        "set",
+        "sized",
+        "the",
+        "tip",
+        "with",
+    }
+)
+REQUIREMENT_ATTRIBUTE_EVIDENCE_WORDS = frozenset(
+    {
+        "blunt",
+        "cardboard",
+        "chisel",
+        "college",
+        "fabric",
+        "fastener",
+        "fasteners",
+        "fine",
+        "graph",
+        "lined",
+        "metal",
+        "narrow",
+        "paper",
+        "plain",
+        "plastic",
+        "pointed",
+        "quad",
+        "regular",
+        "ruled",
+        "sharpened",
+        "spiral",
+        "standard",
+        "ultra",
+        "unsharpened",
+        "wide",
+        "wood",
+    }
+)
 # BR-31: different non-null product-defining values are different products.
 # Binding, brand preference, color, and packaging are incidental to merge identity.
 
 AMBIGUOUS_DESCRIPTOR_DEFAULT = "same_product"
 SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX = "ambiguous_descriptor_default:"
-# BR-32: an unclassifiable descriptor becomes one parent question; the stated
-# default treats the rows as one product because that is the smaller error.
+# BR-32 amended: "regular" means lined ruling for notebooks. The explicit
+# ambiguous-descriptor list is currently empty; unresolved residual wording
+# still becomes one same-product/different-products question under BR-43.
+
+# BR-43: descriptions differing only by quantity, filler, word order, brand,
+# or already-resolved attribute evidence do not ask an identity question.
+# Residual wording with no product-defining explanation asks exactly once.
+
+SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX = "same_product_override_source:"
+# BR-44: one resolved identity state drives the radio, rationale, and quantity
+# controls. If a parent merges rule-distinct products, retain the first complete
+# source-backed variant rather than synthesizing attributes across products.
+
+
+def quantity_preselection_rationale(
+    item_name: str,
+    combined_quantity: int,
+    plausible_annual_maximum: int,
+    selected_action: Literal["total", "largest"],
+) -> str:
+    """Generate BR-40's parent-facing quantity rationale."""
+
+    if selected_action == "total":
+        return (
+            "Two separate parts of the list ask for "
+            f"{item_name}. Added together, they come to "
+            f"{combined_quantity}, which is within the usual yearly amount "
+            f"of {plausible_annual_maximum} for one student."
+        )
+    return (
+        f"Added together, the list asks for {combined_quantity} {item_name}. "
+        "That is more than one student usually uses in a year, so the larger "
+        "single amount is preselected."
+    )
+
+
+def product_identity_rationale(
+    conflict_type: Literal[
+        "quantity_only",
+        "different_products",
+        "ambiguous",
+    ],
+    differences: Sequence[tuple[str, Sequence[str]]],
+) -> str:
+    """Generate BR-43/BR-45's default product-identity rationale."""
+
+    if conflict_type == "ambiguous":
+        return (
+            "The descriptions use different wording, but the list does not "
+            "name a product detail that settles whether they are the same "
+            "product."
+        )
+    if conflict_type == "quantity_only":
+        return (
+            "Both lines describe the same product; their wording does not "
+            "change what you would buy."
+        )
+    for field_name, values in differences:
+        normalized_values = tuple(
+            value.replace("-", " ") for value in values
+        )
+        if field_name == "ruling" and {
+            value.casefold() for value in normalized_values
+        } == {"graph", "lined"}:
+            return (
+                "Graph paper and lined paper are used for different work, "
+                "so the teacher likely wants both products."
+            )
+        if len(normalized_values) >= 2:
+            joined_values = (
+                f"{normalized_values[0]} and {normalized_values[1]}"
+                if len(normalized_values) == 2
+                else ", ".join(normalized_values[:-1])
+                + f", and {normalized_values[-1]}"
+            )
+            detail_name = field_name.replace("_", " ")
+            return (
+                f"The list names {joined_values} for {detail_name}. Those "
+                "details require different products, so the teacher likely "
+                "wants both."
+            )
+    return (
+        "The two lines require different product details, so the teacher "
+        "likely wants both products."
+    )
+
+
+def same_product_override_rationale(
+    source_name: str,
+    retained_details: Sequence[str],
+) -> str:
+    """Explain BR-44's source-backed result after a parent override."""
+
+    detail_text = (
+        "; ".join(retained_details)
+        if retained_details
+        else "the complete product description"
+    )
+    return (
+        f"You chose one product, so the cart will use {detail_text} from "
+        f"{source_name}. This keeps one real source description instead of "
+        "mixing details from different products."
+    )
+
+
+# BR-45: rationale uses the deterministic templates above and is visible only
+# while the rule's preselected identity or quantity option remains selected.
 
 CLASSROOM_SHARED_SCOPE = "shared"
 CLASSROOM_UNSPECIFIED_SCOPE_DEFAULT = "individual"

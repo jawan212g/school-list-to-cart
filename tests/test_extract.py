@@ -908,8 +908,8 @@ def test_production_schema_captures_product_defining_rulings(
     assert requirement.attributes.ruling == expected_ruling
 
 
-def test_regular_composition_descriptor_remains_explicitly_ambiguous() -> None:
-    """BR-32: regular is preserved for a parent question, not guessed."""
+def test_regular_composition_descriptor_means_lined_ruling() -> None:
+    """BR-43: regular notebook wording deterministically means lined."""
 
     requirement = Requirement(
         req_id="regular",
@@ -921,9 +921,9 @@ def test_regular_composition_descriptor_remains_explicitly_ambiguous() -> None:
         extraction_confidence=1.0,
     )
 
-    assert requirement.attributes.ruling is None
+    assert requirement.attributes.ruling == "lined"
     assert requirement.attributes.style is None
-    assert requirement.ambiguous_descriptors == ("regular",)
+    assert requirement.ambiguous_descriptors == ()
 
 
 def test_purchasable_requirement_rejects_quantity_only_source_text() -> None:

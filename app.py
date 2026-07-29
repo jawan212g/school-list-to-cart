@@ -104,6 +104,7 @@ from agent.rules import (
     NONPAGINATED_SOURCE_PAGE,
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     PARENT_EDITABLE_DETAIL_FIELDS,
+    SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX,
     SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
     SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX,
@@ -113,12 +114,16 @@ from agent.rules import (
     SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
     SUBSTITUTION_NONE,
     grade_token_identifier,
+    quantity_preselection_rationale as rule_quantity_preselection_rationale,
+    same_product_override_rationale as rule_same_product_override_rationale,
 )
 from agent.requirement_merge import (
     RequirementMergeResult,
     consolidate_extractions,
     item_decisions,
+    resolve_item_decision_state,
     requirement_source,
+    same_product_override_notice,
 )
 from agent.sections import (
     ResolvedSectionChoice,
@@ -3408,6 +3413,17 @@ def _source_document_button_label(document_name: str) -> str:
     return f"{document_name[:prefix_length]}{separator}{suffix}"
 
 
+def _source_reference_hover_text(reference: SourceReference) -> str:
+    """Expose BR-41's full document and page despite label truncation."""
+
+    page_text = (
+        f" · page {reference.page_number}"
+        if reference.page_number is not None
+        else ""
+    )
+    return f"View source · {reference.document_name}{page_text}"
+
+
 def _render_source_reference(
     st: Any,
     list_input: ListInput,
@@ -3441,6 +3457,8 @@ def _render_source_reference(
     )
     with st.popover(
         f"View source · {button_document_name}{page_text}",
+        help=_source_reference_hover_text(reference),
+        use_container_width=True,
     ):
         st.caption(
             escape_streamlit_dollars(
@@ -6193,6 +6211,44 @@ def review_system_decision_messages(
                 "The wording was ambiguous. It was treated as the same product "
                 "using the stated default."
             )
+        if decision.startswith(SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX):
+            source_req_id = decision.removeprefix(
+                SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX
+            )
+            retained_source = next(
+                (
+                    source
+                    for source in item.sources
+                    if source.source_req_id == source_req_id
+                ),
+                None,
+            )
+            source_name = (
+                retained_source.section_name
+                if retained_source is not None
+                and retained_source.section_name
+                else retained_source.document_name
+                if retained_source is not None
+                and retained_source.document_name
+                else "the first list section"
+            )
+            retained_details = []
+            if item.material:
+                retained_details.append(f"material: {item.material}")
+            if item.size:
+                retained_details.append(f"size: {item.size}")
+            retained_details.extend(
+                f"{ATTRIBUTE_DISPLAY_NAMES.get(field, field.replace('_', ' '))}: "
+                f"{value}"
+                for field, value in item.required_attributes.items()
+                if value not in (None, "", (), [])
+            )
+            messages.append(
+                rule_same_product_override_rationale(
+                    source_name,
+                    tuple(dict.fromkeys(retained_details)),
+                )
+            )
     if SYSTEM_DECISION_RECONCILED_BRAND in item.system_decisions:
         if item.brand:
             messages.append(
@@ -7466,17 +7522,11 @@ def quantity_quick_choice_values(
     """Build fixed-order BR-30/BR-40 choices from production evidence."""
 
     sources = tuple(interrupt.sources)
-    selected_suffix = " — selected"
     combined_quantity = int(interrupt.combined_quantity)
     values: dict[str, int | None] = {
         (
             f"**{combined_quantity}** — "
-            "both lists combined"
-            + (
-                selected_suffix
-                if interrupt.default_action == "total"
-                else ""
-            )
+            "Quantities from both lists added together"
         ): combined_quantity,
     }
     source_names = [
@@ -7491,42 +7541,57 @@ def quantity_quick_choice_values(
             source_location = (
                 f"{source_location} in {source.document_name}"
             )
-        is_selected_source = (
-            interrupt.default_action == "largest"
-            and source.quantity == interrupt.default_quantity
-            and not any(
-                "selected" in existing_label
-                for existing_label in values
-            )
-        )
         values[
-            f"**{source.quantity}** — {source_location} only"
-            + (selected_suffix if is_selected_source else "")
+            f"**{source.quantity}** — Quantity from {source_location}"
         ] = source.quantity
     values[MERGE_CUSTOM_QUANTITY_LABEL] = None
     return values
 
 
+def quantity_quick_choice_default_label(
+    interrupt: Any,
+    choices: Mapping[str, int | None],
+) -> str:
+    """Return BR-40's default without encoding it in the visible label."""
+
+    labels = tuple(choices)
+    if interrupt.default_action == "total":
+        return labels[0]
+    return next(
+        label
+        for label in labels[1:-1]
+        if choices[label] == interrupt.default_quantity
+    )
+
+
 def quantity_preselection_rationale(interrupt: Any) -> str:
-    """Explain BR-40's deterministic preselection in one plain sentence."""
+    """Expose rules.py's deterministic BR-40 rationale at the display edge."""
 
     item_name = REVIEW_PLURAL_ITEM_NAMES.get(
         interrupt.canonical_item,
         _item_display_name(interrupt.canonical_item).casefold(),
     )
-    combined_quantity = int(interrupt.combined_quantity)
-    maximum = int(interrupt.plausible_annual_maximum)
-    if interrupt.default_action == "total":
-        return (
-            f"Both lists combined comes to {combined_quantity} {item_name}, "
-            f"which is within the usual yearly amount of {maximum} for one "
-            "student, so both amounts are selected."
-        )
-    return (
-        f"Both lists combined comes to {combined_quantity} {item_name}, "
-        "which is more than one student usually needs in a year, so the "
-        "larger single amount is selected."
+    return rule_quantity_preselection_rationale(
+        item_name,
+        int(interrupt.combined_quantity),
+        int(interrupt.plausible_annual_maximum),
+        interrupt.default_action,
     )
+
+
+def visible_quantity_preselection_rationale(
+    interrupt: Any,
+    selected_label: str,
+    choices: Mapping[str, int | None],
+) -> str | None:
+    """Apply BR-45's hide-on-override policy to the quantity rationale."""
+
+    if selected_label != quantity_quick_choice_default_label(
+        interrupt,
+        choices,
+    ):
+        return None
+    return quantity_preselection_rationale(interrupt)
 
 
 def apply_merge_quick_choice(
@@ -7573,7 +7638,7 @@ def _render_merge_source_rows(
     """Show quantity, exact source line, and link-out in one readable row."""
 
     heading_quantity, heading_line, heading_source = st.columns(
-        [0.7, 3.5, 1.8]
+        [0.7, 3.1, 2.2]
     )
     heading_quantity.markdown("**Quantity**")
     heading_line.markdown("**What the list says**")
@@ -7584,7 +7649,7 @@ def _render_merge_source_rows(
     ):
         with st.container(border=True):
             quantity_column, line_column, source_column = st.columns(
-                [0.7, 3.5, 1.8]
+                [0.7, 3.1, 2.2]
             )
             quantity_column.write(str(row.quantity))
             line_column.write(
@@ -7625,10 +7690,41 @@ def _merge_product_difference(decision: Any) -> str:
     return "; ".join(parts) or "different required details"
 
 
-def _merge_identity_control_on_main(decision: Any) -> bool:
-    """BR-37: only an ambiguous descriptor asks on the main card."""
+MERGE_IDENTITY_LABELS = {
+    CONFLICT_IDENTITY_SAME: "The same product",
+    CONFLICT_IDENTITY_DIFFERENT: "Different products",
+}
 
-    return decision.conflict_type == "ambiguous"
+
+def resolve_merge_identity_widget_state(
+    state: MutableMapping[str, Any],
+    decision: Any,
+    identity_key: str,
+) -> Any:
+    """Reconcile Streamlit state with BR-44's production decision facts."""
+
+    default_state = resolve_item_decision_state(decision)
+    fingerprint_key = f"{identity_key}:facts"
+    if state.get(fingerprint_key) != default_state.state_fingerprint:
+        state[identity_key] = MERGE_IDENTITY_LABELS[
+            default_state.default_identity
+        ]
+        state[fingerprint_key] = default_state.state_fingerprint
+    selected_label = str(
+        state.get(
+            identity_key,
+            MERGE_IDENTITY_LABELS[default_state.default_identity],
+        )
+    )
+    selected_identity = next(
+        (
+            identity
+            for identity, label in MERGE_IDENTITY_LABELS.items()
+            if label == selected_label
+        ),
+        default_state.default_identity,
+    )
+    return resolve_item_decision_state(decision, selected_identity)
 
 
 def _render_merge_quantity_controls(
@@ -7640,16 +7736,16 @@ def _render_merge_quantity_controls(
     if interrupt is None:
         return None
     quick_choices = quantity_quick_choice_values(interrupt)
+    default_choice_label = quantity_quick_choice_default_label(
+        interrupt,
+        quick_choices,
+    )
     choice_key = f"{interrupt.interrupt_id}:choice"
     quantity_key = f"{interrupt.interrupt_id}:quantity"
     custom_pending_key = f"{interrupt.interrupt_id}:custom-pending"
     quantity_keys = {interrupt.interrupt_id: quantity_key}
-    if choice_key not in st.session_state:
-        st.session_state[choice_key] = next(
-            label
-            for label in quick_choices
-            if "selected" in label
-        )
+    if st.session_state.get(choice_key) not in quick_choices:
+        st.session_state[choice_key] = default_choice_label
     if quantity_key not in st.session_state:
         st.session_state[quantity_key] = interrupt.default_quantity
     st.radio(
@@ -7665,11 +7761,18 @@ def _render_merge_quantity_controls(
             custom_pending_key,
         ),
     )
-    st.caption(
-        escape_streamlit_dollars(
-            quantity_preselection_rationale(interrupt)
-        )
+    visible_rationale = visible_quantity_preselection_rationale(
+        interrupt,
+        str(st.session_state[choice_key]),
+        quick_choices,
     )
+    if visible_rationale is not None:
+        st.caption(
+            escape_streamlit_dollars(
+                "Rationale: "
+                + visible_rationale
+            )
+        )
     quantity_container = (
         st.container(border=True)
         if bool(st.session_state.get(custom_pending_key))
@@ -7698,7 +7801,7 @@ def _render_merge_quantity_controls(
         "custom"
         if selected_label == MERGE_CUSTOM_QUANTITY_LABEL
         else "total"
-        if "both lists combined" in selected_label
+        if "added together" in selected_label
         else "source"
     )
     return action, selected_quantity
@@ -7834,6 +7937,80 @@ def _render_requirement_merge(st: Any) -> None:
                     "difference or could simply be general wording."
                 )
 
+            list_input = input_by_child.get(decision.child_id)
+            _render_merge_source_rows(st, decision, list_input)
+
+            identity_key = f"{decision.decision_id}:same-or-different"
+            resolved_identity = resolve_merge_identity_widget_state(
+                st.session_state,
+                decision,
+                identity_key,
+            )
+            identity_labels = tuple(MERGE_IDENTITY_LABELS.values())
+            identity_question = (
+                "Do these list lines describe the same product or different "
+                "products?"
+            )
+            if resolved_identity.show_identity_on_main:
+                identity_choice = st.radio(
+                    identity_question,
+                    identity_labels,
+                    key=identity_key,
+                )
+            else:
+                identity_choice = str(st.session_state[identity_key])
+                with st.expander(
+                    "More detail · same product or different products"
+                ):
+                    identity_choice = st.radio(
+                        identity_question,
+                        identity_labels,
+                        key=identity_key,
+                    )
+            selected_identity = next(
+                identity
+                for identity, label in MERGE_IDENTITY_LABELS.items()
+                if label == identity_choice
+            )
+            resolved_identity = resolve_item_decision_state(
+                decision,
+                selected_identity,
+            )
+            product_identity_choices[decision.decision_id] = (
+                resolved_identity.selected_identity
+            )
+            if resolved_identity.rationale is not None:
+                st.caption(
+                    escape_streamlit_dollars(
+                        f"Rationale: {resolved_identity.rationale}"
+                    )
+                )
+            if (
+                resolved_identity.selected_identity
+                == CONFLICT_IDENTITY_SAME
+                and not resolved_identity.is_preselected
+            ):
+                override_notice = same_product_override_notice(decision)
+                if override_notice is not None:
+                    st.caption(
+                        escape_streamlit_dollars(
+                            f"Result: {override_notice}"
+                        )
+                    )
+
+            pending_selection: tuple[str, int | None] | None = None
+            pending_variants: dict[str, int] | None = None
+            if resolved_identity.quantity_control == "variants":
+                pending_variants = _render_merge_variant_controls(
+                    st,
+                    decision,
+                )
+            else:
+                pending_selection = _render_merge_quantity_controls(
+                    st,
+                    decision.quantity_interrupt,
+                )
+
             exclude_key = f"{decision.decision_id}:exclude"
             st.session_state.setdefault(exclude_key, False)
             excluded = st.checkbox(
@@ -7844,79 +8021,25 @@ def _render_requirement_merge(st: Any) -> None:
                     "shopping plan."
                 ),
             )
-            list_input = input_by_child.get(decision.child_id)
-            _render_merge_source_rows(st, decision, list_input)
             if excluded:
                 excluded_decision_ids.add(decision.decision_id)
                 st.caption(
-                    "This item will stay out of the cart. You do not need to "
-                    "choose a quantity."
+                    "This item will stay out of the cart."
                 )
                 continue
-
-            identity_key = f"{decision.decision_id}:same-or-different"
-            identity_labels = (
-                "The same item",
-                "Two different kinds",
-            )
-            if identity_key not in st.session_state:
-                st.session_state[identity_key] = (
-                    identity_labels[0]
-                    if decision.default_identity == CONFLICT_IDENTITY_SAME
-                    else identity_labels[1]
+            if pending_variants is not None:
+                variant_quantity_choices[decision.decision_id] = (
+                    pending_variants
                 )
-            if _merge_identity_control_on_main(decision):
-                identity_choice = st.radio(
-                    "Do these describe the same item?",
-                    identity_labels,
-                    key=identity_key,
-                )
-            else:
-                identity_choice = str(st.session_state[identity_key])
-                with st.expander(
-                    "More detail · change whether these are one item or two"
-                ):
-                    identity_choice = st.radio(
-                        "Do these describe the same item?",
-                        identity_labels,
-                        key=identity_key,
-                    )
-            selected_identity = (
-                CONFLICT_IDENTITY_SAME
-                if identity_choice == identity_labels[0]
-                else CONFLICT_IDENTITY_DIFFERENT
-            )
-            product_identity_choices[decision.decision_id] = (
-                selected_identity
-            )
-            if decision.conflict_type == "ambiguous":
-                st.caption(
-                    "Default: The same item. This is an assumption because "
-                    "the wording does not establish a product difference."
-                )
-            elif decision.conflict_type == "different_products":
-                st.caption(
-                    "Default: Two different kinds, based on the product "
-                    "details written in the list."
-                )
-            else:
-                st.caption(
-                    "Default: The same item, because the normalized item "
-                    "description matches."
-                )
-
-            if selected_identity == CONFLICT_IDENTITY_DIFFERENT:
-                selected_variants = _render_merge_variant_controls(st, decision)
-                variant_quantity_choices[decision.decision_id] = selected_variants
-                if not any(selected_variants.values()):
+                if not any(pending_variants.values()):
                     validation_errors.append(item_name)
-            else:
-                selection = _render_merge_quantity_controls(
-                    st,
-                    decision.quantity_interrupt,
+            elif (
+                pending_selection is not None
+                and decision.quantity_interrupt is not None
+            ):
+                selections[decision.quantity_interrupt.interrupt_id] = (
+                    pending_selection
                 )
-                if selection is not None and decision.quantity_interrupt is not None:
-                    selections[decision.quantity_interrupt.interrupt_id] = selection
 
     submitted = st.button(
         "Continue with these choices",

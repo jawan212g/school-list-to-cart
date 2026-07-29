@@ -9,7 +9,10 @@ from agent.pipeline import PipelineSession, run_pipeline_from_confirmed_extracti
 from agent.requirement_merge import (
     consolidate_requirements,
     item_decisions,
+    resolve_item_decision_state,
+    same_product_override_notice,
 )
+from agent.rules import AMBIGUOUS_PRODUCT_DESCRIPTORS
 from agent.aggregate import aggregate_requirements
 from agent.optimize import OptimizationConfig, optimize_cart
 from agent.review import confirmed_requirements, organize_extractions
@@ -232,8 +235,8 @@ def test_scissors_preferences_merge_without_inventing_brand_lock() -> None:
     assert result.constraint_interrupts == ()
 
 
-def test_graph_and_regular_composition_books_require_ambiguity_choice() -> None:
-    """BR-31/BR-32: regular does not silently absorb graph-paper identity."""
+def test_graph_and_regular_composition_books_are_different_products() -> None:
+    """BR-31/BR-43: regular is lined and differs from graph paper."""
 
     result = consolidate_requirements(
         (
@@ -263,13 +266,90 @@ def test_graph_and_regular_composition_books_require_ambiguity_choice() -> None:
     )
 
     decision = item_decisions(result)[0]
-    assert decision.conflict_type == "ambiguous"
-    assert decision.default_identity == "same"
+    assert decision.conflict_type == "different_products"
+    assert decision.default_identity == "different"
     assert tuple(source.page_number for source in decision.sources) == (2, 3)
     assert decision.variants[0].attributes.ruling == "graph"
-    assert decision.variants[1].details == (
-        ("ambiguous_descriptor", "regular"),
+    assert decision.variants[1].attributes.ruling == "lined"
+    assert tuple(
+        variant.default_quantity for variant in decision.variants
+    ) == (1, 4)
+    resolved = resolve_item_decision_state(decision)
+    assert resolved.quantity_control == "variants"
+    assert resolved.rationale == (
+        "Graph paper and lined paper are used for different work, so the "
+        "teacher likely wants both products."
     )
+    assert AMBIGUOUS_PRODUCT_DESCRIPTORS == frozenset()
+
+
+def test_identical_descriptions_never_ask_product_identity() -> None:
+    """BR-43: identical parent-facing wording is quantity-only."""
+
+    result = consolidate_requirements(
+        (
+            Requirement(
+                req_id="one",
+                child_id="child-1",
+                raw_text="1 Box of facial tissues",
+                canonical_item="tissues",
+                quantity=1,
+                source_document="district.pdf",
+                source_section="Grade 5",
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="two",
+                child_id="child-1",
+                raw_text="2 Box of facial tissues",
+                canonical_item="tissues",
+                quantity=2,
+                source_document="district.pdf",
+                source_section="Highly Capable",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    decision = item_decisions(result)[0]
+    assert decision.conflict_type == "quantity_only"
+    assert not resolve_item_decision_state(decision).show_identity_on_main
+
+
+def test_word_order_and_resolved_details_never_ask_product_identity() -> None:
+    """BR-43: word order and one stated compatible detail do not interrupt."""
+
+    result = consolidate_requirements(
+        (
+            Requirement(
+                req_id="one",
+                child_id="child-1",
+                raw_text="12 Ticonderoga sharpened pencils - #2",
+                canonical_item="pencils",
+                quantity=12,
+                brand_lock="Ticonderoga",
+                attributes={"sharpened": True},
+                source_document="district.pdf",
+                source_section="Grade 5",
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="two",
+                child_id="child-1",
+                raw_text="24 Ticonderoga #2 pencils",
+                canonical_item="pencils",
+                quantity=24,
+                brand_lock="Ticonderoga",
+                source_document="district.pdf",
+                source_section="Highly Capable",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    decision = item_decisions(result)[0]
+    assert decision.conflict_type == "quantity_only"
+    assert not resolve_item_decision_state(decision).show_identity_on_main
 
 
 def test_different_non_null_rulings_are_different_products() -> None:
@@ -707,7 +787,10 @@ def test_parent_can_override_type_b_to_one_product() -> None:
             raw_text="2 plastic pocket folders with fasteners",
             canonical_item="folders",
             quantity=2,
-            attributes={"material": "plastic"},
+            attributes={
+                "material": "plastic",
+                "connector": "fasteners",
+            },
             source_document="district.pdf",
             source_section="Highly Capable Class",
             source_page=3,
@@ -732,6 +815,13 @@ def test_parent_can_override_type_b_to_one_product() -> None:
     assert len(merged.requirements) == 1
     assert merged.requirements[0].quantity == 2
     assert len(merged.requirements[0].sources) == 2
+    assert merged.requirements[0].attributes.material == "cardboard"
+    assert merged.requirements[0].attributes.connector is None
+    assert same_product_override_notice(decision) == (
+        "You chose one product, so the cart will use material: cardboard "
+        "from 5th Grade. This keeps one real source description instead of "
+        "mixing details from different products."
+    )
 
 
 def test_parent_can_override_type_a_to_two_products() -> None:

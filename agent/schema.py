@@ -16,6 +16,7 @@ from agent.rules import (
     CORRECTED_EXTRACTION_CONFIDENCE,
     ITEM_FULFILLMENT_PREFERENCE_DEFAULT,
     NONPAGINATED_SOURCE_PAGE,
+    NOTEBOOK_REGULAR_RULING,
     PACKAGE_QUANTITY_STATE_DEFAULT,
     QUANTITY_ONLY_SOURCE_LINE_PATTERN,
     explicit_package_count,
@@ -119,9 +120,17 @@ def _correct_attribute_fields(
             corrected["style"] = None
             changed = True
 
-    if canonical_item == "composition_notebooks" and style == "regular":
-        corrected["style"] = None
-        changed = True
+    if (
+        canonical_item
+        in {"composition_notebooks", "spiral_notebooks"}
+        and re.search(r"\bregular\b", raw_evidence)
+    ):
+        if corrected.get("ruling") != NOTEBOOK_REGULAR_RULING:
+            corrected["ruling"] = NOTEBOOK_REGULAR_RULING
+            changed = True
+        if style == "regular":
+            corrected["style"] = None
+            changed = True
 
     if re.search(r"\bultra[\s-]+fine(?:\s+tip)?\b", raw_evidence):
         if corrected.get("tip_style") != "ultra-fine":
@@ -397,11 +406,18 @@ class Requirement(BaseModel):
             if normalized.get("brand_lock") is not None
             else None
         )
-        normalized["brand_hint"] = (
+        brand_hint = (
             str(normalized["brand_hint"])
             if normalized.get("brand_hint") is not None
             else preferred_brand_from_source(raw_text, proposed_brand)
         )
+        if (
+            brand_hint is None
+            and proposed_brand is not None
+            and proposed_brand.casefold() in raw_text.casefold()
+        ):
+            brand_hint = proposed_brand
+        normalized["brand_hint"] = brand_hint
         normalized["brand_lock"] = required_brand_from_source(
             raw_text,
             proposed_brand,

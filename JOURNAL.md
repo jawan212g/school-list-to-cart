@@ -2199,3 +2199,92 @@ quantity conflicts deterministic and easier for a parent to resolve.
 Deploy Part A-8 and visually verify one unchecked Highly Capable section, one
 ambiguous composition-notebook conflict, and one source filename longer than
 the column before expanding scope beyond Lists and Personalize.
+
+## 2026-07-29 — Part A-9 identity state and deterministic rationale
+
+### Objective
+
+Make the Lists conflict card's rationale, identity selection, and quantity
+controls agree; narrow identity questions to genuinely unresolved wording; and
+keep source-backed product identity when a parent merges different products.
+
+### Diagnosis before the fix
+
+- `RequirementItemDecision.default_identity` was the authoritative
+  deterministic classification.
+- The rationale was generated from that fresh classification, but Streamlit
+  could retain an older radio value under the same widget key. The quantity
+  control then followed the stale radio, producing the contradictory folders
+  card.
+- When a parent merged different products, constraint reconciliation could
+  keep the first conflicting value while also retaining a compatible attribute
+  from another source. That could synthesize a folder description not present
+  in either source.
+
+### Work completed
+
+- Added one fingerprinted resolved identity state consumed by the radio,
+  rationale, and quantity-control renderer. Changed source facts reset stale
+  widget state to the current deterministic default.
+- Defined notebook “regular” as lined ruling and removed it from the explicit
+  ambiguous-descriptor set, which is now empty.
+- Limited the main identity question to residual description wording that
+  remains different after quantities, filler, aliases, brand, exclusions, and
+  resolved attributes are removed.
+- Reframed identity controls around same versus different products, removed
+  selection suffixes from option labels, and hid default rationale after an
+  override.
+- Centralized all new rationale copy as deterministic templates in
+  `agent/rules.py`.
+- Moved the exclusion checkbox beneath the source evidence and quantity
+  controls.
+- Widened the source column and exposed the full document and page in the
+  source control's hover help while keeping BR-41's compact visible label.
+- Changed a same-product override of rule-distinct products to retain the first
+  complete source-backed variant, with all provenance preserved and a
+  deterministic explanation carried into Personalize.
+
+### Business rules
+
+- Amended BR-32: “regular” means lined ruling for notebooks; the explicit
+  ambiguous-descriptor set is empty.
+- Amended BR-41: the 30-character source label retains full source text through
+  hover help.
+- Added BR-43: normalized-equivalent descriptions do not ask an identity
+  question; unresolved residual wording asks once.
+- Added BR-44: one resolved state drives identity presentation and quantity
+  behavior; same-product overrides retain one complete source-backed variant.
+- Added BR-45: rationale uses deterministic rule templates and disappears when
+  the parent overrides the preselection.
+
+### Verification
+
+- Focused A-9 suite:
+  `py -3.12-arm64 -m pytest -q tests/test_requirement_merge.py tests/test_app.py tests/test_extract.py`
+  — 153 passed.
+- Full suite: `py -3.12-arm64 -m pytest -q` — 332 passed, 1 skipped.
+- OpenAI provider using `gpt-5.6-sol`: Grade 2 extracted in 58.53 seconds and
+  Grade 5 in 59.19 seconds, with 59.19 seconds concurrent wall time.
+- The $150 Maple run landed at $109.83 with three raw interrupts.
+- The $85 Maple run had the same $109.83 required cart and a $69.24
+  recommended plan with four raw interrupts.
+- Both runs had zero requirement-merge interrupts. The difference from A-8's
+  $110.04 and $78.67 figures is therefore not caused by A-9's deterministic
+  merge changes; it reflects current nondeterministic model-assisted extraction
+  and matching output. There is not enough retained prior model evidence to
+  claim that either live cart is more correct.
+- Static AST inspection found no model-like calls in `agent/optimize.py`.
+  `agent/extract.py` had only type-union `BitOr` nodes and no arithmetic
+  operations; neither architecture file was modified.
+
+### Limitations
+
+- Streamlit is unavailable in this Windows ARM64 environment, so source hover,
+  column width, and final card spacing still need a deployed visual check.
+- Live model-assisted baselines remain nondeterministic and should not be used
+  as calculation-only golden tests.
+
+### Recommended next step
+
+Deploy Part A-9 and visually verify the folders, composition notebook, exclusion,
+and long-filename source interactions before changing another screen.
