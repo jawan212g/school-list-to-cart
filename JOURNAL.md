@@ -3184,3 +3184,46 @@ the brand table's usual product category.
 Review whether other known out-of-catalog school-supply nouns should be
 recognized explicitly so they remain visible even when a model misclassifies
 them into an available category.
+
+## 2026-07-29 — Single-entry budget choices
+
+### Goal
+
+Remove the redundant distinction between combined and per-entry budgets when
+the session contains exactly one student or classroom, without losing a
+parent-entered amount when the entry count changes.
+
+### Work completed
+
+- The production Budget screen now presents one entry-specific budget choice
+  plus `No set budget` when the session has exactly one entry.
+- Added plain possessive labels, including names ending in `s`, and neutral
+  wording when the entry has no label.
+- Kept the existing three budget choices for sessions with two or more entries.
+- Resolved the available option set and durable selected mode together so a
+  stale multi-entry mode cannot remain selected in a one-entry session.
+- Preserved a combined amount when expanding from one entry to several.
+- When a per-entry session collapses to one entry, moved the remaining entry's
+  amount into the equivalent single budget and preserved its edited status.
+- Added production-renderer tests for labels, defaults, and both entry-count
+  transitions.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused setup suite:
+  `py -3.12-arm64 -m pytest -q tests/test_app.py tests/test_streamlit_lifecycle.py`
+  -> 109 passed, 1 skipped.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 416 passed, 1 skipped in
+  3.07 seconds.
+
+### Problems or limitations
+
+- The real Streamlit lifecycle test module remains skipped locally because
+  Streamlit is unavailable on this Windows ARM64 machine. The added tests call
+  the same `_render_budget_step` function used by the screen.

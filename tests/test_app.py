@@ -1443,6 +1443,260 @@ def test_budget_screen_recalculates_defaults_but_preserves_parent_edits() -> Non
     assert BudgetStreamlit.session_state["combined_budget_text"] == "800.00"
 
 
+def test_budget_screen_renders_entry_aware_mode_labels() -> None:
+    """FR-03: the production Budget screen removes a redundant one-entry mode."""
+
+    rendered_options: list[tuple[str, ...]] = []
+
+    class ButtonColumn:
+        @staticmethod
+        def button(*args: object, **kwargs: object) -> bool:
+            del args, kwargs
+            return False
+
+    class BudgetStreamlit:
+        session_state: dict[str, object] = {}
+
+        @staticmethod
+        def caption(value: str) -> None:
+            del value
+
+        @classmethod
+        def radio(
+            cls,
+            label: str,
+            options: tuple[str, ...],
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label
+            formatter = kwargs["format_func"]
+            rendered_options.append(
+                tuple(formatter(option) for option in options)
+            )
+            return str(cls.session_state[key])
+
+        @classmethod
+        def text_input(
+            cls,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            return str(cls.session_state[key])
+
+        @staticmethod
+        def info(value: str) -> None:
+            del value
+
+        @staticmethod
+        def error(value: str) -> None:
+            del value
+
+        @staticmethod
+        def columns(
+            specification: object,
+        ) -> tuple[ButtonColumn, ButtonColumn]:
+            assert specification == 2
+            return ButtonColumn(), ButtonColumn()
+
+    cases = (
+        ("Kevin", "Student", 1, ("Kevin's budget", "No set budget")),
+        (
+            "Grade 2 homeroom",
+            "Classroom",
+            10,
+            ("Grade 2 homeroom's budget", "No set budget"),
+        ),
+        ("James", "Student", 1, ("James' budget", "No set budget")),
+        (
+            "",
+            "Student",
+            1,
+            ("Budget for this student or classroom", "No set budget"),
+        ),
+    )
+    for label, entity_type, student_count, expected_options in cases:
+        rendered_options.clear()
+        BudgetStreamlit.session_state = {
+            "child_count": 1,
+            "entity_type_0": entity_type,
+            "child_label_0": label,
+            "child_grade_0": "Grade 2",
+            "student_count_0": student_count,
+            "budget_mode_label": "One combined budget",
+            "previous_budget_mode_label": "One combined budget",
+            "budget_validation_attempted": False,
+            "budget_validation_errors": {},
+        }
+
+        app._render_budget_step(BudgetStreamlit())
+
+        assert rendered_options == [expected_options]
+
+    rendered_options.clear()
+    BudgetStreamlit.session_state = {
+        "child_count": 2,
+        "entity_type_0": "Student",
+        "child_label_0": "Kevin",
+        "child_grade_0": "Grade 2",
+        "entity_type_1": "Student",
+        "child_label_1": "Maya",
+        "child_grade_1": "Grade 5",
+        "budget_mode_label": "One combined budget",
+        "previous_budget_mode_label": "One combined budget",
+        "budget_validation_attempted": False,
+        "budget_validation_errors": {},
+    }
+
+    app._render_budget_step(BudgetStreamlit())
+
+    assert rendered_options == [
+        (
+            "One combined budget",
+            "A budget for each student or classroom",
+            "No set budget",
+        )
+    ]
+
+
+def test_budget_screen_maps_entry_count_changes_without_losing_amount() -> None:
+    """FR-03: one/many option changes retain the parent's durable amount."""
+
+    rendered_options: list[tuple[str, ...]] = []
+
+    class ButtonColumn:
+        @staticmethod
+        def button(*args: object, **kwargs: object) -> bool:
+            del args, kwargs
+            return False
+
+    class BudgetStreamlit:
+        session_state: dict[str, object] = {
+            "child_count": 1,
+            "entity_type_0": "Student",
+            "child_label_0": "Kevin",
+            "child_grade_0": "Grade 2",
+            "budget_mode_label": "One combined budget",
+            "previous_budget_mode_label": "One combined budget",
+            "combined_budget_text": "123.45",
+            "intake_widget_touched::combined_budget_text": True,
+            "budget_validation_attempted": False,
+            "budget_validation_errors": {},
+        }
+
+        @staticmethod
+        def caption(value: str) -> None:
+            del value
+
+        @classmethod
+        def radio(
+            cls,
+            label: str,
+            options: tuple[str, ...],
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label
+            formatter = kwargs["format_func"]
+            rendered_options.append(
+                tuple(formatter(option) for option in options)
+            )
+            return str(cls.session_state[key])
+
+        @classmethod
+        def text_input(
+            cls,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            return str(cls.session_state[key])
+
+        @staticmethod
+        def info(value: str) -> None:
+            del value
+
+        @staticmethod
+        def error(value: str) -> None:
+            del value
+
+        @staticmethod
+        def columns(
+            specification: object,
+        ) -> tuple[ButtonColumn, ButtonColumn]:
+            assert specification == 2
+            return ButtonColumn(), ButtonColumn()
+
+    app._render_budget_step(BudgetStreamlit())
+    assert BudgetStreamlit.session_state["combined_budget_text"] == "123.45"
+
+    BudgetStreamlit.session_state.update(
+        {
+            "child_count": 2,
+            "entity_type_1": "Student",
+            "child_label_1": "Maya",
+            "child_grade_1": "Grade 5",
+        }
+    )
+    rendered_options.clear()
+    app._render_budget_step(BudgetStreamlit())
+    assert rendered_options[0] == (
+        "One combined budget",
+        "A budget for each student or classroom",
+        "No set budget",
+    )
+    assert BudgetStreamlit.session_state["budget_mode_label"] == (
+        "One combined budget"
+    )
+    assert BudgetStreamlit.session_state["combined_budget_text"] == "123.45"
+
+    BudgetStreamlit.session_state["budget_mode_label"] = (
+        "A budget for each student or classroom"
+    )
+    app._render_budget_step(BudgetStreamlit())
+    BudgetStreamlit.session_state["budget_0"] = "50.00"
+    BudgetStreamlit.session_state[
+        "intake_widget_touched::budget_0"
+    ] = True
+    app.clear_inactive_intake_entries(BudgetStreamlit.session_state, 1)
+    BudgetStreamlit.session_state["child_count"] = 1
+    rendered_options.clear()
+
+    app._render_budget_step(BudgetStreamlit())
+
+    assert rendered_options[0] == ("Kevin's budget", "No set budget")
+    assert BudgetStreamlit.session_state["budget_mode_label"] == (
+        "One combined budget"
+    )
+    assert BudgetStreamlit.session_state["combined_budget_text"] == "50.00"
+    assert BudgetStreamlit.session_state[
+        "intake_widget_touched::combined_budget_text"
+    ] is True
+    assert "budget_0" not in BudgetStreamlit.session_state
+
+    BudgetStreamlit.session_state.update(
+        {
+            "child_count": 2,
+            "entity_type_1": "Student",
+            "child_label_1": "Maya",
+            "child_grade_1": "Grade 5",
+        }
+    )
+    rendered_options.clear()
+    app._render_budget_step(BudgetStreamlit())
+    assert BudgetStreamlit.session_state["budget_mode_label"] == (
+        "One combined budget"
+    )
+    assert BudgetStreamlit.session_state["combined_budget_text"] == "50.00"
+
+
 def test_no_budget_intake_has_no_ceiling_or_allocations() -> None:
     """No-budget intake stays explicit and is never the default option."""
 
@@ -1460,16 +1714,9 @@ def test_no_budget_intake_has_no_ceiling_or_allocations() -> None:
         },
         students,
     )
-    budget_source = inspect.getsource(app._render_budget_step)
-
     assert mode == "none"
     assert total is None
     assert allocations == {}
-    assert budget_source.index('"One combined budget"') < (
-        budget_source.index(
-            "NO_SET_BUDGET_LABEL"
-        )
-    )
 
 
 def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
@@ -1523,7 +1770,6 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert 'st.subheader("Budget")' not in budget_source
     assert "Step 2" not in budget_source
     assert "A budget for each student or classroom" in budget_source
-    assert "NO_SET_BUDGET_LABEL" in budget_source
     assert app.NO_SET_BUDGET_LABEL == "No set budget"
     assert "budget_validation_attempted" in budget_source
     assert "disabled=" not in budget_source

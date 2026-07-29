@@ -4205,6 +4205,70 @@ def sync_untouched_budget_starting_values(
         state[NAVIGATION_STATE_PREFIX + key] = value
 
 
+def _single_entry_budget_label(entry_label: object) -> str:
+    """Return a plain possessive label for one FR-03 budget choice."""
+
+    label = str(entry_label or "").strip()
+    if not label:
+        return "Budget for this student or classroom"
+    suffix = "'" if label.casefold().endswith("s") else "'s"
+    return f"{label}{suffix} budget"
+
+
+def resolve_budget_mode_control(
+    state: MutableMapping[str, Any],
+    entries: Sequence[Mapping[str, Any]],
+) -> tuple[tuple[str, ...], Mapping[str, str]]:
+    """Resolve one FR-03 option set and its durable selected mode together."""
+
+    combined_mode = "One combined budget"
+    per_entry_mode = "A budget for each student or classroom"
+    if len(entries) != 1:
+        options = (combined_mode, per_entry_mode, NO_SET_BUDGET_LABEL)
+        selected = str(state.get("budget_mode_label", combined_mode))
+        if selected not in options:
+            selected = combined_mode
+        state["budget_mode_label"] = selected
+        state[NAVIGATION_STATE_PREFIX + "budget_mode_label"] = selected
+        return options, {option: option for option in options}
+
+    selected = str(state.get("budget_mode_label", combined_mode))
+    if selected == per_entry_mode:
+        allocation_key = "budget_0"
+        allocation = str(
+            state.get(
+                allocation_key,
+                state.get(NAVIGATION_STATE_PREFIX + allocation_key, ""),
+            )
+        ).strip()
+        if allocation:
+            state["combined_budget_text"] = allocation
+            state[
+                NAVIGATION_STATE_PREFIX + "combined_budget_text"
+            ] = allocation
+            if bool(
+                state.get(
+                    INTAKE_WIDGET_TOUCHED_PREFIX + allocation_key,
+                    False,
+                )
+            ):
+                state[
+                    INTAKE_WIDGET_TOUCHED_PREFIX + "combined_budget_text"
+                ] = True
+        _delete_navigation_value(state, allocation_key)
+        selected = combined_mode
+        state["previous_budget_mode_label"] = combined_mode
+    elif selected not in {combined_mode, NO_SET_BUDGET_LABEL}:
+        selected = combined_mode
+    state["budget_mode_label"] = selected
+    state[NAVIGATION_STATE_PREFIX + "budget_mode_label"] = selected
+    options = (combined_mode, NO_SET_BUDGET_LABEL)
+    return options, {
+        combined_mode: _single_entry_budget_label(entries[0].get("label")),
+        NO_SET_BUDGET_LABEL: NO_SET_BUDGET_LABEL,
+    }
+
+
 def prepare_budget_mode_drafts(
     state: MutableMapping[str, Any],
     current_mode: str,
@@ -5007,9 +5071,19 @@ def _render_budget_step(st: Any) -> None:
         st.session_state,
         int(st.session_state["child_count"]),
     )
+    budget_mode_options, budget_mode_labels = resolve_budget_mode_control(
+        st.session_state,
+        students,
+    )
     st.caption(
-        "Choose one total, one amount for each student or classroom, or no "
-        "set budget."
+        (
+            "Choose a budget for this student or classroom, or no set budget."
+            if len(students) == 1
+            else (
+                "Choose one total, one amount for each student or classroom, "
+                "or no set budget."
+            )
+        )
     )
     budget_mode_widget_key = mount_intake_widget_value(
         st.session_state,
@@ -5018,13 +5092,10 @@ def _render_budget_step(st: Any) -> None:
     )
     budget_mode_label = st.radio(
         "Budget setup",
-        (
-            "One combined budget",
-            "A budget for each student or classroom",
-            NO_SET_BUDGET_LABEL,
-        ),
+        budget_mode_options,
         horizontal=True,
         key=budget_mode_widget_key,
+        format_func=budget_mode_labels.__getitem__,
         on_change=commit_intake_widget_value,
         args=("budget_mode_label",),
     )
@@ -5047,13 +5118,20 @@ def _render_budget_step(st: Any) -> None:
         {},
     )
     if budget_mode_label == "One combined budget":
+        combined_field_label = (
+            budget_mode_labels["One combined budget"]
+            if len(students) == 1
+            else "Combined budget"
+        )
         combined_budget_widget_key = mount_intake_widget_value(
             st.session_state,
             "combined_budget_text",
             DEFAULT_BUDGET_TEXT,
         )
         combined_budget = st.text_input(
-            r"Combined budget (\$)",
+            escape_streamlit_dollars(
+                f"{combined_field_label} (\\$)"
+            ),
             key=combined_budget_widget_key,
             on_change=commit_intake_widget_value,
             args=("combined_budget_text",),
