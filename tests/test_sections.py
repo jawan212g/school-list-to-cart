@@ -115,6 +115,28 @@ def test_section_explanation_and_submitted_selection_share_one_state() -> None:
     assert "grade-1-es" in selection.ignored_section_ids
 
 
+def test_section_screen_separates_selected_from_unresolved_sources() -> None:
+    """A8: an unchecked ungraded section appears only as a possibility."""
+
+    resolution = resolve_document_sections(
+        _district_structure(),
+        "Grade 1",
+    )
+    choice = build_resolved_section_choice(resolution)
+
+    selected, possible = app._section_display_groups(resolution, choice)
+
+    assert tuple(section.section_id for section in selected) == (
+        "grade-1-en",
+    )
+    assert tuple(section.section_id for section in possible) == (
+        "highly-capable-en",
+    )
+    assert not {
+        section.section_id for section in selected
+    }.intersection(section.section_id for section in possible)
+
+
 def test_translation_context_names_detected_languages() -> None:
     """BR-16: parent copy names languages instead of internal mechanics."""
 

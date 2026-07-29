@@ -1,5 +1,7 @@
 """Named business-rule constants from BRD Section 9.7."""
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 import re
 from typing import Literal
@@ -56,6 +58,9 @@ INTERRUPT_DESIGN_FAILURE_COUNT = 6  # BR-10: more than six is a failure.
 
 MODEL_CALL_TIMEOUT_SECONDS = 30.0  # Operational ceiling for one model request.
 VISION_MODEL_CALL_TIMEOUT_SECONDS = 120.0  # Rendered-page vision requests need more time.
+EXTRACTION_TEXT_MODEL_TIMEOUT_SECONDS = 120.0
+# BR-39: text extraction receives the same 120-second ceiling as rendered-page
+# vision because observed structured reads routinely exceed 60 seconds.
 MODEL_CALL_MAX_RETRIES = 1  # One transient-service retry per model request.
 MODEL_MAX_CONCURRENCY = 4  # Bound parallel model requests in one session.
 BUDGET_ALTERNATIVE_PLAN_COUNT = 2  # At most two whole-plan alternatives.
@@ -91,9 +96,9 @@ NONPAGINATED_SOURCE_PAGE = 1
 REQUIREMENT_MERGE_EQUAL_QUANTITY_ACTION = "use_once"
 # BR-20: the same normalized item for one student with agreeing quantities is one requirement.
 
-REQUIREMENT_MERGE_CONFLICT_DEFAULT_ACTION = "largest"
-# BR-30: cross-section/document restatements default to the largest requested
-# quantity; adding every source quantity remains an explicit parent choice.
+REQUIREMENT_MERGE_CONFLICT_DEFAULT_ACTION = "plausible_annual_max"
+# BR-30: cross-section/document restatements offer combined, named-source, and
+# custom quantities; BR-40 deterministically selects the initial option.
 
 SYSTEM_DECISION_MERGED_QUANTITY_PREFIX = "merged_quantity:"
 # BR-30: the deterministic quantity selected for a consolidated item remains
@@ -121,12 +126,103 @@ CONFLICT_IDENTITY_DEFAULTS = {
     "different_products": CONFLICT_IDENTITY_DIFFERENT,
     "ambiguous": CONFLICT_IDENTITY_SAME,
 }
-# BR-37: BR-31/BR-32 classification supplies the default on every conflict,
-# while the parent may override it to one item or two distinct kinds.
+# BR-37 amended: BR-31/BR-32 classification supplies the default. Only BR-32
+# ambiguity asks on the main card; other classifications remain overridable in
+# the item's detail view.
 
 FAILED_DOCUMENT_SEQUENTIAL_FALLBACK = True
 # BR-38: after concurrent extraction, retry only each failed document
 # sequentially; never repeat a document whose concurrent extraction succeeded.
+
+PLAUSIBLE_ANNUAL_MAXIMUM_BY_ITEM = {
+    "backpacks": 2,
+    "baby_wipes": 6,
+    "binders": 6,
+    "cardstock": 4,
+    "colored_pencils": 48,
+    "composition_notebooks": 10,
+    "crayons": 96,
+    "disinfecting_wipes": 6,
+    "dividers": 4,
+    "dry_erase_markers": 24,
+    "erasers": 24,
+    "folders": 10,
+    "glue_sticks": 12,
+    "hand_sanitizer": 6,
+    "headphones": 2,
+    "highlighters": 12,
+    "index_cards": 6,
+    "markers": 24,
+    "modeling_compound": 12,
+    "notebook_paper": 6,
+    "pencil_boxes": 2,
+    "pencil_pouches": 2,
+    "pencil_sharpeners": 2,
+    "pencils": 48,
+    "pens": 24,
+    "permanent_markers": 8,
+    "play_dough": 12,
+    "rulers": 2,
+    "scissors": 2,
+    "spiral_notebooks": 12,
+    "sticky_notes": 12,
+    "tissues": 6,
+    "water_bottles": 2,
+    "watercolor_paints": 4,
+    "zip_top_bags": 6,
+}
+PLAUSIBLE_ANNUAL_MAXIMUM_FALLBACK = 12
+# BR-40: combine same-student source quantities when their sum is no more
+# than the canonical item's plausible annual maximum; otherwise select the
+# largest single source amount. Unlisted school supplies use the fallback.
+
+SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS = 30
+# BR-41: source controls keep document labels within a typical table column.
+
+DISPLAY_LEADING_QUANTITY_PATTERN = re.compile(r"^\s*\d+\s+")
+# BR-42: parent-facing source descriptions omit a duplicated leading quantity;
+# BR-22/BR-36 stored exact evidence remains unchanged.
+
+
+@dataclass(frozen=True)
+class RequirementQuantityDefault:
+    """Deterministic BR-40 evidence for one conflict-card preselection."""
+
+    selected_action: Literal["total", "largest"]
+    selected_quantity: int
+    combined_quantity: int
+    plausible_annual_maximum: int
+
+
+def requirement_quantity_default(
+    canonical_item: str,
+    quantities: Sequence[int],
+) -> RequirementQuantityDefault:
+    """Select BR-40's combined or largest quantity without model judgment."""
+
+    if not quantities or any(quantity < 1 for quantity in quantities):
+        raise ValueError("Requirement quantities must be positive")
+    combined_quantity = sum(quantities)
+    largest_quantity = max(quantities)
+    plausible_maximum = PLAUSIBLE_ANNUAL_MAXIMUM_BY_ITEM.get(
+        canonical_item,
+        PLAUSIBLE_ANNUAL_MAXIMUM_FALLBACK,
+    )
+    selected_action: Literal["total", "largest"] = (
+        "total"
+        if combined_quantity <= plausible_maximum
+        else "largest"
+    )
+    return RequirementQuantityDefault(
+        selected_action=selected_action,
+        selected_quantity=(
+            combined_quantity
+            if selected_action == "total"
+            else largest_quantity
+        ),
+        combined_quantity=combined_quantity,
+        plausible_annual_maximum=plausible_maximum,
+    )
 
 EXPLICIT_PACKAGE_COUNT_PATTERNS = (
     r"\b(\d+)\s*(?:count|ct)\b",
@@ -246,8 +342,9 @@ ITEM_FULFILLMENT_PREFERENCES = (
     ITEM_FULFILLMENT_PREFERENCE_DEFAULT,
     "closest_quantity",
 )
-# BR-34: per-item fulfillment defaults to meeting at least the requested units
-# with the cheapest package combination.
+# Deferred package-selection preference, retained in the review schema for a
+# future optimizer-scoped change. It is intentionally not numbered as a
+# business rule until deterministic package selection enforces it.
 
 PACKAGE_QUANTITY_STATE_DEFAULT = "unspecified"
 PACKAGE_QUANTITY_STATES = (

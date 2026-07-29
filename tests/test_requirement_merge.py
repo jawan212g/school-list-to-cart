@@ -66,6 +66,8 @@ def test_different_quantities_produce_exactly_one_interrupt() -> None:
     assert len(result.interrupts) == 1
     assert result.interrupts[0].default_action == "largest"
     assert result.interrupts[0].default_quantity == 2
+    assert result.interrupts[0].combined_quantity == 3
+    assert result.interrupts[0].plausible_annual_maximum == 2
 
 
 def test_quantity_total_remains_an_explicit_parent_choice() -> None:
@@ -88,6 +90,81 @@ def test_quantity_total_remains_an_explicit_parent_choice() -> None:
     )
 
     assert resolved.requirements[0].quantity == 3
+
+
+@pytest.mark.parametrize(
+    (
+        "canonical_item",
+        "quantities",
+        "expected_action",
+        "expected_quantity",
+        "expected_maximum",
+    ),
+    (
+        ("pencils", (48, 36), "largest", 48, 48),
+        ("glue_sticks", (4, 3), "total", 7, 12),
+        ("tissues", (4, 1), "total", 5, 6),
+        ("folders", (6, 2), "total", 8, 10),
+        ("composition_notebooks", (1, 4), "total", 5, 10),
+    ),
+)
+def test_plausible_annual_maximum_selects_named_item_default(
+    canonical_item: str,
+    quantities: tuple[int, int],
+    expected_action: str,
+    expected_quantity: int,
+    expected_maximum: int,
+) -> None:
+    """BR-40: named merge defaults are deterministic per canonical item."""
+
+    requirements = tuple(
+        Requirement(
+            req_id=f"source-{index}",
+            child_id="child-1",
+            raw_text=f"{quantity} {canonical_item}",
+            canonical_item=canonical_item,
+            quantity=quantity,
+            source_document="district.pdf",
+            source_section=section,
+            source_page=index + 2,
+            extraction_confidence=1.0,
+        )
+        for index, (quantity, section) in enumerate(
+            zip(
+                quantities,
+                ("5th Grade", "Highly Capable Class"),
+                strict=True,
+            )
+        )
+    )
+
+    result = consolidate_requirements(requirements)
+    interrupt = result.interrupts[0]
+
+    assert interrupt.default_action == expected_action
+    assert interrupt.default_quantity == expected_quantity
+    assert interrupt.combined_quantity == sum(quantities)
+    assert interrupt.plausible_annual_maximum == expected_maximum
+
+
+def test_parent_can_exclude_an_entire_conflicted_item() -> None:
+    """A8: exclusion removes the production requirement without a quantity."""
+
+    requirements = (
+        _requirement("grade-5", 1, "5th Grade", 2),
+        _requirement("hc", 2, "Highly Capable Class", 3),
+    )
+    initial = consolidate_requirements(requirements)
+    decision_id = item_decisions(initial)[0].decision_id
+
+    resolved = consolidate_requirements(
+        requirements,
+        excluded_decision_ids=(decision_id,),
+    )
+
+    assert resolved.requirements == ()
+    assert resolved.interrupts == ()
+    assert resolved.constraint_interrupts == ()
 
 
 def test_consolidated_requirement_retains_every_source_reference() -> None:

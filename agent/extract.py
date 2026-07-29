@@ -33,8 +33,8 @@ from agent.rules import (
     ALLOWED_CATEGORIES,
     CONFIDENCE_FLOOR,
     CORRECTED_EXTRACTION_CONFIDENCE,
+    EXTRACTION_TEXT_MODEL_TIMEOUT_SECONDS,
     MAX_UPLOAD_BYTES,
-    MODEL_CALL_TIMEOUT_SECONDS,
     NON_PURCHASABLE_CATEGORY,
     VISION_MODEL_CALL_TIMEOUT_SECONDS,
     section_is_parent_selectable,
@@ -774,7 +774,7 @@ def _model_timeout_seconds(content: list[dict[str, Any]]) -> float:
 
     if any(item["type"] == "input_image" for item in content):
         return VISION_MODEL_CALL_TIMEOUT_SECONDS
-    return MODEL_CALL_TIMEOUT_SECONDS
+    return EXTRACTION_TEXT_MODEL_TIMEOUT_SECONDS
 
 
 def _call_model(

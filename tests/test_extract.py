@@ -22,7 +22,10 @@ from agent.schema import (
     ExtractionEnvelope,
     Requirement,
 )
-from agent.rules import VISION_MODEL_CALL_TIMEOUT_SECONDS
+from agent.rules import (
+    EXTRACTION_TEXT_MODEL_TIMEOUT_SECONDS,
+    VISION_MODEL_CALL_TIMEOUT_SECONDS,
+)
 
 
 def test_small_model_prompt_requires_calibrated_evidence_only_output() -> None:
@@ -175,6 +178,45 @@ def test_vision_extraction_uses_the_longer_timeout(
 
     assert received["timeout_seconds"] == (
         VISION_MODEL_CALL_TIMEOUT_SECONDS
+    )
+
+
+def test_text_extraction_uses_the_nonbinding_extraction_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-39: structured text reads are not cut off at 30 seconds."""
+
+    received: dict[str, object] = {}
+
+    def fake_request(*args: object, **kwargs: object) -> ExtractionEnvelope:
+        received.update(kwargs)
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="pencils",
+                    child_id="child-1",
+                    raw_text="12 pencils",
+                    canonical_item="pencils",
+                    quantity=12,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+
+    monkeypatch.setattr(
+        extraction,
+        "request_structured_output",
+        fake_request,
+    )
+
+    extraction._call_model(
+        object(),  # type: ignore[arg-type]
+        [{"type": "input_text", "text": "12 pencils"}],
+        retry=False,
+    )
+
+    assert received["timeout_seconds"] == (
+        EXTRACTION_TEXT_MODEL_TIMEOUT_SECONDS
     )
 
 

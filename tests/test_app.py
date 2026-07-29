@@ -2698,7 +2698,15 @@ def test_merge_quick_choices_and_quantity_field_share_one_state() -> None:
     )
     interrupt = merged.interrupts[0]
     choices = app.quantity_quick_choice_values(interrupt)
-    largest_label, total_label = tuple(choices)[:2]
+    total_label, largest_label = tuple(choices)[:2]
+    assert total_label == "**84** — both lists combined"
+    assert largest_label == "**48** — 5th Grade only — selected"
+    assert sum("selected" in label for label in choices) == 1
+    assert app.quantity_preselection_rationale(interrupt) == (
+        "Both lists combined comes to 84 pencils, which is more than one "
+        "student usually needs in a year, so the larger single amount is "
+        "selected."
+    )
     state: dict[str, object] = {"choice": total_label, "quantity": 48}
 
     app.apply_merge_quick_choice(
@@ -2762,20 +2770,80 @@ def test_type_a_quantity_choices_do_not_repeat_source_text() -> None:
     labels = tuple(app.quantity_quick_choice_values(interrupt))
 
     assert labels == (
-        (
-            "**4** — Grade 5, page 2; the larger of the listed amounts "
-            "— default"
-        ),
-        "**5** — both lists combined",
-        "**1** — Highly Capable, page 3",
+        "**5** — both lists combined — selected",
+        "**4** — Grade 5 only",
+        "**1** — Highly Capable only",
         "Enter my own",
     )
-    assert sum("default" in label for label in labels) == 1
+    assert sum("selected" in label for label in labels) == 1
+    assert all("page " not in label for label in labels)
+    assert all("larger of the listed amounts" not in label for label in labels)
     assert all(
         label == "Enter my own" or label.startswith("**")
         for label in labels
     )
     assert all("tissues" not in label for label in labels)
+    assert app.quantity_preselection_rationale(interrupt) == (
+        "Both lists combined comes to 5 tissues, which is within the usual "
+        "yearly amount of 6 for one student, so both amounts are selected."
+    )
+
+
+def test_only_ambiguous_merge_asks_identity_on_main_card() -> None:
+    """BR-37: obvious identity classifications move override to detail."""
+
+    quantity_only = item_decisions(
+        consolidate_requirements(
+            (
+                Requirement(
+                    req_id="one",
+                    child_id="child-1",
+                    raw_text="4 glue sticks",
+                    canonical_item="glue_sticks",
+                    quantity=4,
+                    source_section="5th Grade",
+                    extraction_confidence=1.0,
+                ),
+                Requirement(
+                    req_id="two",
+                    child_id="child-1",
+                    raw_text="3 glue sticks",
+                    canonical_item="glue_sticks",
+                    quantity=3,
+                    source_section="Highly Capable",
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+    )[0]
+    ambiguous = item_decisions(
+        consolidate_requirements(
+            (
+                Requirement(
+                    req_id="graph",
+                    child_id="child-1",
+                    raw_text="1 graph composition book",
+                    canonical_item="composition_notebooks",
+                    quantity=1,
+                    attributes={"ruling": "graph"},
+                    source_section="5th Grade",
+                    extraction_confidence=1.0,
+                ),
+                Requirement(
+                    req_id="regular",
+                    child_id="child-1",
+                    raw_text="4 regular composition books",
+                    canonical_item="composition_notebooks",
+                    quantity=4,
+                    source_section="Highly Capable",
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+    )[0]
+
+    assert not app._merge_identity_control_on_main(quantity_only)
+    assert app._merge_identity_control_on_main(ambiguous)
 
 
 def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> None:
@@ -3006,6 +3074,37 @@ def test_source_annotation_is_hidden_only_at_display_edge() -> None:
 
     assert app._display_source_line(source.exact_line) == "Composition book"
     assert source.exact_line == exact_line
+
+
+def test_leading_source_quantity_is_hidden_only_at_display_edge() -> None:
+    """BR-42: duplicate quantity is removed without changing exact evidence."""
+
+    exact_line = "4 Regular composition books"
+    source = RequirementSource(
+        source_req_id="composition",
+        document_name="district.pdf",
+        section_name="Highly Capable Class",
+        page_number=3,
+        exact_line=exact_line,
+        quantity=4,
+    )
+
+    assert app._display_source_line(source.exact_line) == (
+        "Regular composition books"
+    )
+    assert source.exact_line == exact_line
+
+
+def test_source_button_filename_is_bounded_and_keeps_extension() -> None:
+    """BR-41: long source names stay within the parent-facing column."""
+
+    label = app._source_document_button_label(
+        "very-long-district-school-supply-list-for-every-grade.pdf"
+    )
+
+    assert len(label) <= 30
+    assert label.endswith(".pdf")
+    assert "…" in label
 
 
 def test_review_understanding_pluralizes_composition_notebooks() -> None:

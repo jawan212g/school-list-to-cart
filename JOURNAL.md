@@ -2126,3 +2126,76 @@ documents when another document fails.
 Deploy Part A-7 for one conflict-card visual pass, then repeat the Maple
 regression run when the Kelley endpoint is responsive enough to finish both
 lists.
+
+## 2026-07-29 — Part A-8 extraction timeout and conflict simplification
+
+### Objective
+
+Remove the extraction client timeout as the binding failure, separate selected
+document sections from unresolved possibilities, and make same-student
+quantity conflicts deterministic and easier for a parent to resolve.
+
+### Work completed
+
+- Added BR-39 through BR-42 for a 120-second text-extraction request ceiling,
+  per-item plausible annual quantity maxima, bounded source-button labels, and
+  display-only removal of a duplicated leading quantity.
+- Kept the general matching timeout at 30 seconds; only extraction text now
+  receives the same 120-second ceiling already used by rendered-page vision.
+- Split the section card into “What we will extract” and “Other sections that
+  might apply.” Selected sections name whether they matched the entered grade
+  or were chosen by the parent; ungraded possibilities retain their checkbox
+  and source evidence.
+- Limited the main same-item/two-kinds question to BR-32 ambiguity. The rule
+  classification stands for clear cases, with an override retained under item
+  detail.
+- Replaced the blanket largest-quantity default with a deterministic
+  canonical-item table. Combined quantity is selected when it stays within the
+  annual maximum; otherwise the largest source quantity is selected.
+- Fixed quantity-choice ordering to combined, each named source, then custom,
+  with exactly one marked preselection and a rule-generated rationale.
+- Added “Do not add this item to the cart” to every conflict card and made
+  deterministic consolidation omit that requirement without requiring a
+  quantity choice.
+- Preserved every exact source line while stripping a leading quantity only
+  from the parent-facing description. Source filenames are truncated in the
+  control and constrained by CSS.
+- Removed the BR-34 number from the closest-package preference because the
+  optimizer does not enforce it. The field remains recorded as deferred intent
+  for a future optimizer-scoped revision.
+
+### Verification
+
+- `py -3.12-arm64 -m pytest -q`: 328 passed, 1 skipped.
+- OpenAI (`gpt-5.6-sol`) extracted Grade 2 in 57.82 seconds and Grade 5 in
+  63.32 seconds; concurrent wall-clock time was 63.33 seconds. Both completed.
+- Reusing that OpenAI extraction, the $150 run landed at $110.04 with three
+  interrupts. The $85 run had the same $110.04 required cart and a $78.67
+  recommended plan with four interrupts.
+- Kelley GPT API (`gpt-oss-20b`) extracted Grade 2 in 32.67 seconds and Grade 5
+  in 33.47 seconds; concurrent wall-clock time was 33.47 seconds.
+- Kelley model-assisted matching varied between the two budget runs: $95.07
+  with five interrupts at $150, and a $94.81 base cart with an $81.13
+  recommended plan and six interrupts at $85. Those figures are not a
+  calculation-only comparison.
+- Both provider runs reported zero requirement-merge interrupts for Maple
+  because the repeated categories belong to different students. The movement
+  from the historical $111.21 and $71.07 figures therefore was not caused by
+  BR-40; it reflects current model extraction/matching output.
+- Static inspection confirmed `agent/optimize.py` contains no model calls.
+  `agent/extract.py` contains model-assisted reading and transport handling but
+  no money, quantity, package, tax, fee, or cart arithmetic.
+
+### Limitations
+
+- Streamlit is intentionally unavailable on this Windows ARM64 environment.
+  The Streamlit lifecycle test remains skipped, and the revised spacing and
+  source-button truncation still need a deployed visual check.
+- Live model output is nondeterministic. The OpenAI and Kelley figures above
+  are actual paired runs, not stable golden values.
+
+### Recommended next step
+
+Deploy Part A-8 and visually verify one unchecked Highly Capable section, one
+ambiguous composition-notebook conflict, and one source filename longer than
+the column before expanding scope beyond Lists and Personalize.

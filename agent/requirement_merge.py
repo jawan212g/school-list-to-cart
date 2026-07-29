@@ -25,6 +25,7 @@ from agent.rules import (
     SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX,
     SYSTEM_DECISION_RECONCILED_BRAND,
     SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
+    requirement_quantity_default,
 )
 from agent.schema import (
     ExtractionEnvelope,
@@ -44,6 +45,8 @@ class RequirementQuantityInterrupt:
     canonical_item: str
     sources: tuple[RequirementSource, ...]
     default_quantity: int
+    combined_quantity: int
+    plausible_annual_maximum: int
     variants: tuple[RequirementVariant, ...] = ()
     default_action: str = REQUIREMENT_MERGE_CONFLICT_DEFAULT_ACTION
 
@@ -678,6 +681,7 @@ def consolidate_requirements(
         str,
         Literal["same", "different"],
     ] | None = None,
+    excluded_decision_ids: Iterable[str] = (),
 ) -> RequirementMergeResult:
     """Merge same-student duplicates and flag quantity conflicts (FR-14)."""
 
@@ -685,6 +689,7 @@ def consolidate_requirements(
     active_constraint_choices = constraint_choices or {}
     active_variant_choices = variant_quantity_choices or {}
     active_identity_choices = product_identity_choices or {}
+    excluded_ids = frozenset(excluded_decision_ids)
     grouped: dict[tuple[Any, ...], list[Requirement]] = {}
     passthrough: list[Requirement] = []
     for requirement in requirements:
@@ -759,6 +764,8 @@ def consolidate_requirements(
             else "quantity_only"
         )
         default_identity = CONFLICT_IDENTITY_DEFAULTS[conflict_type]
+        if decision_id in excluded_ids:
+            continue
         selected_identity = active_identity_choices.get(
             decision_id,
             default_identity,
@@ -778,7 +785,11 @@ def consolidate_requirements(
             quantity_interrupt = None
         else:
             interrupt_id = _interrupt_id(first.child_id, identity)
-            default_quantity = max(quantities)
+            quantity_default = requirement_quantity_default(
+                first.canonical_item,
+                quantities,
+            )
+            default_quantity = quantity_default.selected_quantity
             quantity = choices.get(interrupt_id, default_quantity)
             if quantity < 1:
                 raise ValueError(
@@ -792,6 +803,11 @@ def consolidate_requirements(
                 sources=sources,
                 default_quantity=default_quantity,
                 variants=variants,
+                default_action=quantity_default.selected_action,
+                combined_quantity=quantity_default.combined_quantity,
+                plausible_annual_maximum=(
+                    quantity_default.plausible_annual_maximum
+                ),
             )
             interrupts.append(quantity_interrupt)
         system_decisions = tuple(
@@ -890,6 +906,7 @@ def consolidate_extractions(
         str,
         Literal["same", "different"],
     ] | None = None,
+    excluded_decision_ids: Iterable[str] = (),
 ) -> tuple[dict[str, ExtractionEnvelope], RequirementMergeResult]:
     """Merge production extraction envelopes without changing their metadata."""
 
@@ -903,6 +920,7 @@ def consolidate_extractions(
         constraint_choices=constraint_choices,
         variant_quantity_choices=variant_quantity_choices,
         product_identity_choices=product_identity_choices,
+        excluded_decision_ids=excluded_decision_ids,
     )
     requirements_by_child: dict[str, list[Requirement]] = {
         child_id: [] for child_id in extractions

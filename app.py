@@ -95,6 +95,7 @@ from agent.rules import (
     DEFAULT_TAX_BASIS_POINTS,
     CONFLICT_IDENTITY_DIFFERENT,
     CONFLICT_IDENTITY_SAME,
+    DISPLAY_LEADING_QUANTITY_PATTERN,
     FAILED_DOCUMENT_SEQUENTIAL_FALLBACK,
     MAX_CHILDREN_PER_SESSION,
     MAX_UPLOAD_BYTES,
@@ -103,6 +104,7 @@ from agent.rules import (
     NONPAGINATED_SOURCE_PAGE,
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     PARENT_EDITABLE_DETAIL_FIELDS,
+    SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
     SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX,
     SYSTEM_DECISION_MERGED_QUANTITY_PREFIX,
@@ -3007,6 +3009,7 @@ def _initialize_state(st: Any) -> None:
         "requirement_constraint_choices": {},
         "requirement_variant_quantity_choices": {},
         "requirement_product_identity_choices": {},
+        "requirement_excluded_merge_decisions": frozenset(),
         "parent_added_review_items": (),
         "last_added_review_item": None,
         "requirement_merge_validation_errors": (),
@@ -3391,6 +3394,20 @@ def _source_reference_cache_key(
     )
 
 
+def _source_document_button_label(document_name: str) -> str:
+    """Keep a source filename legible without overflowing its column."""
+
+    if len(document_name) <= SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS:
+        return document_name
+    suffix = Path(document_name).suffix
+    separator = "…"
+    prefix_length = max(
+        1,
+        SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS - len(suffix) - len(separator),
+    )
+    return f"{document_name[:prefix_length]}{separator}{suffix}"
+
+
 def _render_source_reference(
     st: Any,
     list_input: ListInput,
@@ -3419,8 +3436,11 @@ def _render_source_reference(
         if reference.page_number is not None
         else ""
     )
+    button_document_name = _source_document_button_label(
+        reference.document_name
+    )
     with st.popover(
-        f"View source · {reference.document_name}{page_text}",
+        f"View source · {button_document_name}{page_text}",
     ):
         st.caption(
             escape_streamlit_dollars(
@@ -3937,6 +3957,7 @@ def clear_section_selection_after_grade_change(
         state["requirement_constraint_choices"] = {}
         state["requirement_variant_quantity_choices"] = {}
         state["requirement_product_identity_choices"] = {}
+        state["requirement_excluded_merge_decisions"] = frozenset()
         state["requirement_merge_validation_errors"] = ()
         state["organized_list_confirmed"] = False
         _limit_reached_stage(state, 2)
@@ -5240,6 +5261,7 @@ def _render_lists(st: Any) -> None:
         st.session_state["requirement_constraint_choices"] = {}
         st.session_state["requirement_variant_quantity_choices"] = {}
         st.session_state["requirement_product_identity_choices"] = {}
+        st.session_state["requirement_excluded_merge_decisions"] = frozenset()
         st.session_state["requirement_merge_validation_errors"] = ()
         st.session_state["review_items"] = ()
         st.session_state["parent_added_review_items"] = ()
@@ -7039,6 +7061,24 @@ def _translation_context(
     )
 
 
+def _section_display_groups(
+    resolution: SectionResolution,
+    choice: ResolvedSectionChoice,
+) -> tuple[tuple[DocumentSection, ...], tuple[DocumentSection, ...]]:
+    """Separate selected sections from unresolved ungraded possibilities."""
+
+    sections_by_id = {
+        section.section_id: section
+        for section in resolution.primary_language_sections
+    }
+    selected = tuple(
+        sections_by_id[section_id]
+        for section_id in choice.selected_section_ids
+        if section_id in sections_by_id
+    )
+    return selected, resolution.parent_questions
+
+
 def _render_sections(st: Any) -> None:
     """State deterministic scope and ask only unresolved section questions."""
 
@@ -7106,6 +7146,10 @@ def _render_sections(st: Any) -> None:
             initial_section_ids=initial_ids,
         )
         choices[child_id] = choice
+        selected_sections, possible_sections = _section_display_groups(
+            resolution,
+            choice,
+        )
         document_name = list_input.resolved_document_name
 
         with st.container(border=True):
@@ -7166,14 +7210,40 @@ def _render_sections(st: Any) -> None:
                     ),
                     key=f"{key_prefix}:blocked-action",
                 )
-            elif choice.selected_section_labels:
-                st.success(
-                    escape_streamlit_dollars(
-                        "Will extract "
-                        + _join_names(choice.selected_section_labels)
-                        + f" from {document_name}."
+            else:
+                selected_sections_by_id = {
+                    section.section_id: section
+                    for section in selected_sections
+                }
+                st.markdown("#### Part 1 · What we will extract")
+                if choice.selected_section_labels:
+                    st.write(
+                        escape_streamlit_dollars(
+                            "We will read "
+                            + _join_names(choice.selected_section_labels)
+                            + f" from {document_name}."
+                        )
                     )
-                )
+                for section_id in choice.selected_section_ids:
+                    section = selected_sections_by_id.get(section_id)
+                    if section is None:
+                        continue
+                    st.markdown(
+                        escape_streamlit_dollars(f"**{section.label}**")
+                    )
+                    reason = (
+                        f"Matched to {child['label']}'s entered grade."
+                        if section_id in choice.automatically_selected_ids
+                        else "Chosen by you."
+                    )
+                    st.caption(escape_streamlit_dollars(reason))
+                    _render_section_source_links(
+                        st,
+                        list_input,
+                        (section,),
+                        key_prefix=f"{key_prefix}:selected-source",
+                        rendered_sources=rendered_sources,
+                    )
                 if not resolution.has_grade_match:
                     st.warning(
                         escape_streamlit_dollars(
@@ -7183,67 +7253,42 @@ def _render_sections(st: Any) -> None:
                             + ", so the list can continue."
                         )
                     )
-                labels_by_id = {
-                    section.section_id: section.label
-                    for section in resolution.primary_language_sections
-                }
-                for section_id in choice.automatically_selected_ids:
-                    st.caption(
-                        escape_streamlit_dollars(
-                            f"{labels_by_id[section_id]} was matched to "
-                            f"{child['label']}'s entered grade."
-                        )
-                    )
-                for section_id in choice.parent_selected_ids:
-                    st.caption(
-                        escape_streamlit_dollars(
-                            f"{labels_by_id[section_id]} was chosen by you."
-                        )
-                    )
 
             override_toggle_key = f"{key_prefix}:override-enabled"
-            for section in resolution.parent_questions:
-                st.checkbox(
-                    f"Also use {section.label} for {child['label']}?",
-                    key=f"{key_prefix}:question:{section.section_id}",
-                    help=(
-                        "This section has no grade token, so it cannot be "
-                        "included or excluded automatically."
-                    ),
+            if possible_sections:
+                st.markdown(
+                    "#### Part 2 · Other sections that might apply"
                 )
-                page_text = (
-                    "page " + ", ".join(map(str, section.page_numbers))
-                    if section.page_numbers
-                    else "the uploaded list"
+                st.write(
+                    "These sections do not name a grade, so we could not "
+                    "decide whether they belong to this student."
                 )
-                st.caption(
-                    escape_streamlit_dollars(
-                        f"From {page_text}: {section.source_line}"
+                for section in possible_sections:
+                    st.checkbox(
+                        f"Also use {section.label} for {child['label']}?",
+                        key=f"{key_prefix}:question:{section.section_id}",
+                        help=(
+                            "Include this section only if it applies to this "
+                            "student."
+                        ),
                     )
-                )
-                _render_section_source_links(
-                    st,
-                    list_input,
-                    (section,),
-                    key_prefix=f"{key_prefix}:question-source",
-                    rendered_sources=rendered_sources,
-                )
-
-            selected_sections_by_id = {
-                section.section_id: section
-                for section in resolution.primary_language_sections
-            }
-            _render_section_source_links(
-                st,
-                list_input,
-                tuple(
-                    selected_sections_by_id[section_id]
-                    for section_id in choice.selected_section_ids
-                    if section_id in selected_sections_by_id
-                ),
-                key_prefix=f"{key_prefix}:selected-source",
-                rendered_sources=rendered_sources,
-            )
+                    page_text = (
+                        "page " + ", ".join(map(str, section.page_numbers))
+                        if section.page_numbers
+                        else "the uploaded list"
+                    )
+                    st.caption(
+                        escape_streamlit_dollars(
+                            f"From {page_text}: {section.source_line}"
+                        )
+                    )
+                    _render_section_source_links(
+                        st,
+                        list_input,
+                        (section,),
+                        key_prefix=f"{key_prefix}:question-source",
+                        rendered_sources=rendered_sources,
+                    )
 
             exclusion_summary = _section_exclusion_summary(
                 resolution,
@@ -7335,6 +7380,7 @@ def _render_sections(st: Any) -> None:
         st.session_state["requirement_constraint_choices"] = {}
         st.session_state["requirement_variant_quantity_choices"] = {}
         st.session_state["requirement_product_identity_choices"] = {}
+        st.session_state["requirement_excluded_merge_decisions"] = frozenset()
         st.session_state["requirement_merge_validation_errors"] = ()
         st.session_state["organized_list_confirmed"] = False
         _limit_reached_stage(st.session_state, 2)
@@ -7355,9 +7401,14 @@ def _requirement_source_label(source: Any) -> str:
 
 
 def _display_source_line(source_line: str) -> str:
-    """Hide matrix-cell annotations while preserving stored provenance."""
+    """Hide display-only annotations and a duplicated leading quantity."""
 
-    return source_line.split("|", 1)[0].strip()
+    display_line = source_line.split("|", 1)[0].strip()
+    return DISPLAY_LEADING_QUANTITY_PATTERN.sub(
+        "",
+        display_line,
+        count=1,
+    ).strip()
 
 
 @dataclass(frozen=True)
@@ -7412,49 +7463,70 @@ MERGE_CUSTOM_QUANTITY_LABEL = "Enter my own"
 def quantity_quick_choice_values(
     interrupt: Any,
 ) -> dict[str, int | None]:
-    """Build BR-30 shortcuts from production requirement sources."""
+    """Build fixed-order BR-30/BR-40 choices from production evidence."""
 
     sources = tuple(interrupt.sources)
-    default_index = next(
-        index
-        for index, source in enumerate(sources)
-        if source.quantity == interrupt.default_quantity
-    )
-    default_source = sources[default_index]
-    default_location = (
-        default_source.section_name
-        or default_source.document_name
-        or "This list"
-    )
-    default_description = (
-        f"{default_location}, page {default_source.page_number}"
-    )
-    if len({source.quantity for source in sources}) > 1:
-        default_description += "; the larger of the listed amounts"
+    selected_suffix = " — selected"
+    combined_quantity = int(interrupt.combined_quantity)
     values: dict[str, int | None] = {
         (
-            f"**{default_source.quantity}** — "
-            f"{default_description} — default"
-        ): default_source.quantity,
-        (
-            f"**{sum(source.quantity for source in sources)}** — "
+            f"**{combined_quantity}** — "
             "both lists combined"
-        ): sum(source.quantity for source in sources),
+            + (
+                selected_suffix
+                if interrupt.default_action == "total"
+                else ""
+            )
+        ): combined_quantity,
     }
+    source_names = [
+        source.section_name
+        or source.document_name
+        or "This list"
+        for source in sources
+    ]
     for index, source in enumerate(sources):
-        if index == default_index:
-            continue
-        source_location = (
-            source.section_name
-            or source.document_name
-            or "This list"
+        source_location = source_names[index]
+        if source_names.count(source_location) > 1 and source.document_name:
+            source_location = (
+                f"{source_location} in {source.document_name}"
+            )
+        is_selected_source = (
+            interrupt.default_action == "largest"
+            and source.quantity == interrupt.default_quantity
+            and not any(
+                "selected" in existing_label
+                for existing_label in values
+            )
         )
         values[
-            f"**{source.quantity}** — {source_location}, "
-            f"page {source.page_number}"
+            f"**{source.quantity}** — {source_location} only"
+            + (selected_suffix if is_selected_source else "")
         ] = source.quantity
     values[MERGE_CUSTOM_QUANTITY_LABEL] = None
     return values
+
+
+def quantity_preselection_rationale(interrupt: Any) -> str:
+    """Explain BR-40's deterministic preselection in one plain sentence."""
+
+    item_name = REVIEW_PLURAL_ITEM_NAMES.get(
+        interrupt.canonical_item,
+        _item_display_name(interrupt.canonical_item).casefold(),
+    )
+    combined_quantity = int(interrupt.combined_quantity)
+    maximum = int(interrupt.plausible_annual_maximum)
+    if interrupt.default_action == "total":
+        return (
+            f"Both lists combined comes to {combined_quantity} {item_name}, "
+            f"which is within the usual yearly amount of {maximum} for one "
+            "student, so both amounts are selected."
+        )
+    return (
+        f"Both lists combined comes to {combined_quantity} {item_name}, "
+        "which is more than one student usually needs in a year, so the "
+        "larger single amount is selected."
+    )
 
 
 def apply_merge_quick_choice(
@@ -7553,6 +7625,12 @@ def _merge_product_difference(decision: Any) -> str:
     return "; ".join(parts) or "different required details"
 
 
+def _merge_identity_control_on_main(decision: Any) -> bool:
+    """BR-37: only an ambiguous descriptor asks on the main card."""
+
+    return decision.conflict_type == "ambiguous"
+
+
 def _render_merge_quantity_controls(
     st: Any,
     interrupt: Any,
@@ -7567,7 +7645,11 @@ def _render_merge_quantity_controls(
     custom_pending_key = f"{interrupt.interrupt_id}:custom-pending"
     quantity_keys = {interrupt.interrupt_id: quantity_key}
     if choice_key not in st.session_state:
-        st.session_state[choice_key] = next(iter(quick_choices))
+        st.session_state[choice_key] = next(
+            label
+            for label in quick_choices
+            if "selected" in label
+        )
     if quantity_key not in st.session_state:
         st.session_state[quantity_key] = interrupt.default_quantity
     st.radio(
@@ -7582,6 +7664,11 @@ def _render_merge_quantity_controls(
             quick_choices,
             custom_pending_key,
         ),
+    )
+    st.caption(
+        escape_streamlit_dollars(
+            quantity_preselection_rationale(interrupt)
+        )
     )
     quantity_container = (
         st.container(border=True)
@@ -7612,8 +7699,6 @@ def _render_merge_quantity_controls(
         if selected_label == MERGE_CUSTOM_QUANTITY_LABEL
         else "total"
         if "both lists combined" in selected_label
-        else "largest"
-        if "default" in selected_label
         else "source"
     )
     return action, selected_quantity
@@ -7709,6 +7794,7 @@ def _render_requirement_merge(st: Any) -> None:
     selections: dict[str, tuple[str, int | None]] = {}
     variant_quantity_choices: dict[str, dict[str, int]] = {}
     product_identity_choices: dict[str, str] = {}
+    excluded_decision_ids: set[str] = set()
     validation_errors: list[str] = []
     first_error_anchor_added = False
     for decision in item_decisions(result):
@@ -7748,8 +7834,25 @@ def _render_requirement_merge(st: Any) -> None:
                     "difference or could simply be general wording."
                 )
 
+            exclude_key = f"{decision.decision_id}:exclude"
+            st.session_state.setdefault(exclude_key, False)
+            excluded = st.checkbox(
+                "Do not add this item to the cart",
+                key=exclude_key,
+                help=(
+                    "Use this when you do not want this item included in the "
+                    "shopping plan."
+                ),
+            )
             list_input = input_by_child.get(decision.child_id)
             _render_merge_source_rows(st, decision, list_input)
+            if excluded:
+                excluded_decision_ids.add(decision.decision_id)
+                st.caption(
+                    "This item will stay out of the cart. You do not need to "
+                    "choose a quantity."
+                )
+                continue
 
             identity_key = f"{decision.decision_id}:same-or-different"
             identity_labels = (
@@ -7762,11 +7865,22 @@ def _render_requirement_merge(st: Any) -> None:
                     if decision.default_identity == CONFLICT_IDENTITY_SAME
                     else identity_labels[1]
                 )
-            identity_choice = st.radio(
-                "Do these describe the same item?",
-                identity_labels,
-                key=identity_key,
-            )
+            if _merge_identity_control_on_main(decision):
+                identity_choice = st.radio(
+                    "Do these describe the same item?",
+                    identity_labels,
+                    key=identity_key,
+                )
+            else:
+                identity_choice = str(st.session_state[identity_key])
+                with st.expander(
+                    "More detail · change whether these are one item or two"
+                ):
+                    identity_choice = st.radio(
+                        "Do these describe the same item?",
+                        identity_labels,
+                        key=identity_key,
+                    )
             selected_identity = (
                 CONFLICT_IDENTITY_SAME
                 if identity_choice == identity_labels[0]
@@ -7828,6 +7942,7 @@ def _render_requirement_merge(st: Any) -> None:
         constraint_choices={},
         variant_quantity_choices=variant_quantity_choices,
         product_identity_choices=product_identity_choices,
+        excluded_decision_ids=excluded_decision_ids,
     )
     st.session_state["extracted_lists"] = merged
     st.session_state["requirement_merge_result"] = resolved
@@ -7838,6 +7953,9 @@ def _render_requirement_merge(st: Any) -> None:
     )
     st.session_state["requirement_product_identity_choices"] = (
         product_identity_choices
+    )
+    st.session_state["requirement_excluded_merge_decisions"] = (
+        frozenset(excluded_decision_ids)
     )
     st.session_state["requirement_merge_resolved"] = True
     st.session_state["screen"] = "working"
@@ -8649,6 +8767,9 @@ def _render_working(st: Any) -> None:
             st.session_state["requirement_constraint_choices"] = {}
             st.session_state["requirement_variant_quantity_choices"] = {}
             st.session_state["requirement_product_identity_choices"] = {}
+            st.session_state["requirement_excluded_merge_decisions"] = (
+                frozenset()
+            )
             st.session_state["requirement_merge_validation_errors"] = ()
             st.session_state["extraction_errors"] = extraction_errors
             st.session_state["extraction_cache_ready"] = True
@@ -11310,7 +11431,15 @@ def _apply_custom_css(st: Any) -> None:
             gap: 1rem;
             animation: rss-fields-in 160ms ease-out both;
         }
-        [data-testid="stPopover"] button {
+        [data-testid="stPopover"] {
+            max-width: 100%;
+            overflow: hidden;
+        }
+        [data-testid="stPopover"] button,
+        [data-testid="stPopover"] button p {
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
             white-space: nowrap !important;
         }
         h1, h2, h3 {
