@@ -14,6 +14,7 @@ from agent.rules import (
     REQUIREMENT_MERGE_ORIGIN_FIELDS,
     REQUIREMENT_SOURCE_DEDUPLICATION_FIELDS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
+    SYSTEM_DECISION_MERGED_QUANTITY_PREFIX,
     SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX,
     SYSTEM_DECISION_RECONCILED_BRAND,
     SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
@@ -453,7 +454,7 @@ def _build_variants(
         default_quantity = (
             quantities[0]
             if len(set(quantities)) == 1
-            else sum(quantities)
+            else max(quantities)
         )
         representative = members[0]
         variants.append(
@@ -480,8 +481,10 @@ def _resolved_variant_requirements(
     first: Requirement,
     variants: tuple[RequirementVariant, ...],
     quantities: Mapping[str, int],
+    all_sources: tuple[RequirementSource, ...],
     compatible_attributes: RequirementAttributes,
     compatible_brand: str | None,
+    compatible_brand_hint: str | None,
     compatible_exclusions: tuple[str, ...],
     system_decisions: tuple[str, ...],
 ) -> tuple[Requirement, ...]:
@@ -512,8 +515,10 @@ def _resolved_variant_requirements(
                     "quantity": quantity,
                     "quantity_is_range": False,
                     "quantity_max": None,
-                    "sources": variant.sources,
+                    "sources": all_sources,
+                    "variant_sources": variant.sources,
                     "brand_lock": brand_lock,
+                    "brand_hint": compatible_brand_hint,
                     "exclusions": tuple(
                         dict.fromkeys(
                             (*compatible_exclusions, *variant.exclusions)
@@ -571,6 +576,14 @@ def consolidate_requirements(
     for identity, group in scoped_groups:
         first = group[0]
         sources = _distinct_sources(group)
+        brand_hint = next(
+            (
+                requirement.brand_hint
+                for requirement in group
+                if requirement.brand_hint
+            ),
+            None,
+        )
         quantities = tuple(requirement.quantity for requirement in group)
         if len(group) == 1:
             merged.append(first.model_copy(update={"sources": sources}))
@@ -616,8 +629,10 @@ def consolidate_requirements(
                     first,
                     variants,
                     active_variant_choices[decision_id],
+                    sources,
                     attributes,
                     brand_lock,
+                    brand_hint,
                     exclusions,
                     system_decisions,
                 )
@@ -627,7 +642,7 @@ def consolidate_requirements(
             quantity = quantities[0]
         else:
             interrupt_id = _interrupt_id(first.child_id, identity)
-            default_quantity = sum(quantities)
+            default_quantity = max(quantities)
             quantity = choices.get(interrupt_id, default_quantity)
             if quantity < 1:
                 raise ValueError("A merged purchasable quantity must be positive")
@@ -641,6 +656,14 @@ def consolidate_requirements(
                     default_quantity=default_quantity,
                 )
             )
+            system_decisions = tuple(
+                dict.fromkeys(
+                    (
+                        *system_decisions,
+                        f"{SYSTEM_DECISION_MERGED_QUANTITY_PREFIX}{quantity}",
+                    )
+                )
+            )
         merged.append(
             first.model_copy(
                 update={
@@ -649,6 +672,7 @@ def consolidate_requirements(
                     "quantity_max": None,
                     "sources": sources,
                     "brand_lock": brand_lock,
+                    "brand_hint": brand_hint,
                     "exclusions": exclusions,
                     "attributes": attributes,
                     "system_decisions": system_decisions,

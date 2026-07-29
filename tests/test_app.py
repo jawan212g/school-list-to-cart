@@ -16,6 +16,8 @@ from agent.aggregate import UnitNeed
 from agent.match import StructuredSuitabilityJudge
 from agent.normalize import NormalizationResult, NormalizedRequirement
 from agent.pipeline import ListInput, PipelineResult, PipelineSession, run_pipeline
+from agent.requirement_merge import consolidate_requirements, item_decisions
+from agent.review import confirmed_requirements, organize_extractions
 from agent.schema import (
     DocumentSelection,
     DocumentSection,
@@ -1987,9 +1989,10 @@ def test_wrong_list_grade_warns_before_cart_build() -> None:
         "review_reasons",
         "deferred_review_reasons",
         "document_selection",
-        "uninterpreted_lines",
-        "skipped_lines",
-    )
+            "uninterpreted_lines",
+            "skipped_lines",
+            "catalog_unavailable_items",
+        )
 
     matching_result = _real_pipeline_result("Grade 2")
     assert app.detect_list_identity_warnings(
@@ -2574,17 +2577,213 @@ def test_brand_choice_is_mutually_exclusive_in_production_shape() -> None:
         required_quantity=1,
         source_text="1 pencil",
         confidence=1.0,
+        brand="Ticonderoga",
         brand_required=True,
         allow_equivalents=True,
     )
 
     assert item.brand_required is True
     assert item.allow_equivalents is False
+    empty_brand = item.model_copy(
+        update={"brand": None, "brand_required": True}
+    )
+    validated = SupplyItemReview.model_validate(empty_brand.model_dump())
+    assert validated.brand_required is False
+    assert validated.allow_equivalents is True
     source = inspect.getsource(app._render_review_detail_controls)
     assert 'radio(' in source
     assert '"Brand choice"' in source
     assert '"Exact brand required"' in source
     assert '"Allow equivalent brands"' not in source
+
+
+def test_preferred_brand_populates_brand_without_creating_lock() -> None:
+    """BR-24: a preferred brand is a visible hint with equivalents allowed."""
+
+    requirement = Requirement(
+        req_id="pencils",
+        child_id="child-1",
+        raw_text="48 Ticonderoga pencils preferred",
+        canonical_item="pencils",
+        quantity=48,
+        brand_lock="Ticonderoga",
+        attributes={"other_details": "Ticonderoga preferred"},
+        extraction_confidence=1.0,
+    )
+    row = organize_extractions(
+        {"child-1": ExtractionEnvelope(requirements=(requirement,))}
+    )[0]
+
+    assert requirement.brand_lock is None
+    assert requirement.brand_hint == "Ticonderoga"
+    assert requirement.attributes.other_details is None
+    assert row.brand == "Ticonderoga"
+    assert row.brand_required is False
+    assert row.allow_equivalents is True
+
+
+def test_already_owned_sets_visible_quantity_zero_and_excludes_cart() -> None:
+    """FR-12: marking an item owned visibly zeroes and removes its cart need."""
+
+    item = SupplyItemReview(
+        review_id="review",
+        req_id="pencils",
+        child_id="child-1",
+        item_name="pencils",
+        required_quantity=24,
+        source_text="24 pencils",
+        confidence=1.0,
+        review_status="confirmed",
+    )
+
+    updated = app._review_control_update(
+        item,
+        item_name="pencils",
+        quantity=24,
+        unit="each",
+        package_size=None,
+        brand="",
+        brand_required=False,
+        size="",
+        material="",
+        colors="",
+        required_details="",
+        optional=False,
+        supply_scope="unspecified",
+        allow_equivalents=True,
+        already_owned=True,
+        notes="",
+        delete=False,
+    )
+
+    assert updated.required_quantity == 0
+    assert app.review_understanding_text(updated) == "0 pencils"
+    assert confirmed_requirements((updated,)) == ()
+
+
+def test_merge_quick_choices_and_quantity_field_share_one_state() -> None:
+    """BR-30: radio shortcuts and editable quantity are one selection state."""
+
+    merged = consolidate_requirements(
+        (
+            Requirement(
+                req_id="grade",
+                child_id="child-1",
+                raw_text="48 pencils",
+                canonical_item="pencils",
+                quantity=48,
+                source_document="district.pdf",
+                source_section="5th Grade",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="capable",
+                child_id="child-1",
+                raw_text="36 pencils",
+                canonical_item="pencils",
+                quantity=36,
+                source_document="district.pdf",
+                source_section="Highly Capable",
+                source_page=3,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    interrupt = merged.interrupts[0]
+    choices = app.quantity_quick_choice_values(interrupt)
+    largest_label, total_label = tuple(choices)[:2]
+    state: dict[str, object] = {"choice": total_label, "quantity": 48}
+
+    app.apply_merge_quick_choice(
+        state,
+        "choice",
+        {interrupt.interrupt_id: "quantity"},
+        choices,
+    )
+    assert state["quantity"] == 84
+
+    state["quantity"] = 50
+    app.mark_merge_quantities_custom(
+        state,
+        "choice",
+        app.MERGE_CUSTOM_QUANTITY_LABEL,
+    )
+    assert state["choice"] == app.MERGE_CUSTOM_QUANTITY_LABEL
+
+    state["choice"] = largest_label
+    app.apply_merge_quick_choice(
+        state,
+        "choice",
+        {interrupt.interrupt_id: "quantity"},
+        choices,
+    )
+    assert state["quantity"] == 48
+
+
+def test_variant_quick_choice_updates_every_editable_quantity() -> None:
+    """BR-30: variant cards provide the same shortcuts and fine control."""
+
+    merged = consolidate_requirements(
+        (
+            Requirement(
+                req_id="sewn",
+                child_id="child-1",
+                raw_text="1 sewn composition notebook",
+                canonical_item="composition_notebooks",
+                quantity=1,
+                attributes={"style": "sewn"},
+                source_document="district.pdf",
+                source_section="Highly Capable",
+                source_page=3,
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="regular",
+                child_id="child-1",
+                raw_text="4 composition notebooks",
+                canonical_item="composition_notebooks",
+                quantity=4,
+                attributes={"style": "regular"},
+                source_document="district.pdf",
+                source_section="5th Grade",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    decision = item_decisions(merged)[0]
+    choices = app.variant_quick_choice_values(decision)
+    largest_label, total_label = tuple(choices)[:2]
+    quantity_keys = {
+        variant.variant_id: f"quantity:{index}"
+        for index, variant in enumerate(decision.variants)
+    }
+    state: dict[str, object] = {"choice": largest_label}
+
+    app.apply_merge_quick_choice(
+        state,
+        "choice",
+        quantity_keys,
+        choices,
+    )
+    assert sorted(state[key] for key in quantity_keys.values()) == [0, 4]
+
+    state["choice"] = total_label
+    app.apply_merge_quick_choice(
+        state,
+        "choice",
+        quantity_keys,
+        choices,
+    )
+    assert sorted(state[key] for key in quantity_keys.values()) == [1, 4]
+
+    app.mark_merge_quantities_custom(
+        state,
+        "choice",
+        app.MERGE_CUSTOM_VARIANT_LABEL,
+    )
+    assert state["choice"] == app.MERGE_CUSTOM_VARIANT_LABEL
 
 
 def test_saved_list_page_count_uses_retained_production_input() -> None:
@@ -2636,6 +2835,32 @@ def test_review_detail_visibility_uses_real_catalog_variation() -> None:
         "acceptable_colors": True,
     }
     assert supplied_material["material"] is True
+
+
+def test_personalize_names_understood_item_with_no_stocked_catalog_category() -> None:
+    """FR-12/E-12: catalog gaps are visible before the cart is built."""
+
+    item = SupplyItemReview(
+        review_id="pencils",
+        req_id="pencils",
+        child_id="child-1",
+        item_name="pencils",
+        required_quantity=24,
+        source_text="24 pencils",
+        source_page=2,
+        confidence=1.0,
+    )
+
+    gaps = app.catalog_unstocked_review_items(
+        (item,),
+        tuple(
+            offer for offer in load_catalog() if offer.category != "pencils"
+        ),
+    )
+
+    assert gaps == (item,)
+    assert gaps[0].source_text == "24 pencils"
+    assert gaps[0].source_page == 2
 
 
 def test_source_annotation_is_hidden_only_at_display_edge() -> None:
@@ -2710,8 +2935,11 @@ def test_system_merge_decisions_are_plainly_visible() -> None:
 
     messages = app.review_system_decision_messages(item)
 
-    assert messages[0] == "Combined from 2 places in the list."
-    assert "material" in messages[1]
+    assert len(messages) == 1
+    assert messages[0] == (
+        "This item appears in 2 places; page 2 asks for 1 and page 3 asks "
+        "for 1, so 1 is used."
+    )
 
 
 def test_grade_preselection_handles_ordinals_and_preserves_parent_changes() -> None:

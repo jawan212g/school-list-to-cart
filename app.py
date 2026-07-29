@@ -74,7 +74,6 @@ from agent.review import (
     apply_review_confirmations,
     conditional_review_questions,
     conditional_answers_for_selection,
-    confidence_band,
     deduplicate_conditional_questions,
     organize_extractions,
     review_flag_groups,
@@ -101,6 +100,7 @@ from agent.rules import (
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     PARENT_EDITABLE_DETAIL_FIELDS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
+    SYSTEM_DECISION_MERGED_QUANTITY_PREFIX,
     SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX,
     SYSTEM_DECISION_RECONCILED_BRAND,
     SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
@@ -6088,23 +6088,51 @@ def review_understanding_text(item: SupplyItemReview) -> str:
 def review_system_decision_messages(
     item: SupplyItemReview,
 ) -> tuple[str, ...]:
-    """Translate BR-29 interpretation choices into parent language."""
+    """Translate BR-29 interpretation choices into one factual line."""
 
     messages: list[str] = []
-    if SYSTEM_DECISION_CONSOLIDATED_SOURCES in item.system_decisions:
+    if item.already_owned:
         messages.append(
-            f"Combined from {len(item.sources)} places in the list."
+            "You marked this item as already owned, so the cart quantity is 0."
         )
+    if (
+        SYSTEM_DECISION_CONSOLIDATED_SOURCES in item.system_decisions
+        and len(item.sources) > 1
+        and not item.already_owned
+    ):
+        source_quantities = tuple(source.quantity for source in item.sources)
+        locations = _join_names(
+            tuple(
+                f"page {source.page_number} asks for {source.quantity}"
+                for source in item.sources
+            )
+        )
+        if len(set(source_quantities)) == 1:
+            messages.append(
+                f"This item appears in {len(item.sources)} places; {locations}, "
+                f"so {item.required_quantity or source_quantities[0]} is used."
+            )
+        else:
+            messages.append(
+                f"This item appears in {len(item.sources)} places; {locations}. "
+                f"The cart uses {item.required_quantity or max(source_quantities)}."
+            )
     if SYSTEM_DECISION_RECONCILED_BRAND in item.system_decisions:
-        messages.append(
-            "The sources differed on brand detail; the explicit requirement "
-            "was kept."
-        )
+        if item.brand:
+            messages.append(
+                f"One source names {item.brand}; the other does not require a "
+                "different brand, so that brand is kept."
+            )
     if SYSTEM_DECISION_RECONCILED_EXCLUSIONS in item.system_decisions:
-        messages.append(
-            "The exclusions from every contributing source were kept."
-        )
+        if item.exclusions:
+            messages.append(
+                "The cart keeps every listed restriction: "
+                + _join_names(item.exclusions)
+                + "."
+            )
     for decision in item.system_decisions:
+        if decision.startswith(SYSTEM_DECISION_MERGED_QUANTITY_PREFIX):
+            continue
         if not decision.startswith(
             SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX
         ):
@@ -6116,11 +6144,26 @@ def review_system_decision_messages(
             field_name,
             field_name.replace("_", " "),
         )
-        messages.append(
-            f"The sources described {field_label} differently; the compatible "
-            "details were combined."
+        field_value: object = item.required_attributes.get(field_name)
+        if field_name == "size":
+            field_value = item.size
+        elif field_name == "material":
+            field_value = item.material
+        elif field_name == "acceptable_colors":
+            field_value = item.color
+        value_text = (
+            " or ".join(map(str, field_value))
+            if isinstance(field_value, (tuple, list, set))
+            else str(field_value or "").strip()
         )
-    return tuple(messages)
+        if value_text:
+            messages.append(
+                f"One part of the list specifies {field_label} as {value_text}; "
+                f"another leaves it open, so {value_text} is kept."
+            )
+    if not messages:
+        return ()
+    return (" ".join(messages),)
 
 
 def review_child_framing(
@@ -6190,6 +6233,8 @@ def _review_control_update(
 ) -> SupplyItemReview:
     """Apply secondary form controls without changing source evidence."""
 
+    normalized_brand = brand.strip() or None
+    exact_brand_required = bool(normalized_brand) and brand_required
     required_attributes = dict(item.required_attributes)
     if required_details.strip():
         required_attributes["other_details"] = required_details.strip()
@@ -6198,11 +6243,14 @@ def _review_control_update(
     return item.model_copy(
         update={
             "item_name": item_name,
-            "required_quantity": quantity,
+            "required_quantity": 0 if already_owned else max(quantity, 1),
             "unit": unit,
             "package_size": package_size,
-            "brand": brand.strip() or None,
-            "brand_required": brand_required,
+            "brand": normalized_brand,
+            "brand_hint": (
+                normalized_brand if not exact_brand_required else item.brand_hint
+            ),
+            "brand_required": exact_brand_required,
             "size": size.strip() or None,
             "material": material.strip() or None,
             "color": tuple(
@@ -6215,7 +6263,7 @@ def _review_control_update(
             "supply_scope": supply_scope,
             "already_owned": already_owned,
             "allow_equivalents": (
-                allow_equivalents and not brand_required
+                allow_equivalents and not exact_brand_required
             ),
             "notes": notes.strip() or None,
             "review_status": (
@@ -6253,6 +6301,25 @@ def review_detail_field_visibility(
     return visibility
 
 
+def catalog_unstocked_review_items(
+    items: Sequence[SupplyItemReview],
+    offers: Sequence[Offer],
+) -> tuple[SupplyItemReview, ...]:
+    """Name understood items with no stocked category in the catalog."""
+
+    stocked_categories = {
+        offer.category for offer in offers if offer.stock_qty > 0
+    }
+    return tuple(
+        item
+        for item in items
+        if item.is_purchasable
+        and not item.provided_by_school
+        and item.review_status != "deleted"
+        and item.item_name not in stocked_categories
+    )
+
+
 def _render_review_detail_controls(
     st: Any,
     item: SupplyItemReview,
@@ -6275,8 +6342,12 @@ def _render_review_detail_controls(
         quantity = int(
             second.number_input(
                 "Quantity",
-                min_value=1,
-                value=item.required_quantity or 1,
+                min_value=0,
+                value=(
+                    item.required_quantity
+                    if item.required_quantity is not None
+                    else 1
+                ),
                 step=1,
                 key=f"{key_prefix}:quantity",
             )
@@ -6335,14 +6406,29 @@ def _render_review_detail_controls(
             ),
             key=f"{key_prefix}:scope",
         )
-        brand_mode = first.radio(
-            "Brand choice",
+        brand_options = (
             (
                 "Equivalent brands are okay",
                 "Exact brand required",
+            )
+            if brand.strip()
+            else ("Equivalent brands are okay",)
+        )
+        brand_mode = first.radio(
+            "Brand choice",
+            brand_options,
+            index=(
+                1
+                if item.brand_required
+                and "Exact brand required" in brand_options
+                else 0
             ),
-            index=1 if item.brand_required else 0,
             key=f"{key_prefix}:brand-choice",
+            help=(
+                "Enter a brand before requiring an exact brand."
+                if not brand.strip()
+                else None
+            ),
         )
         brand_required = brand_mode == "Exact brand required"
         allow_equivalents = not brand_required
@@ -6406,11 +6492,13 @@ def _copy_shared_review_edits(
             "unit": source.unit,
             "package_size": source.package_size,
             "brand": source.brand,
+            "brand_hint": source.brand_hint,
             "brand_required": source.brand_required,
             "size": source.size,
             "color": source.color,
             "material": source.material,
             "required_attributes": source.required_attributes,
+            "exclusions": source.exclusions,
             "optional": source.optional,
             "supply_scope": source.supply_scope,
             "notes": source.notes,
@@ -6418,6 +6506,7 @@ def _copy_shared_review_edits(
             "allow_equivalents": source.allow_equivalents,
             "review_status": source.review_status,
             "system_decisions": source.system_decisions,
+            "variant_sources": source.variant_sources,
         }
     )
 
@@ -6431,28 +6520,89 @@ def _render_compact_review_row(
     offers: Sequence[Offer],
     flag_messages: Sequence[str] = (),
 ) -> tuple[dict[str, SupplyItemReview], bool]:
-    """Render source, interpretation, and only the needed confirmation."""
+    """Render one parent-first item card in the required verification order."""
 
     representative = members[0]
     with st.container(border=True):
-        if flag_messages:
-            st.warning(
-                escape_streamlit_dollars(
-                    " ".join(flag_messages)
-                )
-            )
         affected_labels = tuple(
             dict.fromkeys(
                 child_labels.get(member.child_id, member.child_id)
                 for member in members
             )
         )
+        item_heading = review_understanding_text(representative)
         if len(affected_labels) > 1:
-            st.caption(
-                escape_streamlit_dollars(
-                    "Affects " + _join_names(affected_labels)
-                )
+            item_heading += " · " + _join_names(affected_labels)
+        st.markdown(
+            escape_streamlit_dollars(f"**{item_heading}**")
+        )
+
+        source_inputs = {
+            (
+                list_input.child_id,
+                list_input.resolved_document_name,
+            ): list_input
+            for list_input in st.session_state.get("list_inputs", ())
+        }
+        rendered_sources: set[tuple[object, ...]] = set()
+        for member in members:
+            sources = member.sources or (
+                RequirementSource(
+                    source_req_id=member.req_id,
+                    document_name=member.source_document,
+                    section_name=member.source_section,
+                    page_number=(
+                        member.source_page or NONPAGINATED_SOURCE_PAGE
+                    ),
+                    exact_line=member.source_text,
+                    quantity=member.required_quantity or 0,
+                ),
             )
+            for source in sources:
+                source_key = (
+                    member.child_id,
+                    source.document_name,
+                    source.section_name,
+                    source.page_number,
+                    source.exact_line,
+                    source.quantity,
+                )
+                if source_key in rendered_sources:
+                    continue
+                rendered_sources.add(source_key)
+                source_prefix = (
+                    child_labels.get(member.child_id, member.child_id) + " · "
+                    if len(affected_labels) > 1
+                    else ""
+                )
+                st.caption(
+                    escape_streamlit_dollars(
+                        f"{source_prefix}Page {source.page_number}: "
+                        + _display_source_line(source.exact_line)
+                    )
+                )
+                list_input = source_inputs.get(
+                    (member.child_id, source.document_name)
+                ) or next(
+                    (
+                        candidate
+                        for (child_id, _), candidate in source_inputs.items()
+                        if child_id == member.child_id
+                    ),
+                    None,
+                )
+                if list_input is not None:
+                    _render_source_reference(
+                        st,
+                        list_input,
+                        page_number=source.page_number,
+                        source_line=source.exact_line,
+                        key=(
+                            f"{key_prefix}:item-source:"
+                            f"{source.source_req_id}"
+                        ),
+                    )
+
         decision_messages = tuple(
             dict.fromkeys(
                 message
@@ -6460,107 +6610,24 @@ def _render_compact_review_row(
                 for message in review_system_decision_messages(member)
             )
         )
-        for message in decision_messages:
-            st.info(escape_streamlit_dollars(message))
-        show_item_sources = bool(flag_messages or decision_messages)
-        if show_item_sources:
-            source_column, understanding_column, confirm_column = st.columns(
-                [5, 4, 2]
+        combined_decision = " ".join(
+            dict.fromkeys((*decision_messages, *flag_messages))
+        )
+        if combined_decision:
+            st.info(escape_streamlit_dollars(combined_decision))
+
+        if flag_messages:
+            confirmed = st.checkbox(
+                "Use this in the cart",
+                value=all(
+                    member.review_status == "confirmed"
+                    for member in members
+                ),
+                key=f"{key_prefix}:confirmed",
             )
         else:
-            understanding_column, confirm_column = st.columns([9, 2])
-            source_column = None
-        if source_column is not None:
-            with source_column:
-                st.caption("Source details")
-                source_inputs = {
-                    (
-                        list_input.child_id,
-                        list_input.resolved_document_name,
-                    ): list_input
-                    for list_input in st.session_state.get("list_inputs", ())
-                }
-                for member in members:
-                    if len(members) > 1:
-                        st.caption(
-                            escape_streamlit_dollars(
-                                child_labels.get(
-                                    member.child_id,
-                                    member.child_id,
-                                )
-                            )
-                        )
-                    sources = member.sources
-                    source_rows = sources or (
-                        RequirementSource(
-                            source_req_id=member.req_id,
-                            document_name=member.source_document,
-                            section_name=member.source_section,
-                            page_number=(
-                                member.source_page
-                                or NONPAGINATED_SOURCE_PAGE
-                            ),
-                            exact_line=member.source_text,
-                            quantity=member.required_quantity or 0,
-                        ),
-                    )
-                    for source in source_rows:
-                        page_text = (
-                            f"Page {source.page_number}: "
-                            if source.page_number is not None
-                            else ""
-                        )
-                        st.write(
-                            escape_streamlit_dollars(
-                                page_text
-                                + _display_source_line(source.exact_line)
-                            )
-                        )
-                        list_input = source_inputs.get(
-                            (member.child_id, source.document_name)
-                        ) or next(
-                            (
-                                candidate
-                                for (
-                                    child_id,
-                                    _,
-                                ), candidate in source_inputs.items()
-                                if child_id == member.child_id
-                            ),
-                            None,
-                        )
-                        if list_input is not None:
-                            _render_source_reference(
-                                st,
-                                list_input,
-                                page_number=source.page_number,
-                                source_line=source.exact_line,
-                                key=(
-                                    f"{key_prefix}:item-source:"
-                                    f"{source.source_req_id}"
-                                ),
-                            )
-        with understanding_column:
-            st.write(
-                escape_streamlit_dollars(
-                    review_understanding_text(representative)
-                )
-            )
-            st.caption(
-                f"List detail: {confidence_band(representative.confidence)}"
-            )
-        with confirm_column:
-            if flag_messages:
-                confirmed = st.checkbox(
-                    "Use this in the cart",
-                    value=all(
-                        member.review_status == "confirmed"
-                        for member in members
-                    ),
-                    key=f"{key_prefix}:confirmed",
-                )
-            else:
-                confirmed = True
+            st.caption("Use this in the cart")
+            confirmed = True
         edited_representative = _render_review_detail_controls(
             st,
             representative,
@@ -7136,6 +7203,114 @@ def _variant_detail_label(details: Sequence[tuple[str, object]]) -> str:
     return "; ".join(parts)
 
 
+MERGE_CUSTOM_QUANTITY_LABEL = "Enter my own quantity"
+MERGE_CUSTOM_VARIANT_LABEL = "Enter my own quantities"
+
+
+def quantity_quick_choice_values(
+    interrupt: Any,
+) -> dict[str, int | None]:
+    """Build BR-30 shortcuts from production requirement sources."""
+
+    values: dict[str, int | None] = {
+        (
+            "Use the largest requested quantity "
+            f"({interrupt.default_quantity}) — default"
+        ): interrupt.default_quantity,
+        (
+            "Add every source quantity "
+            f"({sum(source.quantity for source in interrupt.sources)})"
+        ): sum(source.quantity for source in interrupt.sources),
+    }
+    for source in interrupt.sources:
+        values[
+            "Use the quantity from "
+            f"{_requirement_source_label(source)} — "
+            f"{_display_source_line(source.exact_line)} "
+            f"({source.quantity})"
+        ] = source.quantity
+    values[MERGE_CUSTOM_QUANTITY_LABEL] = None
+    return values
+
+
+def variant_quick_choice_values(
+    decision: Any,
+) -> dict[str, dict[str, int] | None]:
+    """Build BR-30 shortcuts without flattening source-backed variants."""
+
+    sources = decision.sources
+    largest_source = max(
+        sources,
+        key=lambda source: source.quantity,
+    )
+
+    def allocation_for_source(source: RequirementSource) -> dict[str, int]:
+        return {
+            variant.variant_id: (
+                source.quantity
+                if any(
+                    candidate.source_req_id == source.source_req_id
+                    for candidate in variant.sources
+                )
+                else 0
+            )
+            for variant in decision.variants
+        }
+
+    values: dict[str, dict[str, int] | None] = {
+        (
+            "Use the largest requested quantity "
+            f"({largest_source.quantity}) — default"
+        ): allocation_for_source(largest_source),
+        (
+            "Add every source quantity "
+            f"({sum(source.quantity for source in sources)})"
+        ): {
+            variant.variant_id: sum(
+                source.quantity for source in variant.sources
+            )
+            for variant in decision.variants
+        },
+    }
+    for source in sources:
+        values[
+            "Use the quantity from "
+            f"{_requirement_source_label(source)} — "
+            f"{_display_source_line(source.exact_line)} "
+            f"({source.quantity})"
+        ] = allocation_for_source(source)
+    values[MERGE_CUSTOM_VARIANT_LABEL] = None
+    return values
+
+
+def apply_merge_quick_choice(
+    state: MutableMapping[str, Any],
+    choice_key: str,
+    quantity_keys: Mapping[str, str],
+    choices: Mapping[str, Mapping[str, int] | int | None],
+) -> None:
+    """Synchronize editable quantities after a BR-30 radio shortcut."""
+
+    selected = choices.get(str(state.get(choice_key)))
+    if selected is None:
+        return
+    if isinstance(selected, Mapping):
+        for item_id, value in selected.items():
+            state[quantity_keys[item_id]] = int(value)
+        return
+    state[next(iter(quantity_keys.values()))] = int(selected)
+
+
+def mark_merge_quantities_custom(
+    state: MutableMapping[str, Any],
+    choice_key: str,
+    custom_label: str,
+) -> None:
+    """Keep radio and number inputs as two views of one selection state."""
+
+    state[choice_key] = custom_label
+
+
 def _render_requirement_merge(st: Any) -> None:
     """Resolve same-item quantity or constraint disagreements."""
 
@@ -7213,21 +7388,55 @@ def _render_requirement_merge(st: Any) -> None:
 
             if decision.variants:
                 st.caption(
-                    "The sources specify different versions. Adjust how many "
-                    "of each version should go in the cart."
+                    "Choose a quick starting point or adjust each version "
+                    "directly."
+                )
+                quick_choices = variant_quick_choice_values(decision)
+                choice_key = f"{decision.decision_id}:quantity-choice"
+                quantity_keys = {
+                    variant.variant_id: f"{variant.variant_id}:quantity"
+                    for variant in decision.variants
+                }
+                if choice_key not in st.session_state:
+                    st.session_state[choice_key] = next(iter(quick_choices))
+                apply_merge_quick_choice(
+                    st.session_state,
+                    choice_key,
+                    quantity_keys,
+                    quick_choices,
+                )
+                st.radio(
+                    "Quick quantity choices",
+                    tuple(quick_choices),
+                    key=choice_key,
+                    on_change=apply_merge_quick_choice,
+                    args=(
+                        st.session_state,
+                        choice_key,
+                        quantity_keys,
+                        quick_choices,
+                    ),
                 )
                 selected_variants: dict[str, int] = {}
                 for variant in decision.variants:
+                    quantity_key = quantity_keys[variant.variant_id]
+                    if quantity_key not in st.session_state:
+                        st.session_state[quantity_key] = 0
                     variant_quantity = int(
                         st.number_input(
                             _variant_detail_label(variant.details),
                             min_value=0,
-                            value=variant.default_quantity,
                             step=1,
-                            key=f"{variant.variant_id}:quantity",
+                            key=quantity_key,
+                            on_change=mark_merge_quantities_custom,
+                            args=(
+                                st.session_state,
+                                choice_key,
+                                MERGE_CUSTOM_VARIANT_LABEL,
+                            ),
                             help=(
-                                "The starting value is the quantity extracted "
-                                "from the source for this version."
+                                "Change any version directly to build your own "
+                                "quantity."
                             ),
                         )
                     )
@@ -7250,56 +7459,58 @@ def _render_requirement_merge(st: Any) -> None:
                 interrupt = decision.quantity_interrupt
                 if interrupt is None:
                     continue
-                source_options = tuple(
-                    (
-                        "Use the quantity from "
-                        f"{_requirement_source_label(source)} "
-                        f"({source.quantity})",
-                        source.quantity,
-                    )
-                    for source in interrupt.sources
-                )
-                option_labels = (
-                    (
-                        "Add every list's quantity together "
-                        f"({interrupt.default_quantity}) — default"
+                quick_choices = quantity_quick_choice_values(interrupt)
+                choice_key = f"{interrupt.interrupt_id}:choice"
+                quantity_key = f"{interrupt.interrupt_id}:quantity"
+                quantity_keys = {interrupt.interrupt_id: quantity_key}
+                if choice_key not in st.session_state:
+                    st.session_state[choice_key] = next(iter(quick_choices))
+                if quantity_key not in st.session_state:
+                    st.session_state[quantity_key] = interrupt.default_quantity
+                st.radio(
+                    "Quick quantity choices",
+                    tuple(quick_choices),
+                    key=choice_key,
+                    on_change=apply_merge_quick_choice,
+                    args=(
+                        st.session_state,
+                        choice_key,
+                        quantity_keys,
+                        quick_choices,
                     ),
-                    *(label for label, _ in source_options),
-                    "Choose my own quantity",
                 )
-                selected_label = st.radio(
-                    "Quantity to purchase",
-                    option_labels,
-                    index=0,
-                    key=f"{interrupt.interrupt_id}:choice",
-                )
-                if selected_label == option_labels[0]:
-                    selections[interrupt.interrupt_id] = (
-                        "total",
-                        interrupt.default_quantity,
+                selected_quantity = int(
+                    st.number_input(
+                        "Cart quantity",
+                        min_value=1,
+                        step=1,
+                        key=quantity_key,
+                        on_change=mark_merge_quantities_custom,
+                        args=(
+                            st.session_state,
+                            choice_key,
+                            MERGE_CUSTOM_QUANTITY_LABEL,
+                        ),
                     )
-                    selected_quantity = interrupt.default_quantity
-                elif selected_label == option_labels[-1]:
-                    selected_quantity = int(
-                        st.number_input(
-                            "Quantity to purchase",
-                            min_value=1,
-                            value=interrupt.default_quantity,
-                            step=1,
-                            key=f"{interrupt.interrupt_id}:custom",
+                )
+                selected_label = str(st.session_state[choice_key])
+                action = (
+                    "custom"
+                    if selected_label == MERGE_CUSTOM_QUANTITY_LABEL
+                    else (
+                        "total"
+                        if selected_label.startswith("Add every")
+                        else (
+                            "largest"
+                            if selected_label.startswith("Use the largest")
+                            else "source"
                         )
                     )
-                    selections[interrupt.interrupt_id] = (
-                        "custom",
-                        selected_quantity,
-                    )
-                else:
-                    source_index = option_labels.index(selected_label) - 1
-                    selected_quantity = source_options[source_index][1]
-                    selections[interrupt.interrupt_id] = (
-                        "source",
-                        selected_quantity,
-                    )
+                )
+                selections[interrupt.interrupt_id] = (
+                    action,
+                    selected_quantity,
+                )
                 st.caption(f"The cart quantity will be {selected_quantity}.")
 
             for source in decision.sources:
@@ -7425,23 +7636,109 @@ def _personalize_source_summary(
         if selection is not None
         else ()
     )
-    if ignored or envelope.uninterpreted_lines or envelope.skipped_lines:
-        with st.expander("What was not extracted"):
-            if ignored:
-                st.caption("Other document sections")
-                st.write(escape_streamlit_dollars(_join_names(ignored)))
-            for line in envelope.uninterpreted_lines:
-                st.warning(
-                    escape_streamlit_dollars(
-                        "Could not interpret: " + _display_source_line(line)
-                    )
+    if ignored:
+        ignored_count = len(ignored)
+        with st.expander(
+            f"{ignored_count} other "
+            f"{'section was' if ignored_count == 1 else 'sections were'} not read"
+        ):
+            st.write(
+                "Those sections were for other grades or were translated copies "
+                "of the section selected for this student."
+            )
+
+    selected_pages = (
+        envelope.document_selection.selected_page_numbers
+        if envelope.document_selection is not None
+        else ()
+    )
+    source_page = selected_pages[0] if len(selected_pages) == 1 else None
+    if envelope.uninterpreted_lines:
+        st.warning(
+            "Lines we could not interpret need your attention before shopping."
+        )
+        for index, line in enumerate(envelope.uninterpreted_lines, start=1):
+            source_line = re.sub(
+                r"^\s*Could not interpret\s*:\s*",
+                "",
+                line,
+                flags=re.IGNORECASE,
+            ).strip()
+            st.write(escape_streamlit_dollars(source_line or line))
+            if list_input is not None:
+                _render_source_reference(
+                    st,
+                    list_input,
+                    page_number=source_page,
+                    source_line=source_line or line,
+                    key=f"uninterpreted:{child_id}:{index}",
                 )
-            for line in envelope.skipped_lines:
-                st.info(
-                    escape_streamlit_dollars(
-                        "Deliberately skipped: " + _display_source_line(line)
-                    )
+
+    legacy_unavailable: list[tuple[str, str]] = []
+    remaining_skipped: list[str] = []
+    unavailable_pattern = re.compile(
+        r"^Unsupported canonical item:\s*(.+?)\s+is purchasable\b",
+        flags=re.IGNORECASE,
+    )
+    for line in envelope.skipped_lines:
+        match = unavailable_pattern.search(line)
+        if match is None:
+            remaining_skipped.append(line)
+        else:
+            item_name = match.group(1).strip()
+            legacy_unavailable.append((item_name, item_name))
+
+    unavailable_items = tuple(envelope.catalog_unavailable_items)
+    if unavailable_items or legacy_unavailable:
+        st.error(
+            "Items these stores do not carry. You will need to source these "
+            "yourself."
+        )
+        for index, item in enumerate(unavailable_items, start=1):
+            st.write(
+                escape_streamlit_dollars(
+                    f"{item.item_name.replace('_', ' ').title()}: "
+                    f"{item.source_line}"
                 )
+            )
+            if list_input is not None:
+                _render_source_reference(
+                    st,
+                    list_input,
+                    page_number=item.page_number,
+                    source_line=item.source_line,
+                    key=f"catalog-unavailable:{child_id}:{index}",
+                )
+        for index, (item_name, source_line) in enumerate(
+            legacy_unavailable,
+            start=1,
+        ):
+            st.write(
+                escape_streamlit_dollars(
+                    f"{item_name}: not stocked by the available stores."
+                )
+            )
+            if list_input is not None:
+                _render_source_reference(
+                    st,
+                    list_input,
+                    page_number=source_page,
+                    source_line=source_line,
+                    key=f"legacy-unavailable:{child_id}:{index}",
+                )
+
+    if remaining_skipped:
+        with st.expander(
+            f"Other list content not used ({len(remaining_skipped)})"
+        ):
+            for line in remaining_skipped:
+                parent_line = re.sub(
+                    r"^Duplicate reading suppressed:\s*",
+                    "Repeated line read once: ",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+                st.write(escape_streamlit_dollars(parent_line))
 
 
 def _render_review(st: Any) -> None:
@@ -7538,6 +7835,43 @@ def _render_review(st: Any) -> None:
                     child_id,
                     envelope,
                 )
+            unstocked_items = catalog_unstocked_review_items(
+                tuple(
+                    item for item in items if item.child_id == child_id
+                ),
+                review_offers,
+            )
+            if unstocked_items:
+                st.error(
+                    "These items are not stocked by the available stores. "
+                    "You will need to source them yourself."
+                )
+                list_input = next(
+                    (
+                        candidate
+                        for candidate in st.session_state.get(
+                            "list_inputs",
+                            (),
+                        )
+                        if candidate.child_id == child_id
+                    ),
+                    None,
+                )
+                for item in unstocked_items:
+                    st.write(
+                        escape_streamlit_dollars(
+                            f"{_item_display_name(item.item_name)}: "
+                            f"{item.source_text}"
+                        )
+                    )
+                    if list_input is not None:
+                        _render_source_reference(
+                            st,
+                            list_input,
+                            page_number=item.source_page,
+                            source_line=item.source_text,
+                            key=f"unstocked:{item.review_id}",
+                        )
             child_condition_groups = tuple(
                 condition_groups_by_child.get(child_id, ())
             )

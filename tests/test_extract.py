@@ -41,6 +41,37 @@ def test_small_model_prompt_requires_calibrated_evidence_only_output() -> None:
     assert "quart H-P" in instruction
     assert "one mutually exclusive set" in instruction
     assert "condition_group_id" in instruction
+    assert "plain item name as" in instruction
+
+
+def test_understood_out_of_catalog_item_keeps_source_evidence() -> None:
+    """FR-12/E-36: rejected catalog categories remain visible to the parent."""
+
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="tape",
+                child_id="model-child",
+                raw_text="1 roll Scotch tape",
+                canonical_item="tape",
+                quantity=1,
+                source_section="5th Grade",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    secured = _apply_security_filters(envelope, "child-1")
+
+    assert secured.requirements == ()
+    assert len(secured.catalog_unavailable_items) == 1
+    unavailable = secured.catalog_unavailable_items[0]
+    assert unavailable.child_id == "child-1"
+    assert unavailable.item_name == "tape"
+    assert unavailable.source_line == "1 roll Scotch tape"
+    assert unavailable.section_name == "5th Grade"
+    assert unavailable.page_number == 2
 
 
 def test_last_name_bag_branches_are_grouped_deterministically() -> None:

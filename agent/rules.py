@@ -91,8 +91,13 @@ NONPAGINATED_SOURCE_PAGE = 1
 REQUIREMENT_MERGE_EQUAL_QUANTITY_ACTION = "use_once"
 # BR-20: the same normalized item for one student with agreeing quantities is one requirement.
 
-REQUIREMENT_MERGE_CONFLICT_DEFAULT_ACTION = "total"
-# BR-21: disagreeing same-item quantities require one parent choice, defaulting to their total.
+REQUIREMENT_MERGE_CONFLICT_DEFAULT_ACTION = "largest"
+# BR-30: cross-section/document restatements default to the largest requested
+# quantity; adding every source quantity remains an explicit parent choice.
+
+SYSTEM_DECISION_MERGED_QUANTITY_PREFIX = "merged_quantity:"
+# BR-30: the deterministic quantity selected for a consolidated item remains
+# visible at the mandatory parent review.
 
 REQUIREMENT_SOURCE_DEDUPLICATION_FIELDS = (
     "document_name",
@@ -127,6 +132,14 @@ BRAND_PREFERENCE_SIGNALS = (
     "we like",
 )
 # BR-24: preference wording never creates an exact-brand requirement.
+
+BRAND_PREFERENCE_PATTERN = re.compile(
+    r"\b([A-Za-z][A-Za-z0-9&'’-]*(?:\s+[A-Za-z][A-Za-z0-9&'’-]*){0,2})"
+    r"\s+(?:is\s+best|are\s+best|preferred)\b",
+    flags=re.IGNORECASE,
+)
+# BR-24: a brand named as a preference is retained as a matching hint while
+# equivalent brands remain allowed.
 
 REQUIREMENT_ITEM_IDENTITY_FIELDS = (
     "child_id",
@@ -378,6 +391,25 @@ def required_brand_from_source(
     if not explicit:
         return None
     return brand
+
+
+def preferred_brand_from_source(
+    source_line: str,
+    proposed_brand: str | None,
+) -> str | None:
+    """Retain a BR-24 preferred brand without turning it into a lock."""
+
+    source = source_line.casefold()
+    if not any(signal in source for signal in BRAND_PREFERENCE_SIGNALS):
+        return None
+    if proposed_brand is not None and proposed_brand.strip():
+        return proposed_brand.strip()
+    match = BRAND_PREFERENCE_PATTERN.search(source_line)
+    if match is None:
+        return None
+    candidate = match.group(1).strip()
+    leading_quantity = re.sub(r"^\d+\s+", "", candidate).strip()
+    return leading_quantity or None
 
 
 def pack_count_difference_is_major(

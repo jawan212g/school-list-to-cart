@@ -1902,3 +1902,83 @@ compact and student-centered.
 
 Deploy Part A-4 and verify the mixed-section Sharpie example, per-variant quantity
 controls, student summaries, and collapsed excluded-content panel in one live pass.
+
+## 2026-07-28 - Correct quantity semantics and simplify item verification
+
+### Objective
+
+Make cross-section quantities reflect restated needs rather than automatic addition,
+preserve source-backed variants and provenance, and reorganize Lists/Personalize item
+cards around the facts a parent needs to verify.
+
+### Work completed
+
+- Changed the deterministic cross-section/document conflict default from the sum to
+  the largest requested quantity, while retaining sum, named-source, and custom
+  choices.
+- Added synchronized quick choices and editable quantity fields for both plain
+  quantity conflicts and source-backed variants.
+- Preserved every contributing source on resolved variants while keeping each
+  variant's own detail source and quantity; prevented review-question deduplication
+  from overwriting distinct variant attributes.
+- Reordered each Personalize item card to show the interpreted item, exact source
+  evidence, one factual decision line, the cart-use control, and collapsed details.
+- Removed the confidence tag, made owned items visibly quantity zero and cart
+  ineligible, and made an exact brand impossible without a populated brand.
+- Retained preferred brands as non-locking hints and removed duplicated preference
+  prose from other required details.
+- Separated ignored sections, uninterpreted lines, deliberately unused content, and
+  understood items absent from the catalog; preserved source links for actionable
+  gaps.
+
+### Decisions made
+
+- Added BR-30 without renumbering earlier rules: cross-section/document restatements
+  default to the largest requested quantity, and summing is parent-selected.
+- Kept Supply use and Units in one package in this block pending the requested
+  follow-up decision; neither control was removed.
+- Did not alter matching, gate, approval, setup, optimizer arithmetic, or money
+  handling.
+
+### Problems or limitations
+
+- Streamlit is intentionally unavailable on this Windows ARM64 environment, so the
+  Lists and Personalize screens could not be visually exercised locally. The
+  Streamlit-only AppTest remains skipped.
+- Kelley model output remains nondeterministic across runs. The paired A-5 run reused
+  one extraction for both budgets to isolate the budget comparison, but its $150
+  result is not directly comparable to A-4 as a code-only delta.
+- The Personalize screen can identify a missing stocked category without running
+  matching. Attribute-, brand-, radius-, or fulfillment-specific infeasibility is
+  still determined later by the unchanged matching and approval flow.
+
+### Files created or changed
+
+- Updated `agent/extract.py`, `agent/pipeline.py`,
+  `agent/requirement_merge.py`, `agent/review.py`, `agent/rules.py`,
+  `agent/schema.py`, and `app.py`.
+- Updated `tests/test_app.py`, `tests/test_extract.py`, and
+  `tests/test_requirement_merge.py`.
+
+### Testing performed
+
+- `py -3.12-arm64 -m pytest -q`: 295 passed, 1 skipped.
+- Kelley GPT API (`gpt-oss-20b`) shared extraction: 25.28 seconds.
+- The $150 plan landed at $109.83 with three visible interrupts.
+- Reusing the same extraction at $85 produced a $109.83 base plan and a $71.47
+  recommended plan with four visible interrupts.
+- Maple quantities remained separate by student and constraint: Grade 2 had 24
+  exact-brand pencils and four large glue sticks; Grade 5 had 36 generic pencils
+  and six unconstrained glue sticks.
+
+### Remaining work
+
+- Visually verify the conflict controls and item-card spacing in deployed Streamlit.
+- Decide in the next scoped revision whether to remove or relabel Supply use and
+  Units in one package after reviewing their current behavior.
+
+### Recommended next step
+
+Deploy Part A-5 and exercise one cross-section quantity conflict, one two-variant
+composition-notebook conflict, an owned item, and an out-of-catalog item before
+starting the next Personalize revision.

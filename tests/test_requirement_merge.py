@@ -8,8 +8,11 @@ from agent.requirement_merge import (
     consolidate_requirements,
     item_decisions,
 )
-from agent.review import organize_extractions
+from agent.aggregate import aggregate_requirements
+from agent.optimize import OptimizationConfig, optimize_cart
+from agent.review import confirmed_requirements, organize_extractions
 from agent.schema import ExtractionEnvelope, Requirement
+from data.loader import Offer, Store
 
 
 def _requirement(
@@ -57,10 +60,32 @@ def test_different_quantities_produce_exactly_one_interrupt() -> None:
     )
 
     assert len(result.requirements) == 1
-    assert result.requirements[0].quantity == 3
+    assert result.requirements[0].quantity == 2
     assert len(result.interrupts) == 1
-    assert result.interrupts[0].default_action == "total"
-    assert result.interrupts[0].default_quantity == 3
+    assert result.interrupts[0].default_action == "largest"
+    assert result.interrupts[0].default_quantity == 2
+
+
+def test_quantity_total_remains_an_explicit_parent_choice() -> None:
+    """BR-30: summing cross-section quantities is available but not default."""
+
+    initial = consolidate_requirements(
+        (
+            _requirement("grade-5", 1, "5th Grade", 2),
+            _requirement("hc", 2, "Highly Capable Class", 3),
+        )
+    )
+    interrupt_id = initial.interrupts[0].interrupt_id
+
+    resolved = consolidate_requirements(
+        (
+            _requirement("grade-5", 1, "5th Grade", 2),
+            _requirement("hc", 2, "Highly Capable Class", 3),
+        ),
+        quantity_choices={interrupt_id: 3},
+    )
+
+    assert resolved.requirements[0].quantity == 3
 
 
 def test_consolidated_requirement_retains_every_source_reference() -> None:
@@ -321,8 +346,128 @@ def test_parent_can_split_quantity_across_conflicting_variants() -> None:
     )
 
     assert sorted(item.quantity for item in split.requirements) == [1, 2]
+    assert all(len(item.sources) == 2 for item in split.requirements)
+    assert all(len(item.variant_sources) == 1 for item in split.requirements)
     assert len(one_variant.requirements) == 1
     assert one_variant.requirements[0].quantity == 3
+
+
+def test_variant_allocations_survive_as_two_cart_lines() -> None:
+    """BR-26: source-backed variants remain distinct through optimization."""
+
+    requirements = (
+        Requirement(
+            req_id="sewn",
+            child_id="child-1",
+            raw_text="1 sewn composition notebook",
+            canonical_item="composition_notebooks",
+            quantity=1,
+            attributes={"style": "sewn"},
+            source_document="district.pdf",
+            source_section="Highly Capable",
+            source_page=3,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="regular",
+            child_id="child-1",
+            raw_text="4 composition notebooks",
+            canonical_item="composition_notebooks",
+            quantity=4,
+            attributes={"style": "regular"},
+            source_document="district.pdf",
+            source_section="5th Grade",
+            source_page=2,
+            extraction_confidence=1.0,
+        ),
+    )
+    initial = consolidate_requirements(requirements)
+    decision = item_decisions(initial)[0]
+    selected = {
+        variant.variant_id: variant.default_quantity
+        for variant in decision.variants
+    }
+    merged = consolidate_requirements(
+        requirements,
+        variant_quantity_choices={decision.decision_id: selected},
+    )
+    rows = tuple(
+        row.model_copy(update={"review_status": "confirmed"})
+        for row in organize_extractions(
+            {
+                "child-1": ExtractionEnvelope(
+                    requirements=merged.requirements,
+                )
+            }
+        )
+    )
+    needs = aggregate_requirements(confirmed_requirements(rows))
+    store = Store(
+        store_id="store",
+        name="Fixture Store",
+        distance_miles=1.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=0,
+        delivery_minimum=0,
+        tax_applies=False,
+    )
+    offers = (
+        Offer(
+            sku="sewn-sku",
+            store_id="store",
+            brand="Fixture",
+            title="Sewn composition notebook",
+            category="composition_notebooks",
+            pack_size=1,
+            unit_price=100,
+            pack_price=100,
+            stock_qty=10,
+            is_returnable=True,
+            attributes={"style": "sewn"},
+        ),
+        Offer(
+            sku="regular-sku",
+            store_id="store",
+            brand="Fixture",
+            title="Regular composition notebook",
+            category="composition_notebooks",
+            pack_size=1,
+            unit_price=80,
+            pack_price=80,
+            stock_qty=10,
+            is_returnable=True,
+            attributes={"style": "regular"},
+        ),
+    )
+    candidates = {
+        need.source_requirement_ids: frozenset(
+            ("sewn-sku",)
+            if need.attributes.get("style") == "sewn"
+            else ("regular-sku",)
+        )
+        for need in needs
+    }
+
+    result = optimize_cart(
+        needs,
+        offers,
+        (store,),
+        OptimizationConfig(
+            fulfillment_preference="pickup",
+            tax_basis_points=0,
+        ),
+        candidate_skus_by_need=candidates,
+    )
+
+    assert tuple(sorted(line.units_needed for line in result.plan.lines)) == (
+        1,
+        4,
+    )
+    assert tuple(sorted(line.sku for line in result.plan.lines)) == (
+        "regular-sku",
+        "sewn-sku",
+    )
 
 
 @pytest.mark.parametrize(

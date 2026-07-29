@@ -15,6 +15,7 @@ from agent.rules import (
     CORRECTED_EXTRACTION_CONFIDENCE,
     NONPAGINATED_SOURCE_PAGE,
     explicit_package_count,
+    preferred_brand_from_source,
     required_brand_from_source,
 )
 
@@ -254,6 +255,7 @@ class Requirement(BaseModel):
     quantity_max: int | None = Field(default=None, ge=0)
     unit_type: UnitType = "each"
     brand_lock: str | None = None
+    brand_hint: str | None = None
     exclusions: tuple[str, ...] = ()
     is_required: bool = True
     is_purchasable: bool = True
@@ -270,6 +272,7 @@ class Requirement(BaseModel):
     source_page: int = Field(default=NONPAGINATED_SOURCE_PAGE, ge=1)
     source_language: str | None = None
     sources: tuple[RequirementSource, ...] = ()
+    variant_sources: tuple[RequirementSource, ...] = ()
     system_decisions: tuple[str, ...] = ()
     attributes: RequirementAttributes = Field(
         default_factory=RequirementAttributes
@@ -303,13 +306,19 @@ class Requirement(BaseModel):
             if normalized.get("requirement_type", "required") == "required":
                 normalized["requirement_type"] = "optional"
         raw_text = str(normalized.get("raw_text", ""))
+        proposed_brand = (
+            str(normalized["brand_lock"])
+            if normalized.get("brand_lock") is not None
+            else None
+        )
+        normalized["brand_hint"] = (
+            str(normalized["brand_hint"])
+            if normalized.get("brand_hint") is not None
+            else preferred_brand_from_source(raw_text, proposed_brand)
+        )
         normalized["brand_lock"] = required_brand_from_source(
             raw_text,
-            (
-                str(normalized["brand_lock"])
-                if normalized.get("brand_lock") is not None
-                else None
-            ),
+            proposed_brand,
         )
         canonical_item = str(normalized.get("canonical_item", ""))
         corrected = False
@@ -376,6 +385,20 @@ class Requirement(BaseModel):
             )
             normalized["attributes"] = corrected_attributes
             corrected = corrected or attributes_changed
+            brand_hint = normalized.get("brand_hint")
+            other_details = corrected_attributes.get("other_details")
+            if (
+                isinstance(brand_hint, str)
+                and isinstance(other_details, str)
+                and brand_hint.casefold() in other_details.casefold()
+                and any(
+                    signal in other_details.casefold()
+                    for signal in ("preferred", "is best", "are best", "we like")
+                )
+            ):
+                corrected_attributes["other_details"] = None
+                normalized["attributes"] = corrected_attributes
+                corrected = True
         confidence = normalized.get("extraction_confidence")
         if (
             corrected
@@ -493,6 +516,20 @@ class DocumentSelection(BaseModel):
         return self
 
 
+class CatalogUnavailableItem(BaseModel):
+    """A list item understood by extraction but absent from the catalog."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    child_id: str = Field(min_length=1)
+    item_name: str = Field(min_length=1)
+    source_line: str = Field(min_length=1)
+    document_name: str | None = None
+    section_name: str | None = None
+    page_number: int = Field(default=NONPAGINATED_SOURCE_PAGE, ge=1)
+    is_required: bool = True
+
+
 class ExtractionEnvelope(BaseModel):
     """Schema-validated model response with explicit manual-review state."""
 
@@ -507,6 +544,7 @@ class ExtractionEnvelope(BaseModel):
     document_selection: DocumentSelection | None = None
     uninterpreted_lines: tuple[str, ...] = ()
     skipped_lines: tuple[str, ...] = ()
+    catalog_unavailable_items: tuple["CatalogUnavailableItem", ...] = ()
 
     @field_validator("stated_grades", "stated_teachers")
     @classmethod
@@ -535,17 +573,19 @@ class SupplyItemReview(BaseModel):
     req_id: str = Field(min_length=1)
     child_id: str = Field(min_length=1)
     item_name: str = Field(min_length=1)
-    required_quantity: int | None = Field(default=None, ge=1)
+    required_quantity: int | None = Field(default=None, ge=0)
     quantity_is_range: bool = False
     quantity_max: int | None = Field(default=None, ge=1)
     unit: UnitType = "each"
     package_size: int | None = Field(default=None, ge=1)
     brand: str | None = None
+    brand_hint: str | None = None
     brand_required: bool = False
     size: str | None = None
     color: tuple[str, ...] = ()
     material: str | None = None
     required_attributes: dict[str, AttributeValue] = Field(default_factory=dict)
+    exclusions: tuple[str, ...] = ()
     optional: bool = False
     is_purchasable: bool = True
     supply_scope: SupplyScope = "unspecified"
@@ -560,6 +600,7 @@ class SupplyItemReview(BaseModel):
     source_page: int | None = Field(default=None, ge=1)
     source_language: str | None = None
     sources: tuple[RequirementSource, ...] = ()
+    variant_sources: tuple[RequirementSource, ...] = ()
     system_decisions: tuple[str, ...] = ()
     notes: str | None = None
     source_text: str = Field(min_length=1)
@@ -577,6 +618,12 @@ class SupplyItemReview(BaseModel):
         if not isinstance(value, Mapping):
             return value
         normalized = dict(value)
+        brand = normalized.get("brand")
+        if normalized.get("brand_required") is True and not (
+            isinstance(brand, str) and brand.strip()
+        ):
+            normalized["brand_required"] = False
+            normalized["allow_equivalents"] = True
         if normalized.get("brand_required") is True:
             normalized["allow_equivalents"] = False
         return normalized

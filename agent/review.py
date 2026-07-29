@@ -139,8 +139,8 @@ def review_issue_explanations(
             )
         elif issue == "low_confidence":
             messages.append(
-                "This extraction is uncertain. Compare it with the original "
-                "line."
+                "The original line may be unclear. Compare it with the source "
+                "shown here."
             )
         elif issue == "quantity_range":
             if (
@@ -206,6 +206,13 @@ def review_flag_groups(
             row.brand_required,
             row.size,
             row.color,
+            tuple(
+                sorted(
+                    (key, repr(value))
+                    for key, value in row.required_attributes.items()
+                )
+            ),
+            row.exclusions,
             row.optional,
             row.supply_scope,
             messages,
@@ -331,7 +338,8 @@ def organize_extractions(
             quantity_max=requirement.quantity_max,
             unit=requirement.unit_type,
             package_size=requirement.attributes.count,
-            brand=requirement.brand_lock,
+            brand=requirement.brand_lock or requirement.brand_hint,
+            brand_hint=requirement.brand_hint,
             brand_required=requirement.brand_lock is not None,
             size=requirement.attributes.size,
             color=requirement.attributes.acceptable_colors,
@@ -345,6 +353,7 @@ def organize_extractions(
                     "material",
                 },
             ),
+            exclusions=requirement.exclusions,
             optional=not requirement.is_required,
             is_purchasable=requirement.is_purchasable,
             supply_scope=requirement.supply_scope,
@@ -359,6 +368,7 @@ def organize_extractions(
             source_page=requirement.source_page,
             source_language=requirement.source_language,
             sources=requirement.sources,
+            variant_sources=requirement.variant_sources,
             system_decisions=requirement.system_decisions,
             notes=None,
             source_text=requirement.raw_text,
@@ -707,7 +717,8 @@ def confirmed_requirements(
                 quantity_max=row.quantity_max,
                 unit_type=row.unit,
                 brand_lock=None,
-                exclusions=(),
+                brand_hint=row.brand if not row.brand_required else row.brand_hint,
+                exclusions=row.exclusions,
                 is_required=is_required,
                 is_purchasable=is_purchasable,
                 requirement_type=(
@@ -725,6 +736,7 @@ def confirmed_requirements(
                 source_page=row.source_page,
                 source_language=row.source_language,
                 sources=row.sources,
+                variant_sources=row.variant_sources,
                 system_decisions=(),
                 attributes=RequirementAttributes(),
                 extraction_confidence=row.confidence,
@@ -770,6 +782,7 @@ def reviewed_envelopes(
             document_selection=envelope.document_selection,
             uninterpreted_lines=envelope.uninterpreted_lines,
             skipped_lines=envelope.skipped_lines,
+            catalog_unavailable_items=envelope.catalog_unavailable_items,
         )
         for child_id, envelope in original.items()
     }

@@ -52,6 +52,7 @@ from agent.provider import (
     request_structured_output,
 )
 from agent.schema import (
+    CatalogUnavailableItem,
     DocumentSelection,
     DocumentSection,
     DocumentStructureEnvelope,
@@ -224,8 +225,12 @@ Extraction rules:
 - Put a visible line deliberately skipped for a stated reason in skipped_lines,
   prefixed by that short reason. Do not use skipped_lines for parent-ignored
   document sections; the application records those separately.
-- For purchasable lines, canonical_item must be exactly one of:
-  {ALLOWED_CATEGORY_TEXT}
+- For purchasable lines represented by the catalog, canonical_item must be
+  exactly one of: {ALLOWED_CATEGORY_TEXT}
+- If a line is clearly a school supply but is not in that catalog list, still
+  return it as a purchasable Requirement using the plain item name as
+  canonical_item. Deterministic allowlist code will keep it out of the cart
+  while preserving its exact source line for the parent.
 - For fees, labeling reminders, family photos, and similar display-only lines, use
   canonical_item="{NON_PURCHASABLE_CATEGORY}" and is_purchasable=false.
 - Preserve the complete original line in raw_text, character for character. Keep
@@ -1126,6 +1131,7 @@ def apply_extraction_security_filters(
         )
     )
     accepted: list[Requirement] = []
+    catalog_unavailable_items = list(envelope.catalog_unavailable_items)
     accepted_signatures: set[
         tuple[str, str, int, str, str | None]
     ] = set()
@@ -1158,6 +1164,17 @@ def apply_extraction_security_filters(
             secured.is_purchasable
             and secured.canonical_item not in ALLOWED_CATEGORIES
         ):
+            catalog_unavailable_items.append(
+                CatalogUnavailableItem(
+                    child_id=child_id,
+                    item_name=secured.canonical_item.replace("_", " "),
+                    source_line=secured.raw_text,
+                    document_name=secured.source_document,
+                    section_name=secured.source_section,
+                    page_number=secured.source_page,
+                    is_required=secured.is_required,
+                )
+            )
             reasons.append(
                 (
                     "Rejected disallowed category "
@@ -1200,6 +1217,9 @@ def apply_extraction_security_filters(
         document_selection=envelope.document_selection,
         uninterpreted_lines=envelope.uninterpreted_lines,
         skipped_lines=tuple(dict.fromkeys(skipped_lines)),
+        catalog_unavailable_items=tuple(
+            dict.fromkeys(catalog_unavailable_items)
+        ),
     )
 
 

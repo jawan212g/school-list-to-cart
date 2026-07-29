@@ -551,6 +551,11 @@ def run_pipeline(
                     for envelope in child_envelopes
                     for line in envelope.skipped_lines
                 ),
+                "catalog_unavailable_items": tuple(
+                    item
+                    for envelope in child_envelopes
+                    for item in envelope.catalog_unavailable_items
+                ),
             }
         )
         extractions[child_id] = combined
