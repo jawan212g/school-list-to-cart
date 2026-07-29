@@ -448,6 +448,7 @@ def test_ungraded_list_actual_screen_path_does_not_block_and_extracts(
                 "ui_error_active": False,
             }
             self.errors: list[str] = []
+            self.parent_text: list[str] = []
             self.rerun_count = 0
 
         def __enter__(self) -> ScreenRecorder:
@@ -465,7 +466,7 @@ def test_ungraded_list_actual_screen_path_does_not_block_and_extracts(
             self.rerun_count += 1
 
         def header(self, value: str) -> None:
-            del value
+            self.parent_text.append(value)
 
         def status(
             self,
@@ -476,7 +477,7 @@ def test_ungraded_list_actual_screen_path_does_not_block_and_extracts(
             return self
 
         def write(self, value: str) -> None:
-            del value
+            self.parent_text.append(value)
 
         def update(self, **kwargs: object) -> None:
             del kwargs
@@ -489,6 +490,10 @@ def test_ungraded_list_actual_screen_path_does_not_block_and_extracts(
 
     assert st.session_state["screen"] == "working"
     assert st.errors == []
+    assert not any(
+        "grade" in text.casefold() or "section" in text.casefold()
+        for text in st.parent_text
+    )
 
     app._render_working(st)
 

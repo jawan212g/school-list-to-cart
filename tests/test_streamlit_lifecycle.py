@@ -228,6 +228,34 @@ def test_budget_modes_survive_real_widget_unmount_and_remount() -> None:
     ).value == "150.00"
 
 
+def test_preferences_do_not_narrate_unused_budget_state() -> None:
+    """FR-03: confirming a budget mode exposes no internal cleanup message."""
+
+    test_app = _complete_students(_run_app(), ("Maya",))
+    _set_widget(
+        test_app,
+        "radio",
+        "budget_mode_label",
+        "A budget for each student or classroom",
+    )
+    _set_widget(
+        test_app,
+        "radio",
+        "budget_mode_label",
+        "One combined budget",
+    )
+    _click_label(test_app, "Continue to shopping preferences")
+
+    parent_messages = tuple(
+        str(message.value).casefold()
+        for message in test_app.info
+    )
+    assert not any(
+        "draft" in message or "cleared" in message
+        for message in parent_messages
+    )
+
+
 def test_preferences_survive_banner_widget_cleanup_and_remount() -> None:
     """FR-04: advanced settings survive a real section banner round-trip."""
 

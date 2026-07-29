@@ -344,6 +344,15 @@ STUDENT_SCOPED_LIST_REPLACEMENT = True
 # document, section choice, and extraction; every other student's list and
 # section choice remain intact.
 
+PASTED_SOURCE_LINES_PER_PAGE = 48
+PASTED_SOURCE_PAGE_WIDTH_PIXELS = 1200
+PASTED_SOURCE_PAGE_MARGIN_PIXELS = 64
+PASTED_SOURCE_FONT_SIZE_PIXELS = 20
+PASTED_SOURCE_LINE_HEIGHT_PIXELS = 28
+# BR-64: pasted text is retained byte-for-byte as session provenance and
+# deterministically paginated into viewable source pages without wrapping or
+# rewriting its lines. Every downstream source control uses those pages.
+
 PARENT_BOOLEAN_ATTRIBUTE_LABELS = {
     "sharpened": {
         True: "pre-sharpened",

@@ -765,7 +765,7 @@ def test_removing_entry_clears_only_its_budget_and_list() -> None:
 
     notices = app.clear_inactive_intake_entries(state, 1)
 
-    assert "Noah's budget allocation was removed." in notices
+    assert "Noah's individual budget no longer applies." in notices
     assert "Noah's supply list was removed." in notices
     assert "budget_1" not in state
     assert state["budget_0"] == "60.00"
@@ -815,8 +815,8 @@ def test_grade_change_clears_only_that_entry_section_selection() -> None:
     )
 
     assert notices == (
-        "Maya's document section selection was removed because the grade "
-        "changed.",
+        "Because Maya's grade changed, choose the matching part of the "
+        "supply list again.",
     )
     assert state["document_selections"] == {
         "child-2": noah_selection,
@@ -858,7 +858,7 @@ def test_budget_mode_drafts_seed_exactly_and_clear_only_on_continue() -> None:
         "A budget for each student or classroom",
         3,
     )
-    assert notices == ("The unused combined budget draft was cleared.",)
+    assert notices == ()
     assert "combined_budget_text" not in state
     assert state["budget_0"] == "33.34"
     assert state["budget_1"] == "33.33"
@@ -3731,6 +3731,133 @@ def test_source_button_filename_is_bounded_and_keeps_extension() -> None:
         "View source · "
         "very-long-district-school-supply-list-for-every-grade.pdf · page 3"
     )
+
+
+def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
+    """BR-64: the production Lists builder and source control share pages."""
+
+    source_lines = ["  Quantity\tItem\tNotes\r\n"] + [
+        f"{index}\tItem {index}\tkeep typoo {index}\r\n"
+        for index in range(1, 50)
+    ]
+    pasted = "".join(source_lines) + "  "
+    state: dict[str, object] = {
+        "list_mode_0": "Paste text",
+        "list_paste_0": pasted,
+    }
+
+    class ListsScreenState:
+        session_state = state
+
+    (list_input,) = app._build_list_inputs(
+        ListsScreenState(),
+        (
+            {
+                "child_id": "child-1",
+                "label": "Maya",
+                "grade": "Grade 2",
+            },
+        ),
+    )
+
+    assert list_input.source == pasted
+    assert "".join(list_input.source_page_texts) == pasted
+    assert list_input.resolved_document_name == "Maya's pasted list"
+    assert list_input.source_page_count == 2
+    assert app._saved_list_page_count(list_input) == 2
+    assert all(
+        page.startswith(b"\x89PNG\r\n\x1a\n")
+        for page in list_input.rendered_source_pages
+    )
+
+    source_line = "49\tItem 49\tkeep typoo 49"
+    extracted, errors = app._extract_list_inputs(
+        (list_input,),
+        extractor=lambda source, **kwargs: ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="late-line",
+                    child_id=str(kwargs["child_id"]),
+                    raw_text=source_line,
+                    canonical_item="folders",
+                    quantity=49,
+                    source_page=1,
+                    extraction_confidence=1.0,
+                ),
+            ),
+            catalog_unavailable_items=(
+                CatalogUnavailableItem(
+                    child_id=str(kwargs["child_id"]),
+                    item_name="locker shelf",
+                    source_line=source_line,
+                    page_number=1,
+                ),
+            ),
+        ),
+    )
+    assert errors == {}
+    requirement = extracted["child-1"].requirements[0]
+    unavailable = extracted["child-1"].catalog_unavailable_items[0]
+    assert requirement.source_page == 2
+    assert requirement.sources[0].page_number == 2
+    assert unavailable.page_number == 2
+
+    reference = app.build_source_reference(
+        list_input,
+        page_number=1,
+        source_line=source_line,
+    )
+    assert reference.page_number == 2
+    assert reference.source_line == source_line
+    assert reference.rendered_page == list_input.rendered_source_pages[1]
+
+    class Popover:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    class SourceControl:
+        session_state: dict[str, object] = {}
+        popover_labels: list[str] = []
+        rendered_images: list[bytes] = []
+
+        @classmethod
+        def popover(cls, label: str, **kwargs: object) -> Popover:
+            del kwargs
+            cls.popover_labels.append(label)
+            return Popover()
+
+        @staticmethod
+        def caption(value: str) -> None:
+            del value
+
+        @classmethod
+        def image(cls, value: bytes, **kwargs: object) -> None:
+            del kwargs
+            cls.rendered_images.append(value)
+
+        @staticmethod
+        def info(value: str) -> None:
+            raise AssertionError(value)
+
+    app._render_source_reference(
+        SourceControl(),
+        list_input,
+        page_number=1,
+        source_line=source_line,
+        key="pasted-source",
+    )
+
+    assert len(SourceControl.popover_labels) == 1
+    source_label = SourceControl.popover_labels[0]
+    assert source_label.startswith("View source")
+    assert "Maya's pasted list" in source_label
+    assert source_label.endswith("page 2")
+    assert SourceControl.rendered_images == [
+        list_input.rendered_source_pages[1]
+    ]
 
 
 def test_review_understanding_pluralizes_composition_notebooks() -> None:

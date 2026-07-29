@@ -2629,3 +2629,63 @@ quantity controls on both desktop and phone widths.
   Operator candidates in `agent/extract.py` are type unions and prompt-string
   assembly, not numeric, quantity, or money arithmetic. No code was modified
   for a static-check result.
+
+## 2026-07-29 - Setup narration and pasted-list provenance
+
+### Objective
+
+Restore the original setup navigation controls, remove internal housekeeping
+copy, simplify ungraded-list narration, and give pasted lists the same
+page-linked source evidence as uploaded documents.
+
+### Work completed
+
+- Fully reverted the uncommitted step-route object, step-specific Continue
+  button keys, and associated AppTest. The original immediately rendered
+  buttons and navigation behavior are restored.
+- Removed both unused-budget-draft cleanup messages. Cleanup still occurs only
+  after the parent confirms a budget mode; it is no longer narrated.
+- Rephrased entry removal, type change, and grade change consequences in terms
+  of the parent's student, budget, list, and next action.
+- Reduced BR-59 case (a) to "This list will be extracted" and show section
+  guidance only when the section screen actually has a decision.
+- Added BR-64 deterministic pasted-source pagination. The original string is
+  retained exactly, split only at existing line boundaries, rendered without
+  wrapping, and stored as session-only PNG pages.
+- Routed requirements, catalog-unavailable items, and every existing source
+  popover through the retained source pages and exact source-line page lookup.
+
+### Diagnosis and decision
+
+- The original Continue caption is selected by the renderer chosen from
+  `intake_step` before the click. Its destination is a separate literal in
+  that renderer after validation. Current caption/destination pairs agree,
+  but they are not derived from one shared value.
+- The reverted implementation did not add another explicit rerun. It changed
+  each button's widget identity at the same layout position, which caused the
+  entire control block to mount late in deployed testing.
+- No second Continue-button fix was attempted. A future change should first
+  reproduce the deployed lifecycle in x86 AppTest and should preserve the
+  original immediately rendered controls.
+
+### Files changed
+
+- Updated `agent/pipeline.py`, `agent/rules.py`, `app.py`,
+  `tests/test_app.py`, `tests/test_sections.py`,
+  `tests/test_streamlit_lifecycle.py`, and `JOURNAL.md`.
+
+### Testing and limitations
+
+- Focused app, section, pipeline, and Streamlit-lifecycle suite:
+  130 passed, 1 skipped.
+- `py -3.12-arm64 -m pytest -q`: 361 passed, 1 skipped.
+- The skipped module is the real Streamlit AppTest suite; Streamlit is
+  intentionally unavailable on this Windows ARM64 machine.
+- Pasted provenance is covered through the same production Lists builder,
+  extraction stamper, and source-popover renderer used by the screen.
+- No model call, matching, optimizer, approval, or money behavior changed.
+
+### Recommended next step
+
+Run the existing and new AppTests in the deployed x86 environment, then use
+that lifecycle evidence before choosing another Continue-caption approach.

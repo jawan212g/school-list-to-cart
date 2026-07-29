@@ -49,6 +49,7 @@ from agent.rules import (
     DEFAULT_TAX_BASIS_POINTS,
     FAILED_DOCUMENT_SEQUENTIAL_FALLBACK,
     MODEL_MAX_CONCURRENCY,
+    NONPAGINATED_SOURCE_PAGE,
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
     SUBSTITUTION_NONE,
@@ -102,6 +103,8 @@ class ListInput:
     source: str | Path | bytes
     mime_type: str | None = None
     document_name: str | None = None
+    source_page_texts: tuple[str, ...] = ()
+    rendered_source_pages: tuple[bytes, ...] = ()
 
     @property
     def resolved_document_name(self) -> str:
@@ -120,6 +123,32 @@ class ListInput:
                 pass
             return "Pasted supply list"
         return "Uploaded supply list"
+
+    @property
+    def source_page_count(self) -> int:
+        """Return the deterministic page count for retained source evidence."""
+
+        return max(
+            len(self.source_page_texts),
+            len(self.rendered_source_pages),
+            1,
+        )
+
+    def resolved_source_page(
+        self,
+        source_line: str,
+        fallback_page: int | None,
+    ) -> int | None:
+        """Locate an exact pasted source line without a downstream type branch."""
+
+        if self.source_page_texts and source_line:
+            for page_number, page_text in enumerate(
+                self.source_page_texts,
+                start=1,
+            ):
+                if source_line in page_text:
+                    return page_number
+        return fallback_page
 
 
 @dataclass(frozen=True)
@@ -479,9 +508,30 @@ def run_pipeline(
             continue
         child_list_indexes[list_input.child_id] += 1
         extraction = apply_extraction_security_filters(
-                extraction,
-                list_input.child_id,
-            )
+            extraction,
+            list_input.child_id,
+        )
+        extraction = extraction.model_copy(
+            update={
+                "catalog_unavailable_items": tuple(
+                    item.model_copy(
+                        update={
+                            "document_name": (
+                                list_input.resolved_document_name
+                            ),
+                            "page_number": (
+                                list_input.resolved_source_page(
+                                    item.source_line,
+                                    item.page_number,
+                                )
+                                or NONPAGINATED_SOURCE_PAGE
+                            ),
+                        }
+                    )
+                    for item in extraction.catalog_unavailable_items
+                )
+            }
+        )
         stamped_requirements = tuple(
             requirement.model_copy(
                 update={
@@ -497,6 +547,10 @@ def run_pipeline(
                     "source_document": (
                         requirement.source_document
                         or list_input.resolved_document_name
+                    ),
+                    "source_page": list_input.resolved_source_page(
+                        requirement.raw_text,
+                        requirement.source_page,
                     ),
                 }
             )

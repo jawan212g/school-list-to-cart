@@ -17,6 +17,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 import pypdfium2 as pdfium
+from PIL import Image, ImageDraw, ImageFont
 
 from agent.aggregate import UnitNeed
 from agent.addons import AddOnSelectionEvaluation, evaluate_addon_selection
@@ -113,6 +114,11 @@ from agent.rules import (
     PERSONALIZE_DECISION_DETAIL_LABEL,
     PERSONALIZE_SOURCE_CONTROL_REASONS,
     PERSONALIZE_SUMMARY_COLUMNS,
+    PASTED_SOURCE_FONT_SIZE_PIXELS,
+    PASTED_SOURCE_LINE_HEIGHT_PIXELS,
+    PASTED_SOURCE_LINES_PER_PAGE,
+    PASTED_SOURCE_PAGE_MARGIN_PIXELS,
+    PASTED_SOURCE_PAGE_WIDTH_PIXELS,
     QUANTITY_WORKING_ASSUMPTION_HELP,
     DOCUMENT_GRADE_SCOPE_MISMATCH,
     DOCUMENT_GRADE_SCOPE_NO_GRADE,
@@ -3375,6 +3381,87 @@ class SourceReference:
     mime_type: str | None
 
 
+def _pasted_source_page_texts(text: str) -> tuple[str, ...]:
+    """Paginate pasted provenance without changing any source character."""
+
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return (text,)
+    pages = tuple(
+        "".join(lines[start : start + PASTED_SOURCE_LINES_PER_PAGE])
+        for start in range(0, len(lines), PASTED_SOURCE_LINES_PER_PAGE)
+    )
+    if "".join(pages) != text:
+        raise RuntimeError("Pasted source pagination changed the original text")
+    return pages
+
+
+def _render_pasted_source_page(page_text: str) -> bytes:
+    """Render one exact, unwrapped pasted-text page as a PNG."""
+
+    font = ImageFont.load_default(size=PASTED_SOURCE_FONT_SIZE_PIXELS)
+    visible_lines = page_text.splitlines() or [""]
+    measurement = Image.new("RGB", (1, 1), "white")
+    measure_draw = ImageDraw.Draw(measurement)
+    widest_line = max(
+        (
+            int(measure_draw.textlength(line, font=font))
+            for line in visible_lines
+        ),
+        default=0,
+    )
+    measurement.close()
+    page_width = max(
+        PASTED_SOURCE_PAGE_WIDTH_PIXELS,
+        widest_line + (2 * PASTED_SOURCE_PAGE_MARGIN_PIXELS),
+    )
+    page_height = (
+        2 * PASTED_SOURCE_PAGE_MARGIN_PIXELS
+        + PASTED_SOURCE_LINES_PER_PAGE
+        * PASTED_SOURCE_LINE_HEIGHT_PIXELS
+    )
+    image = Image.new("RGB", (page_width, page_height), "#fffef8")
+    draw = ImageDraw.Draw(image)
+    for line_number, line in enumerate(visible_lines):
+        draw.text(
+            (
+                PASTED_SOURCE_PAGE_MARGIN_PIXELS,
+                PASTED_SOURCE_PAGE_MARGIN_PIXELS
+                + line_number * PASTED_SOURCE_LINE_HEIGHT_PIXELS,
+            ),
+            line,
+            fill="#17201d",
+            font=font,
+        )
+    output = BytesIO()
+    image.save(output, format="PNG")
+    rendered = output.getvalue()
+    image.close()
+    return rendered
+
+
+def _build_pasted_list_input(
+    *,
+    child_id: str,
+    text: str,
+    document_name: str,
+) -> ListInput:
+    """Create the production pasted-list input and its source pages."""
+
+    page_texts = _pasted_source_page_texts(text)
+    return ListInput(
+        child_id=child_id,
+        source=text,
+        mime_type="text/plain",
+        document_name=document_name,
+        source_page_texts=page_texts,
+        rendered_source_pages=tuple(
+            _render_pasted_source_page(page_text)
+            for page_text in page_texts
+        ),
+    )
+
+
 def _list_input_bytes(list_input: ListInput) -> bytes | None:
     """Return retained session-only source bytes for an evidence preview."""
 
@@ -3402,17 +3489,36 @@ def build_source_reference(
 
     data = _list_input_bytes(list_input)
     rendered_page: bytes | None = None
-    if (
+    resolved_page_number = list_input.resolved_source_page(
+        source_line,
+        page_number,
+    )
+    if list_input.rendered_source_pages:
+        resolved_page_number = (
+            resolved_page_number or NONPAGINATED_SOURCE_PAGE
+        )
+        page_index = resolved_page_number - 1
+        if (
+            page_index < 0
+            or page_index >= len(list_input.rendered_source_pages)
+        ):
+            raise ValueError(
+                f"Page {resolved_page_number} is not present in the source "
+                "document."
+            )
+        rendered_page = list_input.rendered_source_pages[page_index]
+    elif (
         data is not None
         and list_input.mime_type == "application/pdf"
-        and page_number is not None
+        and resolved_page_number is not None
     ):
         document = pdfium.PdfDocument(data)
         try:
-            page_index = page_number - 1
+            page_index = resolved_page_number - 1
             if page_index < 0 or page_index >= len(document):
                 raise ValueError(
-                    f"Page {page_number} is not present in the uploaded document."
+                    f"Page {resolved_page_number} is not present in the "
+                    "uploaded document."
                 )
             page = document[page_index]
             bitmap = None
@@ -3435,7 +3541,7 @@ def build_source_reference(
         rendered_page = data
     return SourceReference(
         document_name=list_input.resolved_document_name,
-        page_number=page_number,
+        page_number=resolved_page_number,
         source_line=source_line,
         rendered_page=rendered_page,
         mime_type=list_input.mime_type,
@@ -3487,16 +3593,25 @@ def _render_source_reference(
     source_line: str,
     key: str,
 ) -> None:
-    """Place the exact source line and rendered uploaded page one click away."""
+    """Place the exact source line and rendered source page one click away."""
 
     del key
+    resolved_page_number = list_input.resolved_source_page(
+        source_line,
+        page_number,
+    )
+    if list_input.rendered_source_pages and resolved_page_number is None:
+        resolved_page_number = NONPAGINATED_SOURCE_PAGE
     cache = st.session_state.setdefault("source_reference_cache", {})
-    cache_key = _source_reference_cache_key(list_input, page_number)
+    cache_key = _source_reference_cache_key(
+        list_input,
+        resolved_page_number,
+    )
     reference = cache.get(cache_key)
     if reference is None:
         reference = build_source_reference(
             list_input,
-            page_number=page_number,
+            page_number=resolved_page_number,
             source_line=source_line,
         )
         cache[cache_key] = reference
@@ -3528,13 +3643,6 @@ def _render_source_reference(
                     "Use the exact line above to locate the source."
                 ),
                 use_container_width=True,
-            )
-        elif reference.mime_type == "text/plain":
-            source_bytes = _list_input_bytes(list_input) or b""
-            st.code(
-                source_bytes.decode("utf-8", errors="replace"),
-                language=None,
-                wrap_lines=True,
             )
         else:
             st.info(
@@ -3910,12 +4018,14 @@ def clear_inactive_intake_entries(
             )
         if had_entry or had_budget or had_list or had_selection:
             if had_budget:
-                notices.append(f"{label}'s budget allocation was removed.")
+                notices.append(
+                    f"{label}'s individual budget no longer applies."
+                )
             if had_list:
                 notices.append(f"{label}'s supply list was removed.")
             if had_selection:
                 notices.append(
-                    f"{label}'s document section selection was removed."
+                    f"Choose the part of {label}'s supply list again."
                 )
             _limit_reached_stage(state, 1)
             if "max_intake_step_reached" in state:
@@ -4036,8 +4146,8 @@ def clear_section_selection_after_grade_change(
         _limit_reached_stage(state, 2)
         _invalidate_plan_state(state)
         return (
-            f"{label}'s document section selection was removed because "
-            "the grade changed.",
+            f"Because {label}'s grade changed, choose the matching part of "
+            "the supply list again.",
         )
     return ()
 
@@ -4117,9 +4227,8 @@ def commit_budget_mode_drafts(
     current_mode: str,
     entry_count: int,
 ) -> tuple[str, ...]:
-    """Clear actual unused FR-03 drafts only after Continue."""
+    """Clear unused FR-03 fields after the parent confirms a budget mode."""
 
-    notices: list[str] = []
     clear_combined = current_mode != "One combined budget"
     clear_allocations = (
         current_mode != "A budget for each student or classroom"
@@ -4136,25 +4245,11 @@ def commit_budget_mode_drafts(
         ).strip()
         if combined_value:
             _delete_navigation_value(state, "combined_budget_text")
-            notices.append("The unused combined budget draft was cleared.")
     if clear_allocations:
-        cleared_allocation = False
         for index in range(entry_count):
             key = f"budget_{index}"
-            value = str(
-                state.get(
-                    key,
-                    state.get(NAVIGATION_STATE_PREFIX + key, ""),
-                )
-            ).strip()
-            if value:
-                cleared_allocation = True
             _delete_navigation_value(state, key)
-        if cleared_allocation:
-            notices.append(
-                "The unused individual budget drafts were cleared."
-            )
-    return tuple(notices)
+    return ()
 
 
 def update_pickup_radius_for_fulfillment(
@@ -4511,8 +4606,8 @@ def _render_student_step(st: Any) -> None:
             if type_changed and discarded_entry_details:
                 st.info(
                     escape_streamlit_dollars(
-                        f"{previous_entry_name}'s previous entry details "
-                        "were cleared because the entry type changed."
+                        f"The name and grade for {previous_entry_name} no "
+                        "longer apply because you changed who this entry is for."
                     )
                 )
             if not name.strip():
@@ -4689,13 +4784,11 @@ def _render_budget_step(st: Any) -> None:
         st.rerun()
     else:
         st.session_state["budget_validation_attempted"] = False
-        notices = commit_budget_mode_drafts(
+        commit_budget_mode_drafts(
             st.session_state,
             str(budget_mode_label),
             len(students),
         )
-        if notices:
-            st.session_state["pending_intake_notices"] = notices
         navigate_intake_step(st.session_state, 3)
         st.session_state["ui_error_active"] = False
         st.rerun()
@@ -4732,10 +4825,6 @@ def _render_preferences_step(st: Any) -> None:
         st.session_state,
         int(st.session_state["child_count"]),
     )
-    for notice in tuple(
-        st.session_state.pop("pending_intake_notices", ())
-    ):
-        st.info(escape_streamlit_dollars(str(notice)))
     st.caption(
         "Choose how you want the plan to balance cost, stores, and "
         "convenience."
@@ -5049,19 +5138,16 @@ def _build_individual_list_input(
             mime_type=mime_type,
             document_name=draft.name,
         )
-    pasted = str(
-        st.session_state.get(f"list_paste_{index}", "")
-    ).strip()
-    if not pasted:
+    pasted = str(st.session_state.get(f"list_paste_{index}", ""))
+    if not pasted.strip():
         raise ValueError(f"{child['label']}: paste the supply list.")
     if len(pasted.encode("utf-8")) > MAX_UPLOAD_BYTES:
         raise ValueError(
             f"{child['label']}: pasted text exceeds the size limit."
         )
-    return ListInput(
+    return _build_pasted_list_input(
         child_id=str(child["child_id"]),
-        source=pasted,
-        mime_type="text/plain",
+        text=pasted,
         document_name=f"{child['label']}'s pasted list",
     )
 
@@ -5132,22 +5218,20 @@ def _build_list_inputs(
                 )
                 for child in children
             )
-        pasted = str(
-            st.session_state.get("shared_list_paste", "")
-        ).strip()
-        if not pasted:
+        pasted = str(st.session_state.get("shared_list_paste", ""))
+        if not pasted.strip():
             raise ValueError("Paste the shared district list.")
         if len(pasted.encode("utf-8")) > MAX_UPLOAD_BYTES:
             raise ValueError(
                 "The shared pasted list exceeds the size limit."
             )
+        shared_input = _build_pasted_list_input(
+            child_id=str(children[0]["child_id"]),
+            text=pasted,
+            document_name="Parent's pasted district list",
+        )
         return tuple(
-            ListInput(
-                child_id=str(child["child_id"]),
-                source=pasted,
-                mime_type="text/plain",
-                document_name="Pasted district list",
-            )
+            replace(shared_input, child_id=str(child["child_id"]))
             for child in children
         )
 
@@ -5166,6 +5250,8 @@ def _build_list_inputs(
 def _saved_list_page_count(list_input: ListInput) -> int:
     """Return the visible page count for one retained session-only list."""
 
+    if list_input.rendered_source_pages:
+        return list_input.source_page_count
     if list_input.mime_type != "application/pdf":
         return NONPAGINATED_SOURCE_PAGE
     data = _list_input_bytes(list_input)
@@ -5730,26 +5816,40 @@ def _extract_list_inputs(
         list_input: ListInput,
         extraction: ExtractionEnvelope,
     ) -> ExtractionEnvelope:
+        def stamp_requirement(requirement: Any) -> Any:
+            stamped = requirement.model_copy(
+                update={
+                    "source_document": list_input.resolved_document_name,
+                    "source_page": list_input.resolved_source_page(
+                        requirement.raw_text,
+                        requirement.source_page,
+                    ),
+                }
+            )
+            return stamped.model_copy(
+                update={"sources": (requirement_source(stamped),)}
+            )
+
         return extraction.model_copy(
             update={
                 "requirements": tuple(
-                    stamped.model_copy(
+                    stamp_requirement(requirement)
+                    for requirement in extraction.requirements
+                ),
+                "catalog_unavailable_items": tuple(
+                    item.model_copy(
                         update={
-                            "sources": (
-                                requirement_source(stamped),
+                            "document_name": (
+                                list_input.resolved_document_name
+                            ),
+                            "page_number": list_input.resolved_source_page(
+                                item.source_line,
+                                item.page_number,
                             )
+                            or NONPAGINATED_SOURCE_PAGE,
                         }
                     )
-                    for requirement in extraction.requirements
-                    for stamped in (
-                        requirement.model_copy(
-                            update={
-                                "source_document": (
-                                    list_input.resolved_document_name
-                                )
-                            }
-                        ),
-                    )
+                    for item in extraction.catalog_unavailable_items
                 )
             }
         )
@@ -7659,9 +7759,8 @@ def _render_sections(st: Any) -> None:
 
     st.header("What will be extracted from each list")
     st.write(
-        "The matching grade is selected automatically. You only need to "
-        "answer when a section has no grade or the document does not contain "
-        "the grade entered for a student."
+        "Choose the part of a document that applies wherever a choice is "
+        "shown below."
     )
     if st.session_state["structure_errors"]:
         st.error(
@@ -7697,8 +7796,7 @@ def _render_sections(st: Any) -> None:
                     )
                 )
                 st.write(
-                    "This document does not name a grade, so the entire "
-                    "list will be extracted."
+                    "This list will be extracted."
                 )
             continue
         current = selections.get(child_id)
