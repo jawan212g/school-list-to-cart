@@ -77,6 +77,7 @@ from agent.review import (
     deduplicate_conditional_questions,
     organize_extractions,
     review_flag_groups,
+    ReviewFlagGroup,
     review_issue_explanations,
     reviewed_envelopes,
     teacher_note_groups,
@@ -95,17 +96,27 @@ from agent.rules import (
     DEFAULT_TAX_BASIS_POINTS,
     CONFLICT_IDENTITY_DIFFERENT,
     CONFLICT_IDENTITY_SAME,
+    CATALOG_UNAVAILABLE_SOURCE_IDENTITY_FIELDS,
+    EXCLUDED_REQUIREMENT_QUANTITY,
+    EXTRACTED_SCOPE_LABEL,
     FAILED_DOCUMENT_SEQUENTIAL_FALLBACK,
     MAX_CHILDREN_PER_SESSION,
     MAX_UPLOAD_BYTES,
+    MINIMUM_ACTIVE_REQUIREMENT_QUANTITY,
     MINIMUM_BUDGET_CENTS,
     MODEL_MAX_CONCURRENCY,
     NONPAGINATED_SOURCE_PAGE,
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     PARENT_EDITABLE_DETAIL_FIELDS,
+    PACKAGE_EXTRAS_ACCEPTABLE_LABEL,
+    PACKAGE_EXTRAS_AVOID_LABEL,
     PERSONALIZE_DECISION_DETAIL_LABEL,
+    PERSONALIZE_SOURCE_CONTROL_REASONS,
+    PERSONALIZE_SUMMARY_COLUMNS,
+    QUANTITY_WORKING_ASSUMPTION_HELP,
     SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX,
     SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS,
+    SINGLE_INSTANCE_REQUIREMENT_ITEMS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
     SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX,
     SYSTEM_DECISION_MERGED_QUANTITY_PREFIX,
@@ -135,6 +146,7 @@ from agent.sections import (
     resolve_document_sections,
 )
 from agent.schema import (
+    CatalogUnavailableItem,
     DocumentSection,
     DocumentSelection,
     DocumentStructureEnvelope,
@@ -508,6 +520,38 @@ class CopySet:
     headline_heading: str
     complete_status: str
     attention_clear: str
+
+
+@dataclass(frozen=True)
+class PersonalizeStudentSection:
+    """One BR-52 state shared by the summary and student item section."""
+
+    child_id: str
+    child_label: str
+    anchor: str
+    cart_item_ids: tuple[str, ...]
+    excluded_item_ids: tuple[str, ...]
+    decision_groups: tuple[ReviewFlagGroup, ...]
+    additional_decision_ids: tuple[str, ...]
+    anchored_flag_groups: tuple[ReviewFlagGroup, ...]
+
+    @property
+    def item_count(self) -> int:
+        """Count items currently included for this student."""
+
+        return len(self.cart_item_ids)
+
+    @property
+    def decision_count(self) -> int:
+        """Count unresolved decisions that affect this student."""
+
+        return len(self.decision_groups) + len(self.additional_decision_ids)
+
+    @property
+    def excluded_count(self) -> int:
+        """Count extracted items deliberately outside the cart."""
+
+        return len(self.excluded_item_ids)
 
 
 WARM_COPY = CopySet(
@@ -6352,6 +6396,145 @@ def review_child_framing(
     )
 
 
+def build_personalize_student_sections(
+    children: Sequence[Mapping[str, object]],
+    items: Sequence[SupplyItemReview],
+    flag_groups: Sequence[ReviewFlagGroup],
+    *,
+    unhandled_group_ids: frozenset[str] = frozenset(),
+    unstocked_item_ids: frozenset[str] = frozenset(),
+    additional_excluded_ids: Mapping[str, Sequence[str]] | None = None,
+    additional_decision_ids: Mapping[str, Sequence[str]] | None = None,
+) -> tuple[PersonalizeStudentSection, ...]:
+    """Build BR-52's single source for summary counts and section ordering."""
+
+    child_order = {
+        str(child["child_id"]): index
+        for index, child in enumerate(children)
+    }
+    anchor_by_group = {
+        group.group_id: min(
+            group.child_ids,
+            key=lambda child_id: child_order.get(child_id, 10_000),
+        )
+        for group in flag_groups
+    }
+    sections: list[PersonalizeStudentSection] = []
+    for child in children:
+        child_id = str(child["child_id"])
+        child_label = str(child["label"])
+        child_items = tuple(
+            item for item in items if item.child_id == child_id
+        )
+        excluded_item_ids = tuple(
+            item.review_id
+            for item in child_items
+            if (
+                item.is_purchasable
+                and (
+                    item.provided_by_school
+                    or item.review_status == "deleted"
+                    or item.already_owned
+                    or item.required_quantity == EXCLUDED_REQUIREMENT_QUANTITY
+                    or item.optional
+                    or item.condition_applies is False
+                    or item.review_id in unstocked_item_ids
+                )
+            )
+        ) + tuple((additional_excluded_ids or {}).get(child_id, ()))
+        excluded_ids = frozenset(excluded_item_ids)
+        cart_item_ids = tuple(
+            item.review_id
+            for item in child_items
+            if (
+                item.is_purchasable
+                and item.review_id not in excluded_ids
+            )
+        )
+        decision_groups = tuple(
+            group
+            for group in flag_groups
+            if (
+                child_id in group.child_ids
+                and group.group_id in unhandled_group_ids
+            )
+        )
+        sections.append(
+            PersonalizeStudentSection(
+                child_id=child_id,
+                child_label=child_label,
+                anchor=(
+                    "personalize-"
+                    + re.sub(r"[^a-z0-9]+", "-", child_id.casefold()).strip("-")
+                ),
+                cart_item_ids=cart_item_ids,
+                excluded_item_ids=excluded_item_ids,
+                decision_groups=decision_groups,
+                additional_decision_ids=tuple(
+                    (additional_decision_ids or {}).get(child_id, ())
+                ),
+                anchored_flag_groups=tuple(
+                    sorted(
+                        (
+                            group
+                            for group in flag_groups
+                            if anchor_by_group[group.group_id] == child_id
+                        ),
+                        key=lambda group: (
+                            group.group_id not in unhandled_group_ids
+                        ),
+                    )
+                ),
+            )
+        )
+    return tuple(sections)
+
+
+def _personalize_count_text(section: PersonalizeStudentSection) -> str:
+    """Format BR-52's compact per-student counts once."""
+
+    return (
+        f"{section.item_count} in cart · "
+        f"{section.decision_count} "
+        f"{'needs' if section.decision_count == 1 else 'need'} a decision · "
+        f"{section.excluded_count} excluded"
+    )
+
+
+def _render_personalize_summary(
+    st: Any,
+    sections: Sequence[PersonalizeStudentSection],
+) -> None:
+    """Render BR-52's production Personalize summary and controls."""
+
+    header_columns = st.columns([2.2, 1.0, 1.15, 0.9, 0.9, 1.75])
+    for column, label in zip(
+        header_columns[:4],
+        PERSONALIZE_SUMMARY_COLUMNS,
+        strict=True,
+    ):
+        column.markdown(f"**{label}**")
+    for section in sections:
+        columns = st.columns([2.2, 1.0, 1.15, 0.9, 0.9, 1.75])
+        columns[0].write(escape_streamlit_dollars(section.child_label))
+        columns[1].write(str(section.item_count))
+        columns[2].write(str(section.decision_count))
+        columns[3].write(str(section.excluded_count))
+        columns[4].markdown(f"[Jump](#{section.anchor})")
+        if section.decision_groups:
+            approved = columns[5].button(
+                "Approve defaults",
+                key=f"approve-defaults:{section.child_id}",
+                use_container_width=True,
+            )
+            if approved:
+                for group in section.decision_groups:
+                    st.session_state[f"{group.group_id}:confirmed"] = True
+                st.rerun()
+        else:
+            columns[5].caption("No defaults pending")
+
+
 def _review_control_update(
     item: SupplyItemReview,
     *,
@@ -6386,7 +6569,11 @@ def _review_control_update(
     return item.model_copy(
         update={
             "item_name": item_name,
-            "required_quantity": 0 if already_owned else max(quantity, 1),
+            "required_quantity": (
+                EXCLUDED_REQUIREMENT_QUANTITY
+                if already_owned or delete
+                else max(quantity, MINIMUM_ACTIVE_REQUIREMENT_QUANTITY)
+            ),
             "unit": unit,
             "package_size": package_size,
             "package_quantity_state": (
@@ -6421,6 +6608,48 @@ def _review_control_update(
             ),
         }
     )
+
+
+def apply_review_exclusion_quantity(
+    state: MutableMapping[str, Any],
+    trigger_key: str,
+    quantity_key: str,
+    other_exclusion_keys: Sequence[str] = (),
+) -> None:
+    """Apply BR-56 to the visible Personalize quantity widget."""
+
+    if bool(state.get(trigger_key)):
+        if int(state.get(quantity_key, 0)) > EXCLUDED_REQUIREMENT_QUANTITY:
+            state[f"{quantity_key}:before-exclusion"] = int(
+                state[quantity_key]
+            )
+        state[quantity_key] = EXCLUDED_REQUIREMENT_QUANTITY
+        return
+    if any(bool(state.get(key)) for key in other_exclusion_keys):
+        state[quantity_key] = EXCLUDED_REQUIREMENT_QUANTITY
+        return
+    if int(state.get(quantity_key, 0)) == EXCLUDED_REQUIREMENT_QUANTITY:
+        state[quantity_key] = int(
+            state.get(
+                f"{quantity_key}:before-exclusion",
+                MINIMUM_ACTIVE_REQUIREMENT_QUANTITY,
+            )
+        )
+
+
+def show_package_preference(item_name: str) -> bool:
+    """Hide BR-54's package control for reusable single-instance goods."""
+
+    return item_name not in SINGLE_INSTANCE_REQUIREMENT_ITEMS
+
+
+def package_preference_labels() -> Mapping[str, str]:
+    """Return BR-54's shared parent-facing package preference labels."""
+
+    return {
+        "minimum_cost_at_least": PACKAGE_EXTRAS_ACCEPTABLE_LABEL,
+        "closest_quantity": PACKAGE_EXTRAS_AVOID_LABEL,
+    }
 
 
 def review_detail_field_visibility(
@@ -6477,11 +6706,37 @@ def _render_review_detail_controls(
     key_prefix: str,
     offers: Sequence[Offer],
     decision_messages: Sequence[str] = (),
+    source_references: Sequence[
+        tuple[RequirementSource, ListInput | None]
+    ] = (),
 ) -> SupplyItemReview:
     """Render secondary item editing controls inside a collapsed expander."""
 
     visibility = review_detail_field_visibility(item, offers)
     with st.expander(PERSONALIZE_DECISION_DETAIL_LABEL):
+        if source_references:
+            st.markdown("**Source**")
+            for index, (source, list_input) in enumerate(
+                source_references,
+                start=1,
+            ):
+                st.caption(
+                    escape_streamlit_dollars(
+                        f"Page {source.page_number}: "
+                        + _display_source_line(source.exact_line)
+                    )
+                )
+                if list_input is not None:
+                    _render_source_reference(
+                        st,
+                        list_input,
+                        page_number=source.page_number,
+                        source_line=source.exact_line,
+                        key=(
+                            f"{key_prefix}:detail-source:"
+                            f"{source.source_req_id}:{index}"
+                        ),
+                    )
         if decision_messages:
             st.caption(
                 escape_streamlit_dollars(" ".join(decision_messages))
@@ -6513,22 +6768,19 @@ def _render_review_detail_controls(
             index=("each", "pack", "box", "ream").index(item.unit),
             key=f"{key_prefix}:unit",
         )
-        fulfillment_labels = {
-            "minimum_cost_at_least": (
-                "Buy at least this many, cheapest combination"
-            ),
-            "closest_quantity": "Get as close to this many as possible",
-        }
-        fulfillment_values = tuple(fulfillment_labels)
-        item_fulfillment_preference = second.selectbox(
-            "Package fulfillment preference",
-            options=fulfillment_values,
-            index=fulfillment_values.index(
-                item.item_fulfillment_preference
-            ),
-            format_func=fulfillment_labels.__getitem__,
-            key=f"{key_prefix}:fulfillment-preference",
-        )
+        item_fulfillment_preference = item.item_fulfillment_preference
+        if show_package_preference(item_name):
+            fulfillment_labels = package_preference_labels()
+            fulfillment_values = tuple(fulfillment_labels)
+            item_fulfillment_preference = second.selectbox(
+                "Are extra items acceptable?",
+                options=fulfillment_values,
+                index=fulfillment_values.index(
+                    item.item_fulfillment_preference
+                ),
+                format_func=fulfillment_labels.__getitem__,
+                key=f"{key_prefix}:fulfillment-preference",
+            )
         package_state_labels = {
             "specified": "The list gives a package quantity",
             "assumed": "Use the shown assumption",
@@ -6633,11 +6885,25 @@ def _render_review_detail_controls(
             "We already own this",
             value=item.already_owned,
             key=f"{key_prefix}:owned",
+            on_change=apply_review_exclusion_quantity,
+            args=(
+                st.session_state,
+                f"{key_prefix}:owned",
+                f"{key_prefix}:quantity",
+                (f"{key_prefix}:delete",),
+            ),
         )
         delete = second.checkbox(
             "Remove this incorrect item",
             value=item.review_status == "deleted",
             key=f"{key_prefix}:delete",
+            on_change=apply_review_exclusion_quantity,
+            args=(
+                st.session_state,
+                f"{key_prefix}:delete",
+                f"{key_prefix}:quantity",
+                (f"{key_prefix}:owned",),
+            ),
         )
         notes = st.text_input(
             "Parent note",
@@ -6727,6 +6993,20 @@ def review_message_placement(
     return main_messages, detail_messages
 
 
+def show_item_source_on_main(
+    item: SupplyItemReview,
+    flag_messages: Sequence[str] = (),
+) -> bool:
+    """Apply BR-53 to the source control on the main item card."""
+
+    reasons = set()
+    if flag_messages:
+        reasons.add("uncertain")
+    if item.package_quantity_state == "assumed":
+        reasons.add("assumption")
+    return not reasons.isdisjoint(PERSONALIZE_SOURCE_CONTROL_REASONS)
+
+
 def _render_compact_review_row(
     st: Any,
     members: Sequence[SupplyItemReview],
@@ -6760,14 +7040,14 @@ def _render_compact_review_row(
             ): list_input
             for list_input in st.session_state.get("list_inputs", ())
         }
-        show_item_source_control = (
-            bool(flag_messages)
-            or representative.package_quantity_state == "assumed"
-            or len(representative.sources) > 1
-            or SYSTEM_DECISION_CONSOLIDATED_SOURCES
-            in representative.system_decisions
+        show_item_source_control = show_item_source_on_main(
+            representative,
+            flag_messages,
         )
         rendered_sources: set[tuple[object, ...]] = set()
+        detail_source_references: list[
+            tuple[RequirementSource, ListInput | None]
+        ] = []
         for member in members:
             sources = member.variant_sources or member.sources or (
                 RequirementSource(
@@ -6814,6 +7094,7 @@ def _render_compact_review_row(
                     ),
                     None,
                 )
+                detail_source_references.append((source, list_input))
                 if list_input is not None and show_item_source_control:
                     _render_source_reference(
                         st,
@@ -6854,6 +7135,7 @@ def _render_compact_review_row(
             key_prefix=key_prefix,
             offers=offers,
             decision_messages=decision_messages,
+            source_references=tuple(detail_source_references),
         )
     edited = {
         member.review_id: (
@@ -6905,18 +7187,15 @@ def _new_review_item_from_controls(
             options=("each", "pack", "box", "ream"),
             key=f"{key_prefix}:unit",
         )
-        fulfillment_labels = {
-            "minimum_cost_at_least": (
-                "Buy at least this many, cheapest combination"
-            ),
-            "closest_quantity": "Get as close to this many as possible",
-        }
-        fulfillment_preference = second.selectbox(
-            "Package fulfillment preference (optional)",
-            options=tuple(fulfillment_labels),
-            format_func=fulfillment_labels.__getitem__,
-            key=f"{key_prefix}:fulfillment",
-        )
+        fulfillment_preference = "minimum_cost_at_least"
+        if not item_name or show_package_preference(item_name):
+            fulfillment_labels = package_preference_labels()
+            fulfillment_preference = second.selectbox(
+                "Are extra items acceptable? (optional)",
+                options=tuple(fulfillment_labels),
+                format_func=fulfillment_labels.__getitem__,
+                key=f"{key_prefix}:fulfillment",
+            )
         brand = first.text_input(
             "Brand (optional)",
             key=f"{key_prefix}:brand",
@@ -7297,7 +7576,7 @@ def _render_sections(st: Any) -> None:
                 if choice.selected_section_labels:
                     st.write(
                         escape_streamlit_dollars(
-                            "We will read "
+                            "We will extract items from "
                             + _join_names(choice.selected_section_labels)
                             + f" from {document_name}."
                         )
@@ -7600,12 +7879,32 @@ def visible_quantity_preselection_rationale(
 ) -> str | None:
     """Apply BR-45's hide-on-override policy to the quantity rationale."""
 
-    if selected_label != quantity_quick_choice_default_label(
-        interrupt,
-        choices,
-    ):
+    if choices.get(selected_label) != interrupt.default_quantity:
         return None
     return quantity_preselection_rationale(interrupt)
+
+
+def _render_quantity_preselection_rationale(
+    st: Any,
+    interrupt: Any,
+    rationale: str,
+) -> None:
+    """Render BR-55's rationale with working-assumption disclosure."""
+
+    if interrupt.canonical_item in SINGLE_INSTANCE_REQUIREMENT_ITEMS:
+        st.caption(
+            escape_streamlit_dollars("Rationale: " + rationale)
+        )
+        return
+    rationale_column, help_column = st.columns([12, 1])
+    rationale_column.caption(
+        escape_streamlit_dollars("Rationale: " + rationale)
+    )
+    with help_column.popover(
+        "ⓘ",
+        help="About this working assumption",
+    ):
+        st.write(QUANTITY_WORKING_ASSUMPTION_HELP)
 
 
 def apply_merge_quick_choice(
@@ -7642,6 +7941,25 @@ def mark_merge_quantities_custom(
     state[choice_key] = custom_label
     if custom_pending_key is not None:
         state[custom_pending_key] = False
+
+
+def apply_merge_item_exclusion(
+    state: MutableMapping[str, Any],
+    exclude_key: str,
+    choice_key: str | None,
+    quantity_keys: Sequence[str],
+    custom_pending_key: str | None = None,
+) -> None:
+    """Apply BR-56 to every visible conflict-card quantity control."""
+
+    if not bool(state.get(exclude_key)):
+        return
+    if choice_key is not None:
+        state[choice_key] = MERGE_CUSTOM_QUANTITY_LABEL
+    if custom_pending_key is not None:
+        state[custom_pending_key] = False
+    for quantity_key in quantity_keys:
+        state[quantity_key] = EXCLUDED_REQUIREMENT_QUANTITY
 
 
 def _render_merge_source_rows(
@@ -7784,11 +8102,10 @@ def _render_merge_quantity_controls(
         quick_choices,
     )
     if visible_rationale is not None:
-        st.caption(
-            escape_streamlit_dollars(
-                "Rationale: "
-                + visible_rationale
-            )
+        _render_quantity_preselection_rationale(
+            st,
+            interrupt,
+            visible_rationale,
         )
     quantity_container = (
         st.container(border=True)
@@ -7801,7 +8118,7 @@ def _render_merge_quantity_controls(
         selected_quantity = int(
             st.number_input(
                 "Quantity for the cart",
-                min_value=1,
+                min_value=0,
                 step=1,
                 key=quantity_key,
                 on_change=mark_merge_quantities_custom,
@@ -8049,9 +8366,44 @@ def _render_requirement_merge(st: Any) -> None:
 
             exclude_key = f"{decision.decision_id}:exclude"
             st.session_state.setdefault(exclude_key, False)
+            merge_choice_key = (
+                f"{decision.quantity_interrupt.interrupt_id}:choice"
+                if (
+                    pending_selection is not None
+                    and decision.quantity_interrupt is not None
+                )
+                else None
+            )
+            merge_quantity_keys = (
+                tuple(
+                    f"{variant.variant_id}:quantity"
+                    for variant in decision.variants
+                )
+                if pending_variants is not None
+                else (
+                    (
+                        f"{decision.quantity_interrupt.interrupt_id}:quantity",
+                    )
+                    if decision.quantity_interrupt is not None
+                    else ()
+                )
+            )
+            custom_pending_key = (
+                f"{decision.quantity_interrupt.interrupt_id}:custom-pending"
+                if decision.quantity_interrupt is not None
+                else None
+            )
             excluded = st.checkbox(
                 "Do not add this item to the cart",
                 key=exclude_key,
+                on_change=apply_merge_item_exclusion,
+                args=(
+                    st.session_state,
+                    exclude_key,
+                    merge_choice_key,
+                    merge_quantity_keys,
+                    custom_pending_key,
+                ),
                 help=(
                     "Use this when you do not want this item included in the "
                     "shopping plan."
@@ -8121,12 +8473,36 @@ def _render_requirement_merge(st: Any) -> None:
     st.rerun()
 
 
+def deduplicate_catalog_unavailable_items(
+    items: Sequence[CatalogUnavailableItem],
+) -> tuple[CatalogUnavailableItem, ...]:
+    """Apply BR-57 before unavailable source evidence reaches Personalize."""
+
+    distinct: list[CatalogUnavailableItem] = []
+    seen: set[tuple[object, ...]] = set()
+    for item in items:
+        identity = tuple(
+            (
+                str(value).strip().casefold()
+                if isinstance(value, str)
+                else value
+            )
+            for field_name in CATALOG_UNAVAILABLE_SOURCE_IDENTITY_FIELDS
+            for value in (getattr(item, field_name),)
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        distinct.append(item)
+    return tuple(distinct)
+
+
 def _personalize_source_summary(
     st: Any,
     child_id: str,
     envelope: ExtractionEnvelope,
 ) -> None:
-    """Show one compact source summary and hide excluded content by default."""
+    """Show extracted scope and source evidence without repeating Lists choices."""
 
     requirements = tuple(envelope.requirements)
     documents = tuple(
@@ -8183,7 +8559,7 @@ def _personalize_source_summary(
     if summary_parts:
         st.caption(
             escape_streamlit_dollars(
-                "Read " + " · ".join(summary_parts)
+                EXTRACTED_SCOPE_LABEL + " " + " · ".join(summary_parts)
             )
         )
     if list_input is not None:
@@ -8198,22 +8574,6 @@ def _personalize_source_summary(
             ),
             key=f"document-source:{child_id}",
         )
-
-    ignored = (
-        selection.ignored_section_labels
-        if selection is not None
-        else ()
-    )
-    if ignored:
-        ignored_count = len(ignored)
-        with st.expander(
-            f"{ignored_count} other "
-            f"{'section was' if ignored_count == 1 else 'sections were'} not read"
-        ):
-            st.write(
-                "Those sections were for other grades or were translated copies "
-                "of the section selected for this student."
-            )
 
     selected_pages = (
         envelope.document_selection.selected_page_numbers
@@ -8256,7 +8616,9 @@ def _personalize_source_summary(
             item_name = match.group(1).strip()
             legacy_unavailable.append((item_name, item_name))
 
-    unavailable_items = tuple(envelope.catalog_unavailable_items)
+    unavailable_items = deduplicate_catalog_unavailable_items(
+        envelope.catalog_unavailable_items
+    )
     if unavailable_items or legacy_unavailable:
         st.error(
             "Items these stores do not carry. You will need to source these "
@@ -8265,8 +8627,7 @@ def _personalize_source_summary(
         for index, item in enumerate(unavailable_items, start=1):
             st.write(
                 escape_streamlit_dollars(
-                    f"{item.item_name.replace('_', ' ').title()}: "
-                    f"{item.source_line}"
+                    item.source_line
                 )
             )
             if list_input is not None:
@@ -8302,7 +8663,7 @@ def _personalize_source_summary(
             for line in remaining_skipped:
                 parent_line = re.sub(
                     r"^Duplicate reading suppressed:\s*",
-                    "Repeated line read once: ",
+                    "Repeated line extracted once: ",
                     line,
                     flags=re.IGNORECASE,
                 )
@@ -8333,6 +8694,13 @@ def _render_review(st: Any) -> None:
     )
     items = tuple(st.session_state["review_items"]) + pending_added_items
     review_offers = tuple(load_catalog())
+    all_unstocked_items = catalog_unstocked_review_items(
+        items,
+        review_offers,
+    )
+    unstocked_item_ids = frozenset(
+        item.review_id for item in all_unstocked_items
+    )
     item_by_id = {item.review_id: item for item in items}
     flag_groups = review_flag_groups(items)
     acknowledged_group_ids = tuple(
@@ -8356,7 +8724,6 @@ def _render_review(st: Any) -> None:
     flagged_row_ids = frozenset(
         row_id for group in flag_groups for row_id in group.row_ids
     )
-    flag_groups_by_child: dict[str, list[Any]] = {}
     flag_anchor_by_group: dict[str, str] = {}
     for group in flag_groups:
         anchor = min(
@@ -8364,7 +8731,6 @@ def _render_review(st: Any) -> None:
             key=lambda child_id: child_order.get(child_id, 10_000),
         )
         flag_anchor_by_group[group.group_id] = anchor
-        flag_groups_by_child.setdefault(anchor, []).append(group)
     note_groups = teacher_note_groups(items)
     note_groups_by_child: dict[str, list[Any]] = {}
     for note in note_groups:
@@ -8383,6 +8749,42 @@ def _render_review(st: Any) -> None:
             key=lambda child_id: child_order.get(child_id, 10_000),
         )
         condition_groups_by_child.setdefault(anchor, []).append(group)
+    additional_excluded_ids = {
+        child_id: tuple(
+            f"catalog-unavailable:{index}"
+            for index, _ in enumerate(
+                deduplicate_catalog_unavailable_items(
+                    envelope.catalog_unavailable_items
+                ),
+                start=1,
+            )
+        )
+        for child_id, envelope in extractions.items()
+    }
+    conditional_decision_ids: dict[str, list[str]] = {}
+    for group in condition_groups:
+        selected_label = st.session_state.get(
+            f"condition-group:{group.group_id}",
+            group.selected_label,
+        )
+        if selected_label in group.option_labels:
+            continue
+        for child_id in group.child_ids:
+            conditional_decision_ids.setdefault(child_id, []).append(
+                group.group_id
+            )
+    student_sections = build_personalize_student_sections(
+        children,
+        items,
+        flag_groups,
+        unhandled_group_ids=unhandled_group_ids,
+        unstocked_item_ids=unstocked_item_ids,
+        additional_excluded_ids=additional_excluded_ids,
+        additional_decision_ids=conditional_decision_ids,
+    )
+    student_section_by_child = {
+        section.child_id: section for section in student_sections
+    }
 
     st.header("Personalize what goes in your cart")
     for child_id, error in st.session_state["extraction_errors"].items():
@@ -8408,6 +8810,7 @@ def _render_review(st: Any) -> None:
             for group in unhandled_groups:
                 st.session_state[f"{group.group_id}:confirmed"] = True
             st.rerun()
+    _render_personalize_summary(st, student_sections)
 
     condition_answers: dict[str, str | None] = {}
     confirmed_flag_group_ids: list[str] = []
@@ -8416,32 +8819,26 @@ def _render_review(st: Any) -> None:
     with st.container():
         for child in children:
             child_id = str(child["child_id"])
+            student_section = student_section_by_child[child_id]
+            st.markdown(
+                f'<span id="{student_section.anchor}"></span>',
+                unsafe_allow_html=True,
+            )
             st.subheader(
                 escape_streamlit_dollars(child_labels[child_id])
             )
+            st.caption(_personalize_count_text(student_section))
             envelope = extractions.get(child_id)
             if envelope is not None:
-                st.write(
-                    escape_streamlit_dollars(
-                        review_child_framing(
-                            child_id,
-                            child_labels[child_id],
-                        envelope,
-                        items,
-                        unhandled_row_ids,
-                    )
-                    )
-                )
                 _personalize_source_summary(
                     st,
                     child_id,
                     envelope,
                 )
-            unstocked_items = catalog_unstocked_review_items(
-                tuple(
-                    item for item in items if item.child_id == child_id
-                ),
-                review_offers,
+            unstocked_items = tuple(
+                item
+                for item in all_unstocked_items
+                if item.child_id == child_id
             )
             if unstocked_items:
                 st.error(
@@ -8509,7 +8906,7 @@ def _render_review(st: Any) -> None:
             st.markdown("**Items for your cart**")
 
             rendered_any = False
-            for group in flag_groups_by_child.get(child_id, ()):
+            for group in student_section.anchored_flag_groups:
                 members = tuple(
                     item_by_id[row_id] for row_id in group.row_ids
                 )

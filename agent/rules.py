@@ -57,10 +57,13 @@ INTERRUPT_TARGET_COUNT = 3  # BR-10: target approval-interrupt maximum.
 INTERRUPT_DESIGN_FAILURE_COUNT = 6  # BR-10: more than six is a failure.
 
 MODEL_CALL_TIMEOUT_SECONDS = 30.0  # Operational ceiling for one model request.
-VISION_MODEL_CALL_TIMEOUT_SECONDS = 120.0  # Rendered-page vision requests need more time.
+VISION_MODEL_CALL_TIMEOUT_SECONDS = 180.0
+# BR-51: rendered-page vision extraction receives a three-minute ceiling.
+# The primary Machias demo document took 113.23 seconds at the prior
+# 120-second ceiling, leaving too little operational headroom.
 EXTRACTION_TEXT_MODEL_TIMEOUT_SECONDS = 120.0
-# BR-39: text extraction receives the same 120-second ceiling as rendered-page
-# vision because observed structured reads routinely exceed 60 seconds.
+# BR-39: text extraction retains a 120-second ceiling because observed
+# structured text reads routinely exceed 60 seconds.
 MODEL_CALL_MAX_RETRIES = 1  # One transient-service retry per model request.
 MODEL_MAX_CONCURRENCY = 4  # Bound parallel model requests in one session.
 BUDGET_ALTERNATIVE_PLAN_COUNT = 2  # At most two whole-plan alternatives.
@@ -177,6 +180,9 @@ PLAUSIBLE_ANNUAL_MAXIMUM_FALLBACK = 12
 # BR-40: combine same-student source quantities when their sum is no more
 # than the canonical item's plausible annual maximum; otherwise select the
 # largest single source amount. Unlisted school supplies use the fallback.
+# These values are unsourced working assumptions created for the prototype,
+# not published student-consumption statistics. They require review before
+# any use beyond this demonstration.
 
 SOURCE_LINK_DOCUMENT_LABEL_MAX_CHARS = 30
 # BR-41 amended: source controls keep document labels within a typical table
@@ -241,6 +247,56 @@ PERSONALIZE_DECISION_DETAIL_LABEL = "More detail"
 # BR-49: a completed Lists decision appears in Personalize as its outcome,
 # quantity, and sources. Its earlier rationale remains available only in the
 # item's collapsed detail under this label.
+
+PERSONALIZE_SUMMARY_COLUMNS = (
+    "Student",
+    "Items in cart",
+    "Need a decision",
+    "Excluded",
+)
+# BR-52: Personalize begins with one student summary. The summary counts and
+# each student's ordered item section consume the same deterministic state.
+
+PERSONALIZE_SOURCE_CONTROL_REASONS = frozenset(
+    {"assumption", "uncertain"}
+)
+# BR-53: an item-level source control stays on the main card only for an
+# assumption or uncertain extraction. Every source remains in More detail.
+
+PACKAGE_EXTRAS_ACCEPTABLE_LABEL = (
+    "Extras are okay when they make the purchase cost less"
+)
+PACKAGE_EXTRAS_AVOID_LABEL = (
+    "Avoid extra items, even if that costs more"
+)
+# BR-54: package preference uses parent intent, and is not shown for reusable
+# single-instance goods where a pack-size preference has no useful meaning.
+
+QUANTITY_WORKING_ASSUMPTION_HELP = (
+    "This number helps the app decide whether to preselect the combined "
+    "quantity. It is the app's own working assumption, not a published "
+    "statistic. You can choose another option or enter your own quantity."
+)
+# BR-55: any plausible-maximum figure is disclosed as an unsourced working
+# assumption beside the rationale that uses it.
+
+EXCLUDED_REQUIREMENT_QUANTITY = 0
+MINIMUM_ACTIVE_REQUIREMENT_QUANTITY = 1
+# BR-56: excluding a merge decision, marking an item already owned, or
+# removing an incorrect item sets its visible cart quantity to zero. Removing
+# the exclusion restores the last positive quantity, or one when none exists.
+
+CATALOG_UNAVAILABLE_SOURCE_IDENTITY_FIELDS = (
+    "document_name",
+    "page_number",
+    "source_line",
+)
+# BR-57: unavailable-item evidence is displayed once per document, page, and
+# exact source line, even if selected sections contribute the same metadata.
+
+EXTRACTED_SCOPE_LABEL = "Extracted"
+# BR-58: parent-facing document scope uses "extracted", not "read", so the
+# interface names the actual structured-output operation consistently.
 
 PARENT_BOOLEAN_ATTRIBUTE_LABELS = {
     "sharpened": {
@@ -528,21 +584,23 @@ def quantity_preselection_rationale(
     if canonical_item in SINGLE_INSTANCE_REQUIREMENT_ITEMS:
         single_item_name = SINGLE_INSTANCE_ITEM_LABELS[canonical_item]
         return (
-            f"A {single_item_name} is normally reused rather than used "
-            "up. When more than one part of a list mentions it, the largest "
+            f"This app treats a {single_item_name} as one reusable item. "
+            "When more than one part of a list mentions it, the largest "
             "single amount is preselected instead of adding the amounts."
         )
     if selected_action == "total":
         return (
             f"{item_name.capitalize()} are used up over time, so requests in "
             "separate parts of the list may both apply. Added together, they "
-            f"come to {combined_quantity}, within the usual yearly amount of "
-            f"{plausible_annual_maximum} for one student."
+            f"come to {combined_quantity}. This app's working limit for "
+            f"combining this item is {plausible_annual_maximum} for one "
+            "student, so the combined amount is preselected."
         )
     return (
         f"Adding the amounts would make {combined_quantity} {item_name}, above "
-        "the usual yearly amount for one student. The lines may repeat the "
-        "same need, so the largest single amount is preselected."
+        f"this app's working limit of {plausible_annual_maximum} for one "
+        "student. The lines may repeat the same need, so the largest single "
+        "amount is preselected."
     )
 
 
@@ -633,9 +691,11 @@ def same_product_override_rationale(
     )
 
 
-# BR-45 amended/BR-48: rationale uses the deterministic, appropriately hedged
-# templates above and is visible only while the rule's preselected identity or
-# quantity option remains selected.
+# BR-45 amended/BR-48/BR-55: rationale uses the deterministic, appropriately
+# hedged templates above. Identity rationale is visible only for the
+# preselected identity. Quantity rationale remains visible for any option
+# whose quantity equals the preselected quantity, even when its named source
+# differs.
 
 CLASSROOM_SHARED_SCOPE = "shared"
 CLASSROOM_UNSPECIFIED_SCOPE_DEFAULT = "individual"

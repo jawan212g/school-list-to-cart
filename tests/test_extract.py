@@ -179,6 +179,7 @@ def test_vision_extraction_uses_the_longer_timeout(
     assert received["timeout_seconds"] == (
         VISION_MODEL_CALL_TIMEOUT_SECONDS
     )
+    assert VISION_MODEL_CALL_TIMEOUT_SECONDS == 180.0
 
 
 def test_text_extraction_uses_the_nonbinding_extraction_timeout(

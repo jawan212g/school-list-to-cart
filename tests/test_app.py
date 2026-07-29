@@ -22,8 +22,13 @@ from agent.requirement_merge import (
     item_decisions,
     resolve_item_decision_state,
 )
-from agent.review import confirmed_requirements, organize_extractions
+from agent.review import (
+    confirmed_requirements,
+    organize_extractions,
+    review_flag_groups,
+)
 from agent.schema import (
+    CatalogUnavailableItem,
     DocumentSelection,
     DocumentSection,
     DocumentStructureEnvelope,
@@ -2326,6 +2331,183 @@ def test_personalize_screen_groups_sources_in_student_summary() -> None:
     assert "Already provided by school" in source
 
 
+def test_personalize_summary_and_marked_section_share_production_state() -> None:
+    """BR-52: rendered counts and marked decisions use the same section."""
+
+    class SummaryColumn:
+        def __init__(
+            self,
+            recorder: "SummaryRecorder",
+            row_index: int,
+            column_index: int,
+        ) -> None:
+            self.recorder = recorder
+            self.row_index = row_index
+            self.column_index = column_index
+
+        def _record(self, value: object) -> None:
+            self.recorder.rows[self.row_index][self.column_index].append(
+                str(value)
+            )
+
+        def markdown(self, value: object) -> None:
+            self._record(value)
+
+        def write(self, value: object) -> None:
+            self._record(value)
+
+        def caption(self, value: object) -> None:
+            self._record(value)
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del kwargs
+            self._record(label)
+            return False
+
+    class SummaryRecorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {}
+            self.rows: list[list[list[str]]] = []
+
+        def columns(self, spec: object) -> tuple[SummaryColumn, ...]:
+            count = len(spec)  # type: ignore[arg-type]
+            row_index = len(self.rows)
+            self.rows.append([[] for _ in range(count)])
+            return tuple(
+                SummaryColumn(self, row_index, column_index)
+                for column_index in range(count)
+            )
+
+        def rerun(self) -> None:
+            raise AssertionError("No summary control was clicked")
+
+    rows = (
+        SupplyItemReview(
+            review_id="clear",
+            req_id="clear",
+            child_id="child-1",
+            item_name="pencils",
+            required_quantity=12,
+            source_text="12 pencils",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="flagged",
+            req_id="flagged",
+            child_id="child-1",
+            item_name="notebook_paper",
+            required_quantity=1,
+            unit="pack",
+            package_quantity_state="assumed",
+            package_size=150,
+            issue_codes=("ambiguous_package_size",),
+            source_text="1 pack notebook paper",
+            confidence=0.8,
+        ),
+        SupplyItemReview(
+            review_id="owned",
+            req_id="owned",
+            child_id="child-1",
+            item_name="backpacks",
+            required_quantity=0,
+            already_owned=True,
+            source_text="1 backpack",
+            confidence=1.0,
+        ),
+    )
+    groups = review_flag_groups(rows)
+    sections = app.build_personalize_student_sections(
+        ({"child_id": "child-1", "label": "Jawan"},),
+        rows,
+        groups,
+        unhandled_group_ids=frozenset(
+            group.group_id for group in groups
+        ),
+    )
+    recorder = SummaryRecorder()
+
+    app._render_personalize_summary(recorder, sections)
+
+    section = sections[0]
+    assert section.item_count == 2
+    assert section.decision_count == 1
+    assert section.excluded_count == 1
+    assert section.anchored_flag_groups[0].row_ids == ("flagged",)
+    assert recorder.rows[1][0] == ["Jawan"]
+    assert recorder.rows[1][1:4] == [["2"], ["1"], ["1"]]
+    assert recorder.rows[1][5] == ["Approve defaults"]
+
+
+def test_personalize_source_summary_extracts_scope_and_deduplicates_gaps() -> None:
+    """BR-57/BR-58: production rendering names scope and one source gap."""
+
+    class SourceRecorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {"list_inputs": ()}
+            self.captions: list[str] = []
+            self.writes: list[str] = []
+            self.errors: list[str] = []
+            self.expanders: list[str] = []
+
+        def caption(self, value: object) -> None:
+            self.captions.append(str(value))
+
+        def write(self, value: object) -> None:
+            self.writes.append(str(value))
+
+        def error(self, value: object) -> None:
+            self.errors.append(str(value))
+
+        def warning(self, value: object) -> None:
+            self.writes.append(str(value))
+
+        def expander(self, label: str) -> object:
+            self.expanders.append(label)
+            raise AssertionError("Excluded-section detail must not render")
+
+    envelope = ExtractionEnvelope(
+        document_selection=DocumentSelection(
+            selected_section_ids=("grade-5",),
+            selected_section_labels=("5th Grade",),
+            ignored_section_ids=("grade-2", "grade-3"),
+            ignored_section_labels=("2nd Grade", "3rd Grade"),
+        ),
+        catalog_unavailable_items=(
+            CatalogUnavailableItem(
+                child_id="child-1",
+                item_name="tape",
+                source_line="1 roll Scotch tape",
+                document_name="district.pdf",
+                section_name="5th Grade",
+                page_number=3,
+            ),
+            CatalogUnavailableItem(
+                child_id="child-1",
+                item_name="tape",
+                source_line="1 roll Scotch tape",
+                document_name="district.pdf",
+                section_name="Highly Capable",
+                page_number=3,
+            ),
+        ),
+    )
+    recorder = SourceRecorder()
+
+    app._personalize_source_summary(
+        recorder,
+        "child-1",
+        envelope,
+    )
+
+    assert recorder.captions == ["Extracted Sections: 5th Grade"]
+    assert recorder.errors == [
+        "Items these stores do not carry. You will need to source these "
+        "yourself."
+    ]
+    assert recorder.writes == ["1 roll Scotch tape"]
+    assert recorder.expanders == []
+
+
 def test_one_uploaded_document_builds_inputs_for_every_child() -> None:
     """A district-wide upload is supplied once and scoped per child later."""
 
@@ -2710,9 +2892,9 @@ def test_merge_quick_choices_and_quantity_field_share_one_state() -> None:
     ) == largest_label
     assert all("selected" not in label for label in choices)
     assert app.quantity_preselection_rationale(interrupt) == (
-        "Adding the amounts would make 84 pencils, above the usual yearly "
-        "amount for one student. The lines may repeat the same need, so the "
-        "largest single amount is preselected."
+        "Adding the amounts would make 84 pencils, above this app's working "
+        "limit of 48 for one student. The lines may repeat the same need, so "
+        "the largest single amount is preselected."
     )
     state: dict[str, object] = {"choice": total_label, "quantity": 48}
 
@@ -2780,9 +2962,9 @@ def test_durable_quantity_default_keeps_combined_choice_without_selecting_it() -
         choices,
     ) == "**1** — Quantity from 5th Grade"
     assert app.quantity_preselection_rationale(interrupt) == (
-        "A backpack is normally reused rather than used up. When more than "
-        "one part of a list mentions it, the largest single amount is "
-        "preselected instead of adding the amounts."
+        "This app treats a backpack as one reusable item. When more than one "
+        "part of a list mentions it, the largest single amount is preselected "
+        "instead of adding the amounts."
     )
 
 
@@ -2836,8 +3018,9 @@ def test_type_a_quantity_choices_do_not_repeat_source_text() -> None:
     assert all("tissues" not in label for label in labels)
     assert app.quantity_preselection_rationale(interrupt) == (
         "Tissues are used up over time, so requests in separate parts of the "
-        "list may both apply. Added together, they come to 5, within the "
-        "usual yearly amount of 6 for one student."
+        "list may both apply. Added together, they come to 5. This app's "
+        "working limit for combining this item is 6 for one student, so the "
+        "combined amount is preselected."
     )
     assert app.visible_quantity_preselection_rationale(
         interrupt,
@@ -2849,6 +3032,194 @@ def test_type_a_quantity_choices_do_not_repeat_source_text() -> None:
         labels[1],
         app.quantity_quick_choice_values(interrupt),
     ) is None
+
+
+def test_equal_quantity_source_choice_keeps_preselection_rationale() -> None:
+    """BR-45 amended: equal-value source alternatives keep the rationale."""
+
+    result = consolidate_requirements(
+        (
+            Requirement(
+                req_id="grade",
+                child_id="child-1",
+                raw_text="1 pair scissors",
+                canonical_item="scissors",
+                quantity=1,
+                source_section="5th Grade",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="capable",
+                child_id="child-1",
+                raw_text="1 scissors",
+                canonical_item="scissors",
+                quantity=1,
+                source_section="Highly Capable Class",
+                source_page=3,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    interrupt = result.interrupts[0]
+    choices = app.quantity_quick_choice_values(interrupt)
+    equal_source_labels = tuple(
+        label
+        for label, quantity in choices.items()
+        if quantity == interrupt.default_quantity
+    )
+
+    assert len(equal_source_labels) == 2
+    assert all(
+        app.visible_quantity_preselection_rationale(
+            interrupt,
+            label,
+            choices,
+        )
+        is not None
+        for label in equal_source_labels
+    )
+
+
+def test_exclusion_actions_zero_the_visible_quantity_state() -> None:
+    """BR-56: conflict, owned, and delete controls all visibly set zero."""
+
+    merge_state: dict[str, object] = {
+        "exclude": True,
+        "choice": "**1** — Quantity from Grade 5",
+        "quantity": 1,
+        "custom-pending": True,
+    }
+    app.apply_merge_item_exclusion(
+        merge_state,
+        "exclude",
+        "choice",
+        ("quantity",),
+        "custom-pending",
+    )
+
+    assert merge_state["choice"] == app.MERGE_CUSTOM_QUANTITY_LABEL
+    assert merge_state["quantity"] == 0
+    assert merge_state["custom-pending"] is False
+
+    for trigger in ("owned", "delete"):
+        review_state: dict[str, object] = {
+            trigger: True,
+            "quantity": 3,
+        }
+        app.apply_review_exclusion_quantity(
+            review_state,
+            trigger,
+            "quantity",
+        )
+        assert review_state["quantity"] == 0
+        review_state[trigger] = False
+        app.apply_review_exclusion_quantity(
+            review_state,
+            trigger,
+            "quantity",
+        )
+        assert review_state["quantity"] == 3
+
+
+@pytest.mark.parametrize("already_owned,delete", ((True, False), (False, True)))
+def test_review_exclusions_persist_zero_in_production_item(
+    already_owned: bool,
+    delete: bool,
+) -> None:
+    """BR-56: the production review update cannot restore an excluded unit."""
+
+    item = SupplyItemReview(
+        review_id="review-scissors",
+        req_id="scissors",
+        child_id="child-1",
+        item_name="scissors",
+        required_quantity=1,
+        source_text="1 scissors",
+        confidence=1.0,
+    )
+
+    updated = app._review_control_update(
+        item,
+        item_name="scissors",
+        quantity=1,
+        unit="each",
+        package_size=None,
+        brand="",
+        brand_required=False,
+        size="",
+        material="",
+        colors="",
+        required_details="",
+        optional=False,
+        allow_equivalents=True,
+        already_owned=already_owned,
+        notes="",
+        delete=delete,
+    )
+
+    assert updated.required_quantity == 0
+
+
+def test_package_preference_is_hidden_for_every_single_instance_item() -> None:
+    """BR-54: reusable single-instance items have no package preference."""
+
+    hidden = {
+        item
+        for item in app.SINGLE_INSTANCE_REQUIREMENT_ITEMS
+        if not app.show_package_preference(item)
+    }
+
+    assert hidden == app.SINGLE_INSTANCE_REQUIREMENT_ITEMS
+    assert app.show_package_preference("pencils")
+    assert app.package_preference_labels() == {
+        "minimum_cost_at_least": (
+            "Extras are okay when they make the purchase cost less"
+        ),
+        "closest_quantity": "Avoid extra items, even if that costs more",
+    }
+
+
+def test_resolved_conflict_source_moves_off_main_card() -> None:
+    """BR-53: completed conflicts keep sources only inside More detail."""
+
+    resolved = SupplyItemReview(
+        review_id="review-folders",
+        req_id="folders",
+        child_id="child-1",
+        item_name="folders",
+        required_quantity=2,
+        sources=(
+            RequirementSource(
+                source_req_id="one",
+                document_name="district.pdf",
+                section_name="5th Grade",
+                page_number=2,
+                exact_line="2 folders",
+                quantity=2,
+            ),
+            RequirementSource(
+                source_req_id="two",
+                document_name="district.pdf",
+                section_name="Highly Capable",
+                page_number=3,
+                exact_line="2 folders",
+                quantity=2,
+            ),
+        ),
+        system_decisions=("consolidated_sources",),
+        source_text="2 folders",
+        confidence=1.0,
+    )
+
+    assert not app.show_item_source_on_main(resolved)
+    assert app.show_item_source_on_main(
+        resolved,
+        ("The original line may be unclear.",),
+    )
+    assert app.show_item_source_on_main(
+        resolved.model_copy(update={"package_quantity_state": "assumed"})
+    )
 
 
 def test_only_unresolved_wording_asks_identity_on_main_card() -> None:

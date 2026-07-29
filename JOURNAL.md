@@ -2405,3 +2405,104 @@ all decision rationale appropriately cautious and parent-facing.
 Deploy Part A-10 and visually verify the Machias backpack, folders,
 composition-notebook, scissors, and glue-stick cards plus one reconciled
 sharpening note in Personalize.
+
+## 2026-07-29 — Part A-11 Personalize structure and conflict-card polish
+
+### Objective
+
+Restructure Personalize around one student summary, remove repeated source and
+section mechanics, make every exclusion visibly zero its quantity, and disclose
+the prototype's unsourced quantity limits without changing matching, approval,
+or cart calculations.
+
+### Work completed
+
+- Raised rendered-page vision extraction from 120 to 180 seconds under BR-51.
+- Added one deterministic per-student Personalize state used by both the top
+  summary and each student's counts and decision-first item section. Each row
+  includes an anchor and a student-scoped default-approval control; the global
+  default approval remains.
+- Removed the ignored-section expander from Personalize and changed Lists and
+  Personalize scope wording from "read" to "extracted."
+- Kept compact source lines on every item, moved resolved and routine source
+  controls into More detail, and retained a main source control only for
+  assumptions or uncertain extraction.
+- Diagnosed duplicate Scotch Tape as repeated catalog-unavailable metadata, not
+  purchasable requirements surviving merge. Deduplicated that display by
+  document, page, and exact source line and removed the repeated item-name
+  prefix.
+- Amended BR-45 so an equal-quantity named-source alternative keeps the
+  preselection rationale.
+- Made conflict exclusion, already-owned, and incorrect-item removal update the
+  visible quantity to zero. Reversing a Personalize exclusion restores the
+  last positive quantity.
+- Reworded package preference around whether extras are acceptable and hid it
+  for backpacks, headphones, pencil boxes, pencil pouches, pencil sharpeners,
+  rulers, scissors, and water bottles.
+- Reworded all quantity-default rationales as app behavior. Non-durable
+  rationales with a numeric working limit now include an information popover
+  explaining that the figure is an app assumption, not published data.
+
+### Decisions made
+
+- BR-51 uses 180 seconds because the primary Machias document consumed 113.23
+  seconds of the prior 120-second ceiling; three minutes leaves useful demo
+  headroom without changing model capability.
+- BR-52 through BR-58 keep Personalize display behavior deterministic and
+  source-backed.
+- The plausible annual maximum table remains in the prototype, but its values
+  are explicitly unsourced working assumptions. Reviewing or replacing those
+  values with defensible evidence remains an open item.
+- Summary "Excluded" counts purchasable items outside the base cart, including
+  already-owned, removed, optional, inapplicable conditional, school-provided,
+  unstocked, and catalog-unavailable items. Teacher directions remain notes,
+  not excluded products.
+
+### Live verification
+
+- OpenAI `gpt-5.6-sol` completed the final paired Maple extraction in 60.62
+  seconds with 16 requirements per student and zero merge interrupts.
+- The $150 run landed at $110.04 with three interrupts. Reusing the exact same
+  extraction and cached match decisions at $85 kept the $110.04 required cart,
+  produced four interrupts, and produced a $76.97 recommended plan.
+- These differ from A-9/A-10's $109.83 and $69.24. A-11 changed no matching or
+  calculation path; the difference is current model-assisted extraction and
+  suitability variation. The retained evidence is insufficient to claim that
+  either live cart is more correct.
+- One earlier comparable attempt completed extraction but timed out during an
+  OpenAI matching batch. A deterministic structured-match fallback on a second
+  extraction also produced $110.04 and three interrupts at $150, with a $76.97
+  $85 recommendation; it was kept separate from the final model-assisted run.
+
+### Files changed
+
+- Updated `agent/rules.py`, `app.py`, `tests/test_app.py`,
+  `tests/test_extract.py`, and `JOURNAL.md`.
+
+### Testing performed
+
+- Focused Lists/Personalize, extraction, provider, and merge suite: 185 passed.
+- `py -3.12-arm64 -m pytest -q`: 353 passed, 1 skipped.
+- Production renderer tests use real `ExtractionEnvelope`, `Requirement`,
+  `RequirementSource`, `SupplyItemReview`, and `ReviewFlagGroup` objects.
+- Static AST inspection found no model-call candidates in
+  `agent/optimize.py`. Apparent arithmetic candidates in `agent/extract.py`
+  were type-union annotations and prompt-string assembly, not numeric or money
+  arithmetic; no code was changed to silence that false positive.
+
+### Problems or limitations
+
+- Streamlit remains unavailable on Windows ARM64, so the anchor jump, summary
+  column widths, popover placement, and compact card spacing require deployed
+  browser review.
+- The strict live baseline required multiple attempts because one model-assisted
+  matching batch timed out. This remains a five-minute demo reliability risk
+  outside the Lists/Personalize scope of A-11.
+- The plausible annual maximum values have no external source and require
+  review before any claim beyond this prototype.
+
+### Recommended next step
+
+Deploy Part A-11 and visually verify the per-student summary, anchor jumps,
+student-scoped default approval, rationale information popover, and zeroed
+quantity controls on both desktop and phone widths.
