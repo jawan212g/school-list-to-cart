@@ -600,9 +600,6 @@ def test_banner_navigation_preserves_every_completed_stage_value() -> None:
 def test_preferences_renderer_builds_intake_from_durable_values() -> None:
     """FR-03/FR-04: the display boundary builds intake from durable values."""
 
-    class RerunSignal(Exception):
-        pass
-
     class ExpanderContext:
         def __enter__(self) -> None:
             return None
@@ -615,8 +612,10 @@ def test_preferences_renderer_builds_intake_from_durable_values() -> None:
             self.forward = forward
 
         def button(self, label: str, **kwargs: object) -> bool:
-            del kwargs
-            return self.forward and label == "Continue to the lists"
+            if self.forward and label == "Continue to the lists":
+                callback = kwargs["on_click"]
+                callback(*kwargs.get("args", ()))  # type: ignore[operator]
+            return False
 
     class PreferencesStreamlit:
         session_state: dict[str, object] = {
@@ -708,19 +707,114 @@ def test_preferences_renderer_builds_intake_from_durable_values() -> None:
             del specification
             return NavigationColumn(False), NavigationColumn(True)
 
-        @staticmethod
-        def rerun() -> None:
-            raise RerunSignal
-
     state = PreferencesStreamlit.session_state
 
-    with pytest.raises(RerunSignal):
-        app._render_preferences_step(PreferencesStreamlit())
+    app._render_preferences_step(PreferencesStreamlit())
 
     assert state["screen"] == "lists"
     assert state["intake"]["budget_total"] == 8_550
     assert state["intake"]["store_radius_miles"] == 10.0
     assert state["intake"]["tax_basis_points"] == 700
+
+
+def test_budget_screen_buttons_render_before_callback_validation() -> None:
+    """Setup: the production Budget screen mounts both unchanged buttons."""
+
+    class NavigationColumn:
+        def __init__(self) -> None:
+            self.buttons: list[tuple[str, dict[str, object]]] = []
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            self.buttons.append((label, dict(kwargs)))
+            return False
+
+    back_column = NavigationColumn()
+    forward_column = NavigationColumn()
+
+    class BudgetStreamlit:
+        session_state: dict[str, object] = {
+            "intake_step": 2,
+            "max_intake_step_reached": 2,
+            "max_stage_reached": 1,
+            "child_count": 1,
+            "entity_type_0": "Student",
+            "child_label_0": "Maya",
+            "student_name_0": "Maya",
+            "child_grade_0": "Grade 2",
+            "student_grade_0": "Grade 2",
+            "budget_mode_label": "One combined budget",
+            "previous_budget_mode_label": "One combined budget",
+            "combined_budget_text": "0",
+            "budget_validation_attempted": False,
+            "budget_validation_errors": {},
+        }
+
+        @staticmethod
+        def caption(value: object) -> None:
+            del value
+
+        @staticmethod
+        def info(value: object) -> None:
+            del value
+
+        @staticmethod
+        def error(value: object) -> None:
+            del value
+
+        @classmethod
+        def radio(
+            cls,
+            label: str,
+            options: object,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> object:
+            del label, options, kwargs
+            return cls.session_state[key]
+
+        @classmethod
+        def text_input(
+            cls,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            return str(cls.session_state[key])
+
+        @staticmethod
+        def columns(specification: object) -> tuple[
+            NavigationColumn,
+            NavigationColumn,
+        ]:
+            assert specification == 2
+            return back_column, forward_column
+
+        @staticmethod
+        def rerun() -> None:
+            raise AssertionError("Setup callbacks must not request another rerun")
+
+    app._render_budget_step(BudgetStreamlit())
+
+    assert [label for label, _ in back_column.buttons] == [
+        "Back to students"
+    ]
+    assert [label for label, _ in forward_column.buttons] == [
+        "Continue to shopping preferences"
+    ]
+    continue_kwargs = forward_column.buttons[0][1]
+    assert "key" not in continue_kwargs
+    callback = continue_kwargs["on_click"]
+    callback(*continue_kwargs["args"])  # type: ignore[operator]
+    assert BudgetStreamlit.session_state["intake_step"] == 2
+    assert BudgetStreamlit.session_state["budget_validation_attempted"] is True
+    assert BudgetStreamlit.session_state["budget_validation_errors"]
+
+    BudgetStreamlit.session_state["combined_budget_text"] = "150.00"
+    callback(*continue_kwargs["args"])  # type: ignore[operator]
+    assert BudgetStreamlit.session_state["intake_step"] == 3
 
 
 def test_removing_entry_clears_only_its_budget_and_list() -> None:
@@ -1218,7 +1312,7 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert "Choose Student or Classroom." in student_source
     assert '"Shopping for"' not in student_source
     assert "student_validation_attempted" in student_source
-    assert "if validation_attempted" in student_source
+    assert "student_validation_errors" in student_source
     assert "disabled=" not in student_source
     assert "continue_column.button" in student_source
     assert "use_container_width=True" in student_source
@@ -1255,12 +1349,14 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert "_navigation_button_columns(st)" in student_source
     assert "_navigation_button_columns(st)" in budget_source
     assert "_navigation_button_columns(st)" in preferences_source
-    assert 'back.button("Back to students", use_container_width=True)' in (
-        budget_source
-    )
-    assert 'back.button("Back to budget", use_container_width=True)' in (
-        preferences_source
-    )
+    assert "SETUP_BACK_NAVIGATION[2]" in budget_source
+    assert "SETUP_BACK_NAVIGATION[3]" in preferences_source
+    assert "on_click=_continue_from_students" in student_source
+    assert "on_click=_continue_from_budget" in budget_source
+    assert "on_click=_continue_from_preferences" in preferences_source
+    assert ".rerun()" not in student_source
+    assert ".rerun()" not in budget_source
+    assert ".rerun()" not in preferences_source
     assert main_source.index(
         "preserve_navigation_state(st.session_state)"
     ) < main_source.index("_initialize_state(st)")
@@ -3803,7 +3899,7 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
 
     assert list_input.source == pasted
     assert "".join(list_input.source_page_texts) == pasted
-    assert list_input.resolved_document_name == "Maya's pasted list"
+    assert list_input.resolved_document_name == "Maya's supply list"
     assert list_input.source_page_count == 2
     assert app._saved_list_page_count(list_input) == 2
 
@@ -3902,11 +3998,259 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
     assert len(SourceControl.popover_labels) == 1
     source_label = SourceControl.popover_labels[0]
     assert source_label.startswith("View source")
-    assert "Maya's pasted list" in source_label
+    assert "Maya's supply list" in source_label
     assert source_label.endswith("page 2")
     assert SourceControl.rendered_text_pages == [
         (list_input.source_page_texts[1], False)
     ]
+
+
+def test_pasted_source_controls_reach_all_provenance_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-64: production surface renderers all open retained pasted text."""
+
+    pasted = (
+        "2 pocket folders\n"
+        "3 pocket folders\n"
+        "2 glue sticks\n"
+        "3 glue sticks\n"
+        "1 graphing calculator\n"
+    )
+    state: dict[str, object] = {
+        "list_mode_0": "Paste text",
+        "list_paste_0": pasted,
+    }
+
+    class ListsState:
+        session_state = state
+
+    (list_input,) = app._build_list_inputs(
+        ListsState(),
+        (
+            {
+                "child_id": "child-1",
+                "label": "Kevin",
+                "grade": "Grade 2",
+            },
+        ),
+    )
+
+    class Popover:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    class SurfaceRecorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {
+                "list_inputs": (list_input,),
+                "source_reference_cache": {},
+            }
+            self.popovers: list[str] = []
+            self.text_pages: list[str] = []
+            self.writes: list[str] = []
+            self.errors: list[str] = []
+
+        def __enter__(self) -> "SurfaceRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def container(self, **kwargs: object) -> "SurfaceRecorder":
+            del kwargs
+            return self
+
+        def popover(self, label: str, **kwargs: object) -> Popover:
+            del kwargs
+            self.popovers.append(label)
+            return Popover()
+
+        def code(
+            self,
+            value: str,
+            *,
+            language: str | None,
+            wrap_lines: bool,
+        ) -> None:
+            assert language is None
+            assert wrap_lines is False
+            self.text_pages.append(value)
+
+        def image(self, value: object, **kwargs: object) -> None:
+            del value, kwargs
+            raise AssertionError("Pasted provenance must remain text-backed")
+
+        def info(self, value: object) -> None:
+            raise AssertionError(value)
+
+        def caption(self, value: object) -> None:
+            del value
+
+        def write(self, value: object) -> None:
+            self.writes.append(str(value))
+
+        def error(self, value: object) -> None:
+            self.errors.append(str(value))
+
+        def warning(self, value: object) -> None:
+            self.writes.append(str(value))
+
+        def markdown(self, value: object) -> None:
+            del value
+
+        def expander(self, label: str) -> "SurfaceRecorder":
+            del label
+            return self
+
+        def columns(self, spec: object) -> tuple["SurfaceColumn", ...]:
+            count = spec if isinstance(spec, int) else len(spec)  # type: ignore[arg-type]
+            return tuple(SurfaceColumn(self) for _ in range(count))
+
+    class SurfaceColumn:
+        def __init__(self, recorder: SurfaceRecorder) -> None:
+            self.recorder = recorder
+
+        @property
+        def session_state(self) -> dict[str, object]:
+            return self.recorder.session_state
+
+        def __enter__(self) -> "SurfaceColumn":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def markdown(self, value: object) -> None:
+            del value
+
+        def write(self, value: object) -> None:
+            self.recorder.write(value)
+
+        def caption(self, value: object) -> None:
+            self.recorder.caption(value)
+
+        def popover(self, label: str, **kwargs: object) -> Popover:
+            return self.recorder.popover(label, **kwargs)
+
+        def code(
+            self,
+            value: str,
+            *,
+            language: str | None,
+            wrap_lines: bool,
+        ) -> None:
+            self.recorder.code(
+                value,
+                language=language,
+                wrap_lines=wrap_lines,
+            )
+
+        def image(self, value: object, **kwargs: object) -> None:
+            self.recorder.image(value, **kwargs)
+
+        def info(self, value: object) -> None:
+            self.recorder.info(value)
+
+    recorder = SurfaceRecorder()
+    item = SupplyItemReview(
+        review_id="review-folders",
+        req_id="folders-one",
+        child_id="child-1",
+        item_name="folders",
+        required_quantity=2,
+        source_text="2 pocket folders",
+        source_document=list_input.resolved_document_name,
+        source_page=1,
+        package_quantity_state="assumed",
+        confidence=1.0,
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_review_detail_controls",
+        lambda st, item, **kwargs: item,
+    )
+    app._render_compact_review_row(
+        recorder,
+        (item,),
+        {"child-1": "Kevin"},
+        key_prefix="item",
+        offers=(),
+    )
+    item_surface_count = len(recorder.popovers)
+
+    conflict = item_decisions(
+        consolidate_requirements(
+            (
+                Requirement(
+                    req_id="glue-one",
+                    child_id="child-1",
+                    raw_text="2 glue sticks",
+                    canonical_item="glue_sticks",
+                    quantity=2,
+                    source_document=list_input.resolved_document_name,
+                    source_section="List A",
+                    source_page=1,
+                    extraction_confidence=1.0,
+                ),
+                Requirement(
+                    req_id="glue-two",
+                    child_id="child-1",
+                    raw_text="3 glue sticks",
+                    canonical_item="glue_sticks",
+                    quantity=3,
+                    source_document=list_input.resolved_document_name,
+                    source_section="List B",
+                    source_page=1,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+    )[0]
+    app._render_merge_source_rows(recorder, conflict, list_input)
+    conflict_surface_count = len(recorder.popovers) - item_surface_count
+
+    envelope = ExtractionEnvelope(
+        catalog_unavailable_items=(
+            CatalogUnavailableItem(
+                child_id="child-1",
+                item_name="graphing_calculator",
+                source_line="1 graphing calculator",
+                document_name=list_input.resolved_document_name,
+                page_number=1,
+            ),
+        )
+    )
+    before_unavailable = len(recorder.popovers)
+    app._personalize_source_summary(
+        recorder,
+        "child-1",
+        envelope,
+    )
+    unavailable_surface_count = (
+        len(recorder.popovers) - before_unavailable
+    )
+
+    assert item_surface_count == 1
+    assert conflict_surface_count == 2
+    assert unavailable_surface_count == 2
+    assert all(
+        label.startswith("View source")
+        and "Kevin's supply list" in label
+        for label in recorder.popovers
+    )
+    assert recorder.text_pages == [
+        pasted
+        for _ in recorder.popovers
+    ]
+    assert recorder.errors == [
+        "Items these stores do not carry. You will need to source these "
+        "yourself."
+    ]
+    assert "1 graphing calculator" in recorder.writes
 
 
 def test_review_understanding_pluralizes_composition_notebooks() -> None:

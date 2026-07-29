@@ -930,6 +930,12 @@ def _grade_display_title(value: str) -> str:
     return displayed[:1].upper() + displayed[1:]
 
 
+def _student_grade_heading(label: str, grade: str) -> str:
+    """Format one Lists-screen student heading consistently."""
+
+    return f"{label} · {_grade_display_title(grade)}"
+
+
 def detect_list_identity_warnings(
     extractions: Mapping[str, object],
     children: Sequence[Mapping[str, Any]],
@@ -3039,8 +3045,11 @@ def _initialize_state(st: Any) -> None:
         "max_intake_step_reached": 1,
         "max_stage_reached": 1,
         "student_validation_attempted": False,
+        "student_validation_errors": {},
         "budget_validation_attempted": False,
+        "budget_validation_errors": {},
         "preferences_validation_attempted": False,
+        "preferences_validation_errors": {},
         "budget_mode_label": "One combined budget",
         "previous_budget_mode_label": "One combined budget",
         "combined_budget_text": DEFAULT_BUDGET_TEXT,
@@ -3663,6 +3672,7 @@ def commit_intake_widget_value(durable_key: str) -> None:
     st.session_state[durable_key] = value
     st.session_state[NAVIGATION_STATE_PREFIX + durable_key] = value
     st.session_state[INTAKE_WIDGET_TOUCHED_PREFIX + durable_key] = True
+    _clear_setup_validation_for_key(st.session_state, durable_key)
 
 
 def _intake_section_for_navigation_key(key: str) -> int | None:
@@ -4356,6 +4366,241 @@ def _navigation_button_columns(st: Any) -> tuple[Any, Any]:
     return back_column, continue_column
 
 
+SETUP_FORWARD_NAVIGATION: Mapping[int, tuple[str, int | str]] = {
+    1: ("Continue to budget", 2),
+    2: ("Continue to shopping preferences", 3),
+    3: ("Continue to the lists", "lists"),
+}
+SETUP_BACK_NAVIGATION: Mapping[int, tuple[str, int]] = {
+    2: ("Back to students", 1),
+    3: ("Back to budget", 2),
+}
+
+
+def _clear_setup_validation_for_key(
+    state: MutableMapping[str, Any],
+    durable_key: str,
+) -> None:
+    """Clear stale exit-validation messages after the parent edits a field."""
+
+    section = _intake_section_for_navigation_key(durable_key)
+    if section == 1:
+        state["student_validation_attempted"] = False
+        state["student_validation_errors"] = {}
+    elif section == 2:
+        state["budget_validation_attempted"] = False
+        state["budget_validation_errors"] = {}
+    elif section == 3:
+        state["preferences_validation_attempted"] = False
+        state["preferences_validation_errors"] = {}
+    state["ui_error_active"] = False
+
+
+def _continue_from_students(
+    state: MutableMapping[str, Any],
+    target_step: int,
+) -> None:
+    """Validate once, then commit the Students destination before rerender."""
+
+    errors: dict[str, str] = {}
+    entry_count = int(state.get("child_count", 1))
+    for index in range(entry_count):
+        entity_type = state.get(f"entity_type_{index}")
+        if entity_type not in {"Student", "Classroom"}:
+            errors[f"entity_type_{index}"] = "Choose Student or Classroom."
+            continue
+        is_classroom = entity_type == "Classroom"
+        name = str(
+            state.get(
+                (
+                    f"teacher_name_{index}"
+                    if is_classroom
+                    else f"student_name_{index}"
+                ),
+                "",
+            )
+        ).strip()
+        grade = str(
+            state.get(
+                (
+                    f"classroom_grade_{index}"
+                    if is_classroom
+                    else f"student_grade_{index}"
+                ),
+                state.get(f"child_grade_{index}", ""),
+            )
+            or ""
+        ).strip()
+        if not name:
+            errors[f"name_{index}"] = (
+                "Enter the teacher name."
+                if is_classroom
+                else "Enter a student name or nickname."
+            )
+        if not grade:
+            errors[f"grade_{index}"] = (
+                "Choose the classroom grade."
+                if is_classroom
+                else "Choose the student's grade."
+            )
+    state["student_validation_errors"] = errors
+    state["student_validation_attempted"] = bool(errors)
+    state["ui_error_active"] = bool(errors)
+    if errors:
+        return
+    navigate_intake_step(state, target_step)
+
+
+def _continue_from_budget(
+    state: MutableMapping[str, Any],
+    target_step: int,
+) -> None:
+    """Validate once, then commit the Budget destination before rerender."""
+
+    students = _intake_students_from_state(
+        state,
+        int(state.get("child_count", 1)),
+    )
+    mode = str(state.get("budget_mode_label", "One combined budget"))
+    errors: dict[str, str] = {}
+    if mode == "One combined budget":
+        error = budget_entry_error(
+            str(state.get("combined_budget_text", ""))
+        )
+        if error is not None:
+            errors["combined_budget_text"] = error
+    elif mode == "A budget for each student or classroom":
+        for _, _, label, budget_key in budget_entry_fields(students):
+            error = budget_entry_error(str(state.get(budget_key, "")))
+            if error is not None:
+                errors[budget_key] = f"{label}: {error}"
+    state["budget_validation_errors"] = errors
+    state["budget_validation_attempted"] = bool(errors)
+    state["ui_error_active"] = bool(errors)
+    if errors:
+        return
+    notices = commit_budget_mode_drafts(
+        state,
+        mode,
+        len(students),
+    )
+    if notices:
+        state["pending_intake_notices"] = notices
+    else:
+        state.pop("pending_intake_notices", None)
+    navigate_intake_step(state, target_step)
+
+
+def _continue_from_preferences(
+    state: MutableMapping[str, Any],
+    target_screen: str,
+) -> None:
+    """Validate once, then build intake and commit the screen destination."""
+
+    students = _intake_students_from_state(
+        state,
+        int(state.get("child_count", 1)),
+    )
+    mode_label = str(
+        state.get("shopping_preference_label", next(iter(SHOPPING_MODES)))
+    )
+    shopping_mode = SHOPPING_MODES[mode_label]
+    stores = tuple(load_stores())
+    errors: dict[str, str] = {}
+    allowed_stores: frozenset[str] | None = None
+    max_stores: int | None = None
+    if shopping_mode == "custom":
+        selected_names = tuple(state.get("selected_store_names", ()))
+        if not selected_names:
+            errors["selected_store_names"] = (
+                "Choose at least one store to build a custom plan."
+            )
+        stores_by_name = {store.name: store.store_id for store in stores}
+        allowed_stores = frozenset(
+            stores_by_name[name]
+            for name in selected_names
+            if name in stores_by_name
+        )
+        max_stores = int(state.get("maximum_stores", 2))
+    try:
+        tax_basis_points = tax_percent_to_basis_points(
+            str(state.get("tax_rate_text", ""))
+        )
+    except ValueError as error:
+        errors["tax_rate_text"] = str(error)
+        tax_basis_points = 0
+    student_errors = tuple(
+        error
+        for student in students
+        for error in student_input_errors(
+            str(student["label"]),
+            str(student["grade"]),
+        )
+    )
+    if student_errors:
+        errors["students"] = " ".join(student_errors)
+    try:
+        budget_mode, budget_total, budget_allocations = (
+            _budget_from_intake_state(state, students)
+        )
+    except ValueError as error:
+        errors["budget"] = str(error)
+        budget_mode, budget_total, budget_allocations = "combined", 0, {}
+    state["preferences_validation_errors"] = errors
+    state["preferences_validation_attempted"] = bool(errors)
+    state["ui_error_active"] = bool(errors)
+    if errors:
+        return
+
+    fulfillment_preference = FULFILLMENT_OPTIONS[
+        str(state.get("fulfillment_label", next(iter(FULFILLMENT_OPTIONS))))
+    ]
+    state["intake"] = {
+        "session_id": str(uuid4()),
+        "children": tuple(students),
+        "budget_total": budget_total,
+        "budget_mode": budget_mode,
+        "budget_allocations": budget_allocations,
+        "shopping_mode": shopping_mode,
+        "store_radius_miles": float(
+            state.get("store_radius_miles", DEFAULT_RADIUS_MILES)
+        ),
+        "allowed_stores": allowed_stores,
+        "max_stores": max_stores,
+        "fulfillment_pref": fulfillment_preference,
+        "tax_basis_points": tax_basis_points,
+        "demo_mode": bool(state.get("demo_mode", False)),
+    }
+    state["result"] = None
+    state["list_identity_confirmed"] = False
+    state["approval_outcomes"] = {}
+    state["resolved_interrupts"] = {}
+    state["parent_decisions"] = ()
+    state["checkout_confirmation"] = None
+    state["preferences_validation_attempted"] = False
+    state["preferences_validation_errors"] = {}
+    state["ui_error_active"] = False
+    _limit_reached_stage(state, 3)
+    state["progress_substep"] = "adding the lists"
+    state["screen"] = target_screen
+
+
+def _back_within_setup(
+    state: MutableMapping[str, Any],
+    target_step: int,
+) -> None:
+    """Commit one backward Setup destination before Streamlit rerenders."""
+
+    navigate_intake_step(state, target_step)
+    state["student_validation_attempted"] = False
+    state["budget_validation_attempted"] = False
+    state["preferences_validation_attempted"] = False
+    state["student_validation_errors"] = {}
+    state["budget_validation_errors"] = {}
+    state["preferences_validation_errors"] = {}
+    state["ui_error_active"] = False
+
+
 def _render_student_step(st: Any) -> None:
     """Render type-first FR-01/FR-05 intake with exit validation."""
 
@@ -4387,7 +4632,10 @@ def _render_student_step(st: Any) -> None:
     validation_attempted = bool(
         st.session_state.get("student_validation_attempted", False)
     )
-    validation_errors: list[str] = []
+    validation_errors: Mapping[str, str] = st.session_state.get(
+        "student_validation_errors",
+        {},
+    )
     for index in range(student_count):
         name_key = f"child_label_{index}"
         student_name_key = f"student_name_{index}"
@@ -4523,10 +4771,10 @@ def _render_student_step(st: Any) -> None:
             st.session_state[entity_key] = entity_type
             if entity_type is None:
                 type_error = "Choose Student or Classroom."
-                validation_errors.append(
-                    f"{default_heading}: {type_error}"
-                )
-                if validation_attempted:
+                if (
+                    validation_attempted
+                    and f"entity_type_{index}" in validation_errors
+                ):
                     st.error(type_error)
                 continue
             is_classroom = entity_type == "Classroom"
@@ -4603,10 +4851,10 @@ def _render_student_step(st: Any) -> None:
                     if is_classroom
                     else "Enter a student name or nickname."
                 )
-                validation_errors.append(
-                    f"{default_heading}: {name_error}"
-                )
-                if validation_attempted:
+                if (
+                    validation_attempted
+                    and f"name_{index}" in validation_errors
+                ):
                     name_column.error(name_error)
             if not grade_text:
                 grade_error = (
@@ -4614,10 +4862,10 @@ def _render_student_step(st: Any) -> None:
                     if is_classroom
                     else "Choose the student's grade."
                 )
-                validation_errors.append(
-                    f"{default_heading}: {grade_error}"
-                )
-                if validation_attempted:
+                if (
+                    validation_attempted
+                    and f"grade_{index}" in validation_errors
+                ):
                     grade_column.error(grade_error)
             if is_classroom:
                 count_key = f"student_count_{index}"
@@ -4640,26 +4888,15 @@ def _render_student_step(st: Any) -> None:
                         "by this number."
                     ),
                 )
-    st.session_state["ui_error_active"] = (
-        validation_attempted and bool(validation_errors)
-    )
     _, continue_column = _navigation_button_columns(st)
-    continue_clicked = continue_column.button(
-        "Continue to budget",
+    continue_label, continue_target = SETUP_FORWARD_NAVIGATION[1]
+    continue_column.button(
+        continue_label,
         type="primary",
         use_container_width=True,
+        on_click=_continue_from_students,
+        args=(st.session_state, int(continue_target)),
     )
-    if not continue_clicked:
-        return
-    if validation_errors:
-        st.session_state["student_validation_attempted"] = True
-        st.session_state["ui_error_active"] = True
-        st.rerun()
-    else:
-        st.session_state["student_validation_attempted"] = False
-        st.session_state["ui_error_active"] = False
-        navigate_intake_step(st.session_state, 2)
-        st.rerun()
 
 
 def _render_budget_step(st: Any) -> None:
@@ -4699,7 +4936,10 @@ def _render_budget_step(st: Any) -> None:
     validation_attempted = bool(
         st.session_state.get("budget_validation_attempted", False)
     )
-    budget_errors: list[str] = []
+    budget_errors: Mapping[str, str] = st.session_state.get(
+        "budget_validation_errors",
+        {},
+    )
     if budget_mode_label == "One combined budget":
         combined_budget_widget_key = mount_intake_widget_value(
             st.session_state,
@@ -4716,11 +4956,12 @@ def _render_budget_step(st: Any) -> None:
             ),
         )
         st.session_state["combined_budget_text"] = combined_budget
-        error = budget_entry_error(combined_budget)
-        if error is not None:
-            budget_errors.append(error)
-            if validation_attempted:
-                st.error(escape_streamlit_dollars(error))
+        if validation_attempted and "combined_budget_text" in budget_errors:
+            st.error(
+                escape_streamlit_dollars(
+                    budget_errors["combined_budget_text"]
+                )
+            )
     elif budget_mode_label == "A budget for each student or classroom":
         for _, _, label, budget_key in budget_entry_fields(students):
             st.session_state.setdefault(budget_key, "75.00")
@@ -4738,51 +4979,31 @@ def _render_budget_step(st: Any) -> None:
                 args=(budget_key,),
             )
             st.session_state[budget_key] = budget_text
-            error = budget_entry_error(budget_text)
-            if error is not None:
-                message = f"{label}: {error}"
-                budget_errors.append(message)
-                if validation_attempted:
-                    st.error(escape_streamlit_dollars(message))
+            if validation_attempted and budget_key in budget_errors:
+                st.error(
+                    escape_streamlit_dollars(budget_errors[budget_key])
+                )
     else:
         st.info(
             "The plan will still minimize landed cost. Budget comparisons "
             "and budget approval questions will be skipped."
         )
-    st.session_state["ui_error_active"] = (
-        validation_attempted and bool(budget_errors)
-    )
     back, forward = _navigation_button_columns(st)
-    if back.button("Back to students", use_container_width=True):
-        navigate_intake_step(st.session_state, 1)
-        st.session_state["budget_validation_attempted"] = False
-        st.session_state["ui_error_active"] = False
-        st.rerun()
-    continue_clicked = forward.button(
-        "Continue to shopping preferences",
+    back_label, back_target = SETUP_BACK_NAVIGATION[2]
+    back.button(
+        back_label,
+        use_container_width=True,
+        on_click=_back_within_setup,
+        args=(st.session_state, back_target),
+    )
+    continue_label, continue_target = SETUP_FORWARD_NAVIGATION[2]
+    forward.button(
+        continue_label,
         type="primary",
         use_container_width=True,
+        on_click=_continue_from_budget,
+        args=(st.session_state, int(continue_target)),
     )
-    if not continue_clicked:
-        return
-    if budget_errors:
-        st.session_state["budget_validation_attempted"] = True
-        st.session_state["ui_error_active"] = True
-        st.rerun()
-    else:
-        st.session_state["budget_validation_attempted"] = False
-        notices = commit_budget_mode_drafts(
-            st.session_state,
-            str(budget_mode_label),
-            len(students),
-        )
-        if notices:
-            st.session_state["pending_intake_notices"] = notices
-        else:
-            st.session_state.pop("pending_intake_notices", None)
-        navigate_intake_step(st.session_state, 3)
-        st.session_state["ui_error_active"] = False
-        st.rerun()
 
 
 def _budget_from_intake_state(
@@ -4851,10 +5072,11 @@ def _render_preferences_step(st: Any) -> None:
     validation_attempted = bool(
         st.session_state.get("preferences_validation_attempted", False)
     )
+    preference_errors: Mapping[str, str] = st.session_state.get(
+        "preferences_validation_errors",
+        {},
+    )
     stores = tuple(load_stores())
-    allowed_stores: frozenset[str] | None = None
-    max_stores: int | None = None
-    preference_errors: list[str] = []
     if shopping_mode == "custom":
         store_options = tuple(store.name for store in stores)
         selected_stores_widget_key = mount_intake_widget_value(
@@ -4871,18 +5093,12 @@ def _render_preferences_step(st: Any) -> None:
             help="Choose which fictional stores may appear in the plan.",
         )
         st.session_state["selected_store_names"] = selected_names
-        if not selected_names:
-            message = "Choose at least one store to build a custom plan."
-            preference_errors.append(message)
-            if validation_attempted:
-                st.error(message)
-        store_ids_by_name = {
-            store.name: store.store_id for store in stores
-        }
-        allowed_stores = frozenset(
-            store_ids_by_name[name] for name in selected_names
-        )
-        max_stores = int(
+        if (
+            validation_attempted
+            and "selected_store_names" in preference_errors
+        ):
+            st.error(preference_errors["selected_store_names"])
+        maximum_stores = int(
             st.number_input(
                 "Maximum number of stores",
                 min_value=1,
@@ -4898,7 +5114,7 @@ def _render_preferences_step(st: Any) -> None:
                 help="The plan will not use more than this many stores.",
             )
         )
-        st.session_state["maximum_stores"] = max_stores
+        st.session_state["maximum_stores"] = maximum_stores
 
     with st.expander("Advanced shopping and tax options"):
         st.caption(
@@ -5000,85 +5216,39 @@ def _render_preferences_step(st: Any) -> None:
             ),
         )
         st.session_state["tax_rate_text"] = tax_rate_text
-        try:
-            tax_percent_to_basis_points(tax_rate_text)
-        except ValueError as error:
-            preference_errors.append(str(error))
-            if validation_attempted:
-                st.error(escape_streamlit_dollars(str(error)))
+        if validation_attempted and "tax_rate_text" in preference_errors:
+            st.error(
+                escape_streamlit_dollars(
+                    preference_errors["tax_rate_text"]
+                )
+            )
         st.caption(
             "State-level defaults are dated January 1, 2026. City and county "
             "rates, state-specific school-supply exemptions, and "
             "back-to-school tax holidays are not modeled."
         )
 
-    student_errors = tuple(
-        error
-        for student in students
-        for error in student_input_errors(
-            str(student["label"]),
-            str(student["grade"]),
-        )
-    )
-    try:
-        budget_mode, budget_total, budget_allocations = (
-            _budget_from_intake_state(st.session_state, students)
-        )
-    except ValueError as error:
-        preference_errors.append(str(error))
-        budget_mode, budget_total, budget_allocations = "combined", 0, {}
-    preference_errors.extend(student_errors)
-    st.session_state["ui_error_active"] = (
-        validation_attempted and bool(preference_errors)
-    )
+    for error_key in ("students", "budget"):
+        if validation_attempted and error_key in preference_errors:
+            st.error(
+                escape_streamlit_dollars(preference_errors[error_key])
+            )
     back, forward = _navigation_button_columns(st)
-    if back.button("Back to budget", use_container_width=True):
-        navigate_intake_step(st.session_state, 2)
-        st.session_state["preferences_validation_attempted"] = False
-        st.session_state["ui_error_active"] = False
-        st.rerun()
-    continue_clicked = forward.button(
-        "Continue to the lists",
+    back_label, back_target = SETUP_BACK_NAVIGATION[3]
+    back.button(
+        back_label,
+        use_container_width=True,
+        on_click=_back_within_setup,
+        args=(st.session_state, back_target),
+    )
+    continue_label, continue_target = SETUP_FORWARD_NAVIGATION[3]
+    forward.button(
+        continue_label,
         type="primary",
         use_container_width=True,
+        on_click=_continue_from_preferences,
+        args=(st.session_state, str(continue_target)),
     )
-    if not continue_clicked:
-        return
-    if preference_errors:
-        st.session_state["preferences_validation_attempted"] = True
-        st.session_state["ui_error_active"] = True
-        st.rerun()
-        return
-
-    tax_basis_points = tax_percent_to_basis_points(
-        str(st.session_state["tax_rate_text"])
-    )
-    st.session_state["intake"] = {
-        "session_id": str(uuid4()),
-        "children": tuple(students),
-        "budget_total": budget_total,
-        "budget_mode": budget_mode,
-        "budget_allocations": budget_allocations,
-        "shopping_mode": shopping_mode,
-        "store_radius_miles": radius,
-        "allowed_stores": allowed_stores,
-        "max_stores": max_stores,
-        "fulfillment_pref": fulfillment_preference,
-        "tax_basis_points": tax_basis_points,
-        "demo_mode": bool(st.session_state["demo_mode"]),
-    }
-    st.session_state["result"] = None
-    st.session_state["list_identity_confirmed"] = False
-    st.session_state["approval_outcomes"] = {}
-    st.session_state["resolved_interrupts"] = {}
-    st.session_state["parent_decisions"] = ()
-    st.session_state["checkout_confirmation"] = None
-    st.session_state["preferences_validation_attempted"] = False
-    st.session_state["ui_error_active"] = False
-    _limit_reached_stage(st.session_state, 3)
-    st.session_state["progress_substep"] = "adding the lists"
-    st.session_state["screen"] = "lists"
-    st.rerun()
 
 
 def _render_intake(st: Any) -> None:
@@ -5143,7 +5313,7 @@ def _build_individual_list_input(
     return _build_pasted_list_input(
         child_id=str(child["child_id"]),
         text=pasted,
-        document_name=f"{child['label']}'s pasted list",
+        document_name=f"{child['label']}'s supply list",
     )
 
 
@@ -5223,7 +5393,7 @@ def _build_list_inputs(
         shared_input = _build_pasted_list_input(
             child_id=str(children[0]["child_id"]),
             text=pasted,
-            document_name="Parent's pasted district list",
+            document_name="District supply list",
         )
         return tuple(
             replace(shared_input, child_id=str(child["child_id"]))
@@ -7550,6 +7720,39 @@ def _render_section_source_links(
             )
 
 
+def _render_whole_document_source_links(
+    st: Any,
+    list_input: ListInput,
+    *,
+    key_prefix: str,
+) -> None:
+    """Render retained pages for a document that has no named sections."""
+
+    for page_number in range(
+        1,
+        _saved_list_page_count(list_input) + 1,
+    ):
+        source_line = list_input.resolved_document_name
+        if page_number <= len(list_input.source_page_texts):
+            source_line = next(
+                (
+                    line
+                    for line in list_input.source_page_texts[
+                        page_number - 1
+                    ].splitlines()
+                    if line.strip()
+                ),
+                source_line,
+            )
+        _render_source_reference(
+            st,
+            list_input,
+            page_number=page_number,
+            source_line=source_line,
+            key=f"{key_prefix}:page:{page_number}",
+        )
+
+
 def _section_exclusion_summary(
     resolution: SectionResolution,
     choice: ResolvedSectionChoice,
@@ -7782,7 +7985,10 @@ def _render_sections(st: Any) -> None:
             with st.container(border=True):
                 st.subheader(
                     escape_streamlit_dollars(
-                        f"{child['label']} - {grade}"
+                        _student_grade_heading(
+                            str(child["label"]),
+                            grade,
+                        )
                     )
                 )
                 st.caption(
@@ -7792,6 +7998,11 @@ def _render_sections(st: Any) -> None:
                 )
                 st.write(
                     "This list will be extracted."
+                )
+                _render_whole_document_source_links(
+                    st,
+                    list_input,
+                    key_prefix=f"whole-document-source:{child_id}",
                 )
             continue
         current = selections.get(child_id)
@@ -7823,7 +8034,10 @@ def _render_sections(st: Any) -> None:
             rendered_sources: set[tuple[str, int | None]] = set()
             st.subheader(
                 escape_streamlit_dollars(
-                    f"{child['label']} · {grade}"
+                    _student_grade_heading(
+                        str(child["label"]),
+                        grade,
+                    )
                 )
             )
             st.caption(

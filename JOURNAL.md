@@ -2752,3 +2752,124 @@ consequences, quiet BR-59 case (a), and a viewable exact source for direct paste
 
 Deploy the current changes and verify one untouched and one edited budget-mode
 round trip, then open a pasted list's source popover on a later page.
+
+## 2026-07-29 - Pasted source control reaches Lists section screen
+
+### Objective
+
+Trace and fix the deployed absence of a View source control for a pasted,
+ungraded document on the Lists section screen.
+
+### Work completed
+
+- Confirmed direct paste already produced retained text pages during the
+  production Lists ingestion path.
+- Added whole-document source controls to the BR-59 no-grade card. The card
+  now opens every retained pasted page through the common source popover.
+- Changed direct-paste document labels to natural list names such as
+  `Kevin's supply list`; uploaded documents continue to use their filenames.
+- Routed both no-grade and sectioned student cards through one student/grade
+  heading formatter.
+- Exercised the actual section, Personalize item, conflict-table, and
+  unavailable-item renderers with production `ListInput`, requirement,
+  extraction, and merge objects.
+
+### Diagnosis and decisions
+
+- The defect was not ingestion or source-page generation. A plain pasted list
+  correctly had zero detected sections. The BR-59 no-grade display branch
+  stopped after its caption and never invoked the source renderer.
+- Uploaded PDFs usually followed the separate detected-section branch, which
+  already invoked `_render_section_source_links`; this made the defect appear
+  input-type-specific.
+- The same two display branches independently formatted headings, producing a
+  hyphen in the no-grade branch and a middle dot in the sectioned branch.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `tests/test_sections.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused Lists and provenance suite: 123 passed, 1 skipped.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 364 passed, 1 skipped.
+- Static architecture inspection found no model-call candidates in
+  `agent/optimize.py`; `agent/extract.py` contains no numeric arithmetic.
+
+### Problems or limitations
+
+- Streamlit remains unavailable on this Windows ARM64 machine, so deployed
+  visual confirmation must occur after deployment. The tests execute the
+  production render functions and inspect their emitted popovers and exact
+  text-page bodies.
+
+### Remaining work
+
+- Deploy and visually open the new whole-document View source popover.
+
+### Recommended next step
+
+On the deployed Lists screen, use one pasted ungraded list alongside a document
+that requires section selection and confirm the pasted card opens page 1.
+
+## 2026-07-29 - Setup navigation commits in button callbacks
+
+### Objective
+
+Remove the transient old Continue caption between Budget and Shopping
+preferences without changing button keys, layout, money behavior, or adding an
+extra rerun.
+
+### Work completed
+
+- Moved all three forward Setup transitions and both backward transitions into
+  button callbacks, which Streamlit executes before its normal rerun.
+- Kept the navigation buttons unkeyed and in their existing columns.
+- Defined each button caption and destination in one Setup transition entry.
+- Moved exit validation into the corresponding forward callback. Invalid
+  Students, Budget, or Shopping preferences input leaves the current step
+  active and records the field messages for the next render.
+- Added a real Streamlit AppTest covering all five transitions and invalid
+  cancellation, plus an ARM-runnable production-renderer test proving both
+  Budget buttons mount before callback validation.
+
+### Diagnosis and decisions
+
+- Streamlit widget identity includes the label, so the new caption did not
+  literally inherit the old button's backend identity.
+- The visible lag came from two reruns: the click rerun first rendered the old
+  Budget step, then script-body navigation changed the step and explicitly
+  requested another rerun. Reusing the same unkeyed visual slot made that
+  intermediate caption visible.
+- Callback navigation commits the destination before the one normal rerun and
+  avoids both the old intermediate frame and the delayed keyed-widget remount.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `tests/test_streamlit_lifecycle.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused Setup suite: 101 passed, 1 skipped.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 365 passed, 1 skipped.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 machine, so the real AppTest
+  module remains skipped locally. Its test executes the production app in the
+  deployed x86 environment.
+- The ARM-runnable screen test verifies immediate button construction,
+  unchanged lack of explicit widget keys, callback validation cancellation,
+  and the absence of an explicit rerun.
+
+### Recommended next step
+
+Deploy and click Budget to Shopping preferences once while watching the button
+row; the Shopping-preferences screen should paint directly with “Continue to
+the lists.”

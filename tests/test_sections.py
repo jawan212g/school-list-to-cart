@@ -502,6 +502,197 @@ def test_ungraded_list_actual_screen_path_does_not_block_and_extracts(
     assert st.session_state["screen"] == "review"
 
 
+def test_mixed_section_screen_renders_pasted_source_and_shared_heading() -> None:
+    """BR-64: the production section screen links an ungraded pasted list."""
+
+    pasted = "Quantity\tItem\n1\tBox of tissues\n"
+    list_state = {
+        "list_mode_0": "Paste text",
+        "list_paste_0": pasted,
+    }
+
+    class ListState:
+        session_state = list_state
+
+    (pasted_input,) = app._build_list_inputs(
+        ListState(),
+        (
+            {
+                "child_id": "child-1",
+                "label": "Kevin",
+                "grade": "Grade 2",
+            },
+        ),
+    )
+    sectioned_input = ListInput(
+        child_id="child-2",
+        source="Grade 5\nHighly Capable Class",
+        mime_type="text/plain",
+        document_name="district-list.txt",
+    )
+    class SectionRecorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {
+                "screen": "sections",
+                "intake": {
+                    "children": (
+                        {
+                            "child_id": "child-1",
+                            "label": "Kevin",
+                            "grade": "Grade 2",
+                        },
+                        {
+                            "child_id": "child-2",
+                            "label": "Jawan",
+                            "grade": "Grade 5",
+                        },
+                    )
+                },
+                "list_inputs": (pasted_input, sectioned_input),
+                "document_structures": {
+                    "child-1": DocumentStructureEnvelope(sections=()),
+                    "child-2": DocumentStructureEnvelope(
+                        languages=("English",),
+                        primary_language="English",
+                        sections=(
+                            DocumentSection(
+                                section_id="grade-5",
+                                label="Grade 5",
+                                grades=("Grade 5",),
+                                page_numbers=(1,),
+                                language="English",
+                                source_line="Grade 5",
+                            ),
+                            DocumentSection(
+                                section_id="highly-capable",
+                                label="Highly Capable Class",
+                                page_numbers=(1,),
+                                language="English",
+                                source_line="Highly Capable Class",
+                            ),
+                        ),
+                    ),
+                },
+                "document_selections": {},
+                "structure_errors": {},
+                "source_reference_cache": {},
+            }
+            self.subheadings: list[str] = []
+            self.captions: list[str] = []
+            self.popovers: list[str] = []
+            self.text_pages: list[str] = []
+
+        def __enter__(self) -> "SectionRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def container(self, **kwargs: object) -> "SectionRecorder":
+            del kwargs
+            return self
+
+        def expander(self, label: str) -> "SectionRecorder":
+            del label
+            return self
+
+        def popover(
+            self,
+            label: str,
+            **kwargs: object,
+        ) -> "SectionRecorder":
+            del kwargs
+            self.popovers.append(label)
+            return self
+
+        def columns(self, spec: object) -> tuple["SectionRecorder", ...]:
+            count = spec if isinstance(spec, int) else len(spec)  # type: ignore[arg-type]
+            return tuple(self for _ in range(count))
+
+        def header(self, value: object) -> None:
+            del value
+
+        def subheader(self, value: object) -> None:
+            self.subheadings.append(str(value))
+
+        def caption(self, value: object) -> None:
+            self.captions.append(str(value))
+
+        def write(self, value: object) -> None:
+            del value
+
+        def markdown(self, value: object) -> None:
+            del value
+
+        def warning(self, value: object) -> None:
+            del value
+
+        def info(self, value: object) -> None:
+            del value
+
+        def error(self, value: object) -> None:
+            raise AssertionError(value)
+
+        def code(
+            self,
+            value: str,
+            *,
+            language: str | None,
+            wrap_lines: bool,
+        ) -> None:
+            assert language is None
+            assert wrap_lines is False
+            self.text_pages.append(value)
+
+        def image(self, value: object, **kwargs: object) -> None:
+            del value, kwargs
+
+        def checkbox(
+            self,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> bool:
+            del label, kwargs
+            return bool(self.session_state.get(key, False))
+
+        def multiselect(
+            self,
+            label: str,
+            options: object,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> object:
+            del label, options, kwargs
+            return self.session_state.get(key, [])
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del label, kwargs
+            return False
+
+        def rerun(self) -> None:
+            raise AssertionError("This rendered decision screen must not rerun")
+
+    recorder = SectionRecorder()
+    app._render_sections(recorder)
+
+    assert pasted_input.resolved_document_name == "Kevin's supply list"
+    assert recorder.subheadings[:2] == [
+        app._student_grade_heading("Kevin", "Grade 2"),
+        app._student_grade_heading("Jawan", "Grade 5"),
+    ]
+    assert recorder.captions[0] == "Document: Kevin's supply list"
+    assert any(
+        label.startswith("View source")
+        and "Kevin's supply list" in label
+        and "page 1" in label
+        for label in recorder.popovers
+    )
+    assert pasted in recorder.text_pages
+
+
 def test_replacing_one_student_list_preserves_the_other_student_scope() -> None:
     """BR-63: the production callback and list builder replace one child only."""
 

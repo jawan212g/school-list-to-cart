@@ -396,6 +396,90 @@ def test_untouched_defaults_are_committed_before_continue() -> None:
     assert intake["tax_basis_points"] == 700
 
 
+def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> None:
+    """Setup: real widgets render immediately through every callback transition."""
+
+    test_app = _run_app()
+    assert any(
+        button.label == "Continue to budget"
+        for button in test_app.button
+    )
+    _click_label(test_app, "Continue to budget")
+    assert test_app.session_state["intake_step"] == 1
+    assert any(
+        "Choose Student or Classroom" in str(error.value)
+        for error in test_app.error
+    )
+
+    _set_widget(test_app, "radio", "entity_type_0", "Student")
+    _set_widget(test_app, "text_input", "student_name_0", "Maya")
+    _set_widget(test_app, "selectbox", "student_grade_0", "Grade 2")
+    _click_label(test_app, "Continue to budget")
+    assert test_app.session_state["intake_step"] == 2
+    assert {
+        button.label for button in test_app.button
+    }.issuperset(
+        {"Back to students", "Continue to shopping preferences"}
+    )
+
+    _set_widget(
+        test_app,
+        "text_input",
+        "combined_budget_text",
+        "0",
+    )
+    _click_label(test_app, "Continue to shopping preferences")
+    assert test_app.session_state["intake_step"] == 2
+    assert any(
+        "greater than zero" in str(error.value)
+        for error in test_app.error
+    )
+    _set_widget(
+        test_app,
+        "text_input",
+        "combined_budget_text",
+        "150.00",
+    )
+    _click_label(test_app, "Continue to shopping preferences")
+    assert test_app.session_state["intake_step"] == 3
+    assert {
+        button.label for button in test_app.button
+    }.issuperset({"Back to budget", "Continue to the lists"})
+
+    _click_label(test_app, "Back to budget")
+    assert test_app.session_state["intake_step"] == 2
+    assert {
+        button.label for button in test_app.button
+    }.issuperset(
+        {"Back to students", "Continue to shopping preferences"}
+    )
+    _click_label(test_app, "Back to students")
+    assert test_app.session_state["intake_step"] == 1
+    assert any(
+        button.label == "Continue to budget"
+        for button in test_app.button
+    )
+
+    _click_label(test_app, "Continue to budget")
+    _click_label(test_app, "Continue to shopping preferences")
+    _set_widget(
+        test_app,
+        "text_input",
+        "tax_rate_text",
+        "not a rate",
+    )
+    _click_label(test_app, "Continue to the lists")
+    assert test_app.session_state["screen"] == "intake"
+    assert test_app.session_state["intake_step"] == 3
+    assert any(
+        "Enter a tax rate" in str(error.value)
+        for error in test_app.error
+    )
+    _set_widget(test_app, "text_input", "tax_rate_text", "7.0")
+    _click_label(test_app, "Continue to the lists")
+    assert test_app.session_state["screen"] == "lists"
+
+
 def test_section_statement_and_submitted_scope_use_same_live_state() -> None:
     """A5: the section explanation cannot diverge from the submitted IDs."""
 
