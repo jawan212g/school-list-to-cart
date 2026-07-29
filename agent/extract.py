@@ -1360,7 +1360,7 @@ def require_extracted_requirements(
 ) -> ExtractionEnvelope:
     """Reject a silent empty extraction so E-33 can exclude that list."""
 
-    if envelope.requirements:
+    if envelope.requirements or envelope.catalog_unavailable_items:
         return envelope
     raise EmptyExtractionError(
         "No supply requirements were found in this non-empty list. "

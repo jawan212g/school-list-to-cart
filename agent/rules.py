@@ -878,6 +878,8 @@ DETERMINISTIC_BRAND_ITEMS = {
     "sharpie": ("Sharpie", "permanent_markers"),
     "sharpies": ("Sharpie", "permanent_markers"),
     "expo": ("Expo", "dry_erase_markers"),
+    "expo marker": ("Expo", "dry_erase_markers"),
+    "expo markers": ("Expo", "dry_erase_markers"),
     "crayola": ("Crayola", "crayons"),
     "purell": ("Purell", "hand_sanitizer"),
     "elmer": ("Elmer's", "glue_sticks"),
@@ -889,16 +891,26 @@ DETERMINISTIC_BRAND_ITEMS = {
 # spelling and the product category implied by that brand.
 
 DETERMINISTIC_ITEM_SYNONYMS = {
+    "composition book": "composition_notebooks",
+    "composition books": "composition_notebooks",
     "single subject notebook": "spiral_notebooks",
     "single subject notebooks": "spiral_notebooks",
     "college ruled paper": "notebook_paper",
     "wide ruled paper": "notebook_paper",
     "loose leaf paper": "notebook_paper",
     "graph paper": "notebook_paper",
+    "liquid glue": "liquid_glue",
 }
 # BR-67: these source phrases override a missing or conflicting model category.
 # Loose graph paper uses notebook_paper with its graph ruling attribute; the
-# seeded catalog currently has no exact graph-paper offer.
+# seeded catalog currently has no exact graph-paper offer. Liquid glue is a
+# recognized out-of-catalog item and therefore remains visible as unavailable.
+
+# BR-72: a recognized brand supplies its implied canonical item only when the
+# source line names no product noun that resolves on its own. A resolvable
+# product noun wins; the brand contributes only canonical spelling and brand
+# strength. Product phrases are compared together so the most specific phrase
+# wins, including composition notebook over the contained graph paper phrase.
 
 BRAND_STRENGTH_NONE = "none"
 BRAND_STRENGTH_PREFERRED = "preferred"
@@ -985,10 +997,10 @@ def _recognition_text(value: str) -> str:
     )
 
 
-def recognized_brand_from_source(
+def _recognized_brand_match(
     source_line: str,
-) -> tuple[str, str] | None:
-    """Return BR-66's canonical brand and implied category from source text."""
+) -> tuple[str, tuple[str, str]] | None:
+    """Return the longest BR-66 brand phrase and its deterministic identity."""
 
     source = f" {_recognition_text(source_line)} "
     matches = tuple(
@@ -998,12 +1010,20 @@ def recognized_brand_from_source(
     )
     if not matches:
         return None
-    _, identity = max(matches, key=lambda match: len(match[0]))
-    return identity
+    return max(matches, key=lambda match: len(match[0]))
+
+
+def recognized_brand_from_source(
+    source_line: str,
+) -> tuple[str, str] | None:
+    """Return BR-66's canonical brand and implied category from source text."""
+
+    match = _recognized_brand_match(source_line)
+    return match[1] if match is not None else None
 
 
 def canonical_items_from_source(source_line: str) -> tuple[str, ...]:
-    """Return deterministic BR-65/BR-66/BR-67 source categories."""
+    """Return deterministic BR-65/BR-66/BR-67/BR-72 source categories."""
 
     source = _recognition_text(source_line)
     compound = tuple(
@@ -1014,52 +1034,45 @@ def canonical_items_from_source(source_line: str) -> tuple[str, ...]:
     if compound:
         return tuple(dict.fromkeys(compound[0]))
 
-    synonym_matches = tuple(
-        (phrase, canonical_item)
-        for phrase, canonical_item in DETERMINISTIC_ITEM_SYNONYMS.items()
-        if f" {phrase} " in f" {source} "
-        and not (
-            phrase == "graph paper"
-            and any(
-                notebook_phrase in source
-                for notebook_phrase in (
-                    "composition book",
-                    "composition notebook",
-                    "spiral notebook",
-                )
-            )
+    brand_match = _recognized_brand_match(source_line)
+    noun_source = source
+    if brand_match is not None:
+        brand_phrase, _ = brand_match
+        noun_source = (
+            f" {noun_source} "
+            .replace(f" {brand_phrase} ", " ", 1)
+            .strip()
         )
-    )
-    if synonym_matches:
-        _, canonical_item = max(
-            synonym_matches,
-            key=lambda match: len(match[0]),
-        )
-        return (canonical_item,)
-
-    brand = recognized_brand_from_source(source_line)
-    if brand is not None:
-        return (brand[1],)
-
     aliases = {
         **{category: category for category in ALLOWED_CATEGORIES},
         **CANONICAL_ITEM_ALIASES,
     }
-    alias_matches = tuple(
-        (alias, canonical_item)
-        for alias, canonical_item in aliases.items()
+    noun_matches = tuple(
+        (
+            _recognition_text(phrase),
+            canonical_item,
+        )
+        for phrase, canonical_item in (
+            *DETERMINISTIC_ITEM_SYNONYMS.items(),
+            *aliases.items(),
+        )
         if (
-            f" {_recognition_text(alias)} "
-            in f" {source} "
+            f" {_recognition_text(phrase)} "
+            in f" {noun_source} "
         )
     )
-    if not alias_matches:
-        return ()
-    _, canonical_item = max(
-        alias_matches,
-        key=lambda match: len(_recognition_text(match[0])),
-    )
-    return (canonical_item,)
+    if noun_matches:
+        _, canonical_item = max(
+            noun_matches,
+            key=lambda match: (
+                len(match[0].split()),
+                len(match[0]),
+            ),
+        )
+        return (canonical_item,)
+    if brand_match is not None:
+        return (brand_match[1][1],)
+    return ()
 
 
 def canonical_item_from_source(source_line: str) -> str | None:

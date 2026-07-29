@@ -3118,3 +3118,69 @@ that accounts for classroom size without overwriting a parent's edits.
 
 Visually verify a classroom entry in the deployed app, including changing its
 size before and after editing the budget.
+
+## 2026-07-29 - Product nouns take precedence over brand-implied items
+
+### Objective
+
+Prevent a recognized brand from replacing an explicitly named product with
+the brand table's usual product category.
+
+### Work completed
+
+- Added BR-72's product-noun precedence rule.
+- Reworked deterministic source recognition so the most specific noun or
+  synonym wins before the brand-implied fallback.
+- Retained brand-only recognition, including Expo markers as the established
+  dry-erase shorthand.
+- Recognized liquid glue as an understood but out-of-catalog product so it is
+  shown as unavailable instead of converted to glue sticks.
+- Allowed a source containing only understood unavailable items to complete
+  extraction rather than being misreported as an empty extraction.
+- Removed the graph-paper-specific composition-notebook guard; general
+  longest-phrase selection now preserves composition books and notebooks.
+- Added production-extraction coverage for brand/product conflicts, liquid
+  glue, and graph-paper composition notebooks.
+
+### Decisions made
+
+- Brand spelling and preferred/required strength still come from the
+  deterministic brand table even when a conflicting product noun wins.
+- `Expo markers` is retained as a complete recognized brand phrase, while
+  explicit wording such as `Expo eraser` or `Expo dry erase markers` resolves
+  from the remaining product noun.
+- Catalog-unavailable records do not carry a numeric confidence field. A
+  corrected liquid-glue Requirement is reduced to 0.69 before being converted
+  into the unavailable record, and the final envelope requires review.
+
+### Files changed
+
+- `agent/rules.py`
+- `agent/extract.py`
+- `tests/test_extract.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused extraction and normalization suite: 102 passed.
+- Focused extraction, requirement-merge, and normalization regression suite:
+  139 passed.
+- Kelley GPT API `gpt-oss-20b` live verification: two final-code runs produced
+  identical canonical items and brand strengths for all 21 requested lines.
+  Model confidence differed between runs without changing deterministic item
+  recognition.
+- Final full suite: `py -3.12-arm64 -m pytest -q` -> 414 passed, 1 skipped
+  in 3.07 seconds.
+
+### Problems or limitations
+
+- Model confidence remained nondeterministic across the two live runs. The
+  deterministic identity result was stable.
+- Liquid glue has no canonical catalog category or offer, so it remains
+  unavailable by design.
+
+### Recommended next step
+
+Review whether other known out-of-catalog school-supply nouns should be
+recognized explicitly so they remain visible even when a model misclassifies
+them into an available category.

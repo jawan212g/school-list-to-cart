@@ -376,6 +376,153 @@ def test_production_extraction_overrides_wrong_model_category(
     assert result.requirements[0].canonical_item == expected_item
 
 
+@pytest.mark.parametrize(
+    ("source_line", "model_item", "expected_item"),
+    (
+        ("Crayola markers", "crayons", "markers"),
+        ("Crayola colored pencils", "crayons", "colored_pencils"),
+        ("Crayola crayons", "markers", "crayons"),
+        ("Sharpie highlighters", "permanent_markers", "highlighters"),
+        (
+            "Sharpie permanent markers",
+            "highlighters",
+            "permanent_markers",
+        ),
+        ("Elmer's glue sticks", "glue_sticks", "glue_sticks"),
+        ("Ticonderoga erasers", "pencils", "erasers"),
+        ("Ticonderoga pencils", "erasers", "pencils"),
+        ("Expo eraser", "dry_erase_markers", "erasers"),
+        (
+            "Expo dry erase markers",
+            "markers",
+            "dry_erase_markers",
+        ),
+        ("Kleenex tissues", "disinfecting_wipes", "tissues"),
+        ("Ziploc bags, gallon", "folders", "zip_top_bags"),
+    ),
+)
+def test_production_extraction_product_noun_precedes_brand_item(
+    monkeypatch: pytest.MonkeyPatch,
+    source_line: str,
+    model_item: str,
+    expected_item: str,
+) -> None:
+    """BR-72: the production extractor keeps an explicit product identity."""
+
+    model_output = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="brand-product",
+                child_id="model-child",
+                raw_text=source_line,
+                canonical_item=model_item,
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: model_output,
+    )
+
+    result = extraction.extract_document(
+        source_line,
+        child_id="child-1",
+        mime_type="text/plain",
+        client=object(),  # type: ignore[arg-type]
+    )
+
+    assert tuple(
+        requirement.canonical_item
+        for requirement in result.requirements
+    ) == (expected_item,)
+    assert result.requirements[0].brand_hint is not None
+    assert result.requirements[0].brand_lock is None
+
+
+def test_production_extraction_reports_liquid_glue_as_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-72/E-12: Elmer's cannot turn explicitly liquid glue into sticks."""
+
+    source_line = "Elmer's liquid glue"
+    model_output = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="liquid-glue",
+                child_id="model-child",
+                raw_text=source_line,
+                canonical_item="glue_sticks",
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: model_output,
+    )
+    corrected = model_output.requirements[0]
+    assert corrected.canonical_item == "liquid_glue"
+    assert corrected.extraction_confidence == 0.69
+
+    result = extraction.extract_document(
+        source_line,
+        child_id="child-1",
+        mime_type="text/plain",
+        client=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.requirements == ()
+    assert tuple(
+        (
+            item.item_name,
+            item.source_line,
+            item.is_required,
+        )
+        for item in result.catalog_unavailable_items
+    ) == (("liquid glue", source_line, True),)
+    assert result.manual_review_required is True
+
+
+def test_production_extraction_uses_most_specific_product_phrase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-72: graph paper cannot displace a named composition notebook."""
+
+    source_line = "1 graph paper composition notebook"
+    model_output = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="graph-composition",
+                child_id="model-child",
+                raw_text=source_line,
+                canonical_item="notebook_paper",
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: model_output,
+    )
+
+    result = extraction.extract_document(
+        source_line,
+        child_id="child-1",
+        mime_type="text/plain",
+        client=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.requirements[0].canonical_item == "composition_notebooks"
+    assert result.requirements[0].attributes.ruling == "graph"
+
+
 def test_unavailable_reconciliation_keeps_distinct_compound_item(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
