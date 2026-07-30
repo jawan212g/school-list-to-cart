@@ -5276,6 +5276,8 @@ def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> N
     class RenderedMergeRecorder:
         def __init__(self) -> None:
             self.writes: list[str] = []
+            self.headings: list[str] = []
+            self.column_specs: list[tuple[float, ...]] = []
 
         def __enter__(self) -> "RenderedMergeRecorder":
             return self
@@ -5288,15 +5290,17 @@ def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> N
             return self
 
         def columns(self, spec: object) -> tuple[RenderedColumn, ...]:
-            del spec
-            return tuple(RenderedColumn(self) for _ in range(3))
+            assert isinstance(spec, list)
+            self.column_specs.append(tuple(spec))
+            return tuple(RenderedColumn(self) for _ in spec)
 
     class RenderedColumn:
         def __init__(self, recorder: RenderedMergeRecorder) -> None:
             self.recorder = recorder
 
         def markdown(self, value: object, **kwargs: object) -> None:
-            del value, kwargs
+            del kwargs
+            self.recorder.headings.append(str(value))
 
         def write(self, value: object) -> None:
             self.recorder.writes.append(str(value))
@@ -5354,7 +5358,12 @@ def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> N
     _, result = consolidate_extractions(extracted)
     decision = item_decisions(result)[0]
     recorder = RenderedMergeRecorder()
-    app._render_merge_source_rows(recorder, decision, None)
+    app._render_merge_source_rows(
+        recorder,
+        decision,
+        None,
+        ("5th Grade", "Highly Capable Class"),
+    )
 
     assert errors == {}
     assert tuple(source.exact_line for source in decision.sources) == (
@@ -5364,8 +5373,45 @@ def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> N
     assert recorder.writes == [
         "1",
         "Composition book (sewn binding) - graph paper",
+        "5th Grade",
         "4",
         "Regular composition books",
+        "Highly Capable Class",
+    ]
+    assert recorder.headings == [
+        "**Quantity**",
+        "**What the list says**",
+        "**Section**",
+        "**Source**",
+    ]
+    assert recorder.column_specs == [
+        (0.7, 3.2, 1.7, 2.4),
+        (0.7, 3.2, 1.7, 2.4),
+        (0.7, 3.2, 1.7, 2.4),
+    ]
+
+    ungraded_decision = replace(
+        decision,
+        sources=tuple(
+            source.model_copy(update={"section_name": None})
+            for source in decision.sources
+        ),
+    )
+    ungraded_recorder = RenderedMergeRecorder()
+
+    app._render_merge_source_rows(
+        ungraded_recorder,
+        ungraded_decision,
+        None,
+    )
+
+    assert ungraded_recorder.writes == [
+        "1",
+        "Composition book (sewn binding) - graph paper",
+        "",
+        "4",
+        "Regular composition books",
+        "",
     ]
 
 
@@ -5490,6 +5536,7 @@ def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> Non
             }
             self.captions: list[str] = []
             self.radio_options: list[tuple[str, ...]] = []
+            self.writes: list[str] = []
 
         def __enter__(self) -> "ListsMergeRecorder":
             return self
@@ -5520,7 +5567,7 @@ def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> Non
             del value
 
         def write(self, value: object) -> None:
-            del value
+            self.writes.append(str(value))
 
         def markdown(self, value: object, **kwargs: object) -> None:
             del value, kwargs
@@ -5618,6 +5665,8 @@ def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> Non
         "**1** — Quantity from Highly Capable Class"
         in rendered_options
     )
+    assert "5th Grade" in recorder.writes
+    assert "Highly Capable Class" in recorder.writes
 
     folder_decision = next(
         decision

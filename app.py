@@ -9786,20 +9786,29 @@ class ConflictSourceRow:
     quantity: int
     exact_line: str
     display_line: str
+    section_name: str
     source: RequirementSource
 
 
-def conflict_source_rows(decision: Any) -> tuple[ConflictSourceRow, ...]:
+def conflict_source_rows(
+    decision: Any,
+    selected_section_labels: Sequence[str] = (),
+) -> tuple[ConflictSourceRow, ...]:
     """Keep BR-22 exact evidence distinct from its numeric quantity."""
 
+    section_names = resolved_merge_source_sections(
+        decision.sources,
+        selected_section_labels,
+    )
     return tuple(
         ConflictSourceRow(
             quantity=source.quantity,
             exact_line=source.exact_line,
             display_line=_display_source_line(source.exact_line),
+            section_name=section_names[index],
             source=source,
         )
-        for source in decision.sources
+        for index, source in enumerate(decision.sources)
     )
 
 
@@ -9844,6 +9853,25 @@ def _full_selected_section_name(
     return matches[0] if len(matches) == 1 else section_name
 
 
+def resolved_merge_source_sections(
+    sources: Sequence[RequirementSource],
+    selected_section_labels: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Resolve the parent-visible section once for evidence and choices."""
+
+    return tuple(
+        (
+            _full_selected_section_name(
+                source.section_name,
+                selected_section_labels,
+            )
+            if source.section_name
+            else ""
+        )
+        for source in sources
+    )
+
+
 def quantity_quick_choice_values(
     interrupt: Any,
     selected_section_labels: Sequence[str] = (),
@@ -9858,17 +9886,18 @@ def quantity_quick_choice_values(
             "Quantities from both lists added together"
         ): combined_quantity,
     }
+    section_names = resolved_merge_source_sections(
+        sources,
+        selected_section_labels,
+    )
     source_names = [
         (
-            _full_selected_section_name(
-                source.section_name,
-                selected_section_labels,
-            )
-            if source.section_name
+            section_names[index]
+            if section_names[index]
             else source.document_name
             or "This list"
         )
-        for source in sources
+        for index, source in enumerate(sources)
     ]
     for index, source in enumerate(sources):
         source_location = source_names[index]
@@ -9997,27 +10026,41 @@ def _render_merge_source_rows(
     st: Any,
     decision: Any,
     list_input: ListInput | None,
+    selected_section_labels: Sequence[str] = (),
 ) -> None:
-    """Show quantity, exact source line, and link-out in one readable row."""
+    """Show quantity, exact source line, section, and source link-out."""
 
-    heading_quantity, heading_line, heading_source = st.columns(
-        [0.7, 2.9, 2.4]
+    column_widths = [0.7, 3.2, 1.7, 2.4]
+    (
+        heading_quantity,
+        heading_line,
+        heading_section,
+        heading_source,
+    ) = st.columns(
+        column_widths
     )
     heading_quantity.markdown("**Quantity**")
     heading_line.markdown("**What the list says**")
+    heading_section.markdown("**Section**")
     heading_source.markdown("**Source**")
     for index, row in enumerate(
-        conflict_source_rows(decision),
+        conflict_source_rows(decision, selected_section_labels),
         start=1,
     ):
         with st.container(border=True):
-            quantity_column, line_column, source_column = st.columns(
-                [0.7, 2.9, 2.4]
+            (
+                quantity_column,
+                line_column,
+                section_column,
+                source_column,
+            ) = st.columns(
+                column_widths
             )
             quantity_column.write(str(row.quantity))
             line_column.write(
                 escape_streamlit_dollars(row.display_line)
             )
+            section_column.write(row.section_name)
             if list_input is None:
                 source_column.caption(
                     f"Page {row.source.page_number}"
@@ -10318,7 +10361,18 @@ def _render_requirement_merge(st: Any) -> None:
                 )
 
             list_input = input_by_child.get(decision.child_id)
-            _render_merge_source_rows(st, decision, list_input)
+            selected_section_labels = (
+                selected_section_labels_by_child.get(
+                    decision.child_id,
+                    (),
+                )
+            )
+            _render_merge_source_rows(
+                st,
+                decision,
+                list_input,
+                selected_section_labels,
+            )
 
             identity_key = f"{decision.decision_id}:same-or-different"
             resolved_identity = resolve_merge_identity_widget_state(
@@ -10404,10 +10458,7 @@ def _render_requirement_merge(st: Any) -> None:
                 pending_selection = _render_merge_quantity_controls(
                     st,
                     decision.quantity_interrupt,
-                    selected_section_labels_by_child.get(
-                        decision.child_id,
-                        (),
-                    ),
+                    selected_section_labels,
                 )
 
             exclude_key = f"{decision.decision_id}:exclude"

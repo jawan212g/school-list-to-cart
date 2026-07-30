@@ -3733,3 +3733,63 @@ match accepted input.
 
 - Confirm in the deployed app that only the first per-entry amount has a help
   icon and that both popovers display `$85.50` literally.
+
+## 2026-07-30 - Section column in duplicate evidence
+
+### Objective
+
+Add a parent-visible Section column to the Lists duplicate-resolution evidence
+table without creating a second section-resolution path.
+
+### Work completed
+
+- Added Section between “What the list says” and Source in every duplicate
+  evidence row.
+- Introduced `resolved_merge_source_sections` as the single display resolver
+  used by both the evidence table and the existing “Quantity from …” radio
+  labels.
+- Passed each student’s already-resolved selected-section labels into the
+  evidence renderer from the same screen state used by the quantity controls.
+- Left an unresolved section cell empty rather than falling back to a document,
+  pseudo-section, placeholder, or internal value.
+- Preserved the existing source popover and page link-out path unchanged.
+- Set the four column widths to `[0.7, 3.2, 1.7, 2.4]`, keeping “What the list
+  says” as the widest column.
+
+### Decisions made
+
+- No new provenance field was added. `RequirementSource.section_name` already
+  supplies both rows and radio choices; the change only centralizes its
+  parent-visible resolution.
+- Existing quantity radio labels remain unchanged as requested.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused production-renderer tests:
+  `py -3.12-arm64 -m pytest -q tests/test_app.py -k
+  "conflict_rows or lists_merge_screen or pasted_source_controls"` ->
+  3 passed, 109 deselected in 1.33 seconds.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 419 passed, 1 skipped in
+  3.27 seconds.
+
+### Problems or limitations
+
+- Streamlit is not installed locally on Windows ARM64, so four-column wrapping
+  was verified structurally through the production renderer rather than by
+  launching the interface.
+
+### Remaining work
+
+- None for this scoped table change.
+
+### Recommended next step
+
+- Inspect the deployed table at desktop and phone widths and decide separately
+  whether the now-partly-redundant “Quantity from …” radio labels should be
+  shortened.
