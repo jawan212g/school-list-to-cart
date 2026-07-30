@@ -3179,6 +3179,15 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
             del label, kwargs
             return self
 
+        def popover(
+            self,
+            label: str,
+            **kwargs: object,
+        ) -> "ReviewScreenRecorder":
+            del kwargs
+            self.events.append(("popover", label))
+            return self
+
         def header(self, value: object) -> None:
             self.messages.append(str(value))
 
@@ -3320,6 +3329,11 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     )
     monkeypatch.setattr(
         app,
+        "_render_optional_review_row",
+        lambda st, item, *args, **kwargs: item,
+    )
+    monkeypatch.setattr(
+        app,
         "_render_personalize_unavailable",
         lambda *args, **kwargs: None,
     )
@@ -3339,37 +3353,27 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     assert summary.tab_labels == ("Summary", "Jawan  [1]")
     assert summary.radio_label_visibility == "collapsed"
     assert "1 decision remains." in summary.messages
-    assert "Open Jawan" in summary.buttons
-    assert "Accept all remaining recommendations" in summary.buttons
-    assert "Notebook paper" not in summary.buttons
-    assert any(
-        "1 needs a decision" in value
-        and "1 optional" in value
-        and "2 in cart" in value
-        for value in summary.writes
-    )
-    assert any(
-        key.startswith("personalize-summary-student-warning-")
-        for key in summary.container_keys
-    )
+    assert "Use these recommendations" in summary.buttons
+    assert ("popover", "Notebook paper") in summary.events
+    assert ("popover", "Tissues, optional") in summary.events
+    assert ("popover", "Pencils") in summary.events
+    assert [1.1, 0.9, 1.1] in summary.column_specs
 
-    summary.click("Open Jawan")
+    summary.select_view("child-1")
     student = ReviewScreenRecorder()
     app._render_review(student)
     assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "child-1"
     assert "**Optional — your call (1)**" in student.messages
-    assert "Optional item · left out of the cart" in student.messages
-    assert not any(
-        label in student.buttons
-        for label in ("Include", "Exclude", "Include if it fits")
-    )
+    add_index = student.messages.index("**Need to add something?**")
+    optional_index = student.messages.index("**Optional — your call (1)**")
+    assert add_index < optional_index
 
     student.select_view("summary")
     returned_summary = ReviewScreenRecorder()
     app._render_review(returned_summary)
     assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "summary"
 
-    returned_summary.click("Accept all remaining recommendations")
+    returned_summary.click("Use these recommendations")
     final_summary = ReviewScreenRecorder()
     app._render_review(final_summary)
     assert any(
@@ -3382,7 +3386,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         {"review-flag-1"}
     )
     assert "Nothing left to decide." in final_summary.messages
-    assert "Accept all remaining recommendations" not in final_summary.buttons
+    assert "Use these recommendations" not in final_summary.buttons
 
 
 def test_personalize_student_cards_render_each_decision_before_acknowledgement(
@@ -3871,6 +3875,7 @@ def test_personalize_edit_updates_student_summary_and_detail_together(
             self.session_state = state
             self.messages: list[tuple[str, str]] = []
             self.buttons: list[str] = []
+            self.popovers: list[str] = []
             self.input_values: dict[str, object] = {}
             self.components = SimpleNamespace(
                 v1=SimpleNamespace(html=lambda *args, **kwargs: None)
@@ -3898,6 +3903,11 @@ def test_personalize_edit_updates_student_summary_and_detail_together(
         def expander(self, label: str, **kwargs: object) -> "Recorder":
             del kwargs
             self.messages.append(("expander", label))
+            return self
+
+        def popover(self, label: str, **kwargs: object) -> "Recorder":
+            del kwargs
+            self.popovers.append(label)
             return self
 
         def _record(self, kind: str, value: object) -> None:
@@ -4052,14 +4062,13 @@ def test_personalize_edit_updates_student_summary_and_detail_together(
     summary = Recorder()
     app._render_review(summary)
     assert "Crayola Markers" not in summary.buttons
-    assert "Open Kevin" in summary.buttons
-    assert any(
-        kind == "write" and "0 need a decision" in text
-        for kind, text in summary.messages
-    )
+    assert "Crayola Markers" in summary.popovers
+    assert ("markdown", "**In cart (1)**") in summary.messages
 
 
-def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
+def test_personalize_summary_opens_typed_and_uploaded_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """BR-52/BR-64: the production Summary opens both retained source types."""
 
     typed_text = "12 pencils\n1 box of tissues\n"
@@ -4067,6 +4076,49 @@ def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
         Path(__file__).parent
         / "sample_lists"
         / "Machiasschoolsupplylist 1.pdf"
+    )
+    typed_envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="typed-pencils",
+                child_id="child-1",
+                raw_text="12 pencils",
+                canonical_item="pencils",
+                quantity=12,
+                extraction_confidence=1.0,
+            ),
+        ),
+    )
+    pdf_envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="pdf-backpack",
+                child_id="child-2",
+                raw_text="Backpack or book bag",
+                canonical_item="backpacks",
+                quantity=1,
+                source_document=pdf_path.name,
+                source_section="5th Grade",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="pdf-pencils",
+                child_id="child-2",
+                raw_text="Ticonderoga #2 pencils",
+                canonical_item="pencils",
+                quantity=12,
+                source_document=pdf_path.name,
+                source_section="Highly Capable Class",
+                source_page=3,
+                extraction_confidence=1.0,
+            ),
+        ),
+        document_selection=DocumentSelection(
+            selected_section_ids=("grade-5", "highly-capable"),
+            selected_section_labels=("5th Grade", "Highly Capable Class"),
+            selected_page_numbers=(2, 3),
+        ),
     )
     state: dict[str, object] = {
         "intake": {
@@ -4076,10 +4128,12 @@ def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
             )
         },
         "extracted_lists": {
-            "child-1": ExtractionEnvelope(),
-            "child-2": ExtractionEnvelope(),
+            "child-1": typed_envelope,
+            "child-2": pdf_envelope,
         },
-        "review_items": (),
+        "review_items": organize_extractions(
+            {"child-1": typed_envelope, "child-2": pdf_envelope}
+        ),
         "parent_added_review_items": (),
         "extraction_errors": {},
         "list_inputs": (
@@ -4098,6 +4152,20 @@ def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
         app.PERSONALIZE_SELECTED_VIEW_KEY: "summary",
     }
     _mark_personalize_review_cache_current(state)
+
+    monkeypatch.setattr(
+        app,
+        "_render_compact_review_row",
+        lambda st, members, *args, **kwargs: (
+            {item.review_id: item for item in members},
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_settled_review_row",
+        lambda st, item, *args, **kwargs: item,
+    )
 
     class SourceScreenRecorder:
         def __init__(self) -> None:
@@ -4209,22 +4277,19 @@ def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
     recorder = SourceScreenRecorder()
     app._render_review(recorder)
 
-    assert len(recorder.popovers) == 2
-    assert recorder.popovers[0] == "View pasted list · Kevin"
-    assert "Maya" in recorder.popovers[1]
-    assert pdf_path.name in recorder.popovers[1]
+    assert recorder.popovers.count("Open source pages") == 2
     assert recorder.text_sources == [typed_text]
-    assert len(recorder.pdf_pages) == 1
-    assert [1.8, 3.2, 1.25] in recorder.column_specs
-    assert "2 lists · 1 pasted · 1 uploaded" in recorder.messages
-    assert "**The Supply List**" not in recorder.messages
-    assert "**By student**" not in recorder.messages
+    assert len(recorder.pdf_pages) == 2
+    assert [1.1, 0.9, 1.1] in recorder.column_specs
+    assert "**Sources used**" in recorder.messages
+    assert any("Sections read: 5th Grade and Highly Capable Class" in message for message in recorder.messages)
+    assert any(f"{pdf_path.name} · page 2" in message for message in recorder.messages)
+    assert any(f"{pdf_path.name} · page 3" in message for message in recorder.messages)
 
     state["list_inputs"] = (state["list_inputs"][0],)
     pasted_only = SourceScreenRecorder()
     app._render_review(pasted_only)
-    assert "1 list · 1 pasted" in pasted_only.messages
-    assert pasted_only.popovers == ["View pasted list · Kevin"]
+    assert pasted_only.popovers.count("Open source pages") == 1
     assert pasted_only.text_sources == [typed_text]
 
 

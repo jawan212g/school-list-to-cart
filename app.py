@@ -3763,31 +3763,45 @@ def _render_source_reference(
         help=_source_reference_hover_text(reference),
         use_container_width=True,
     ):
-        st.caption(
-            escape_streamlit_dollars(
-                f"Cited line on this page: {reference.source_line}"
-            )
+        _render_source_reference_content(st, reference)
+
+
+def _render_source_reference_content(
+    st: Any,
+    reference: SourceReference,
+) -> None:
+    """Render one retained source page inside an existing disclosure."""
+
+    page_text = (
+        f" · page {reference.page_number}"
+        if reference.page_number is not None
+        else ""
+    )
+    st.caption(
+        escape_streamlit_dollars(
+            f"Cited line on this page: {reference.source_line}"
         )
-        if reference.rendered_page is not None:
-            st.image(
-                reference.rendered_page,
-                caption=(
-                    f"{reference.document_name}{page_text}. "
-                    "Use the cited line above to locate the source."
-                ),
-                use_container_width=True,
-            )
-        elif reference.text_page is not None:
-            st.code(
-                reference.text_page,
-                language=None,
-                wrap_lines=False,
-            )
-        else:
-            st.info(
-                "A rendered preview is unavailable. The document name, page, "
-                "and exact source line are shown above."
-            )
+    )
+    if reference.rendered_page is not None:
+        st.image(
+            reference.rendered_page,
+            caption=(
+                f"{reference.document_name}{page_text}. "
+                "Use the cited line above to locate the source."
+            ),
+            use_container_width=True,
+        )
+    elif reference.text_page is not None:
+        st.code(
+            reference.text_page,
+            language=None,
+            wrap_lines=False,
+        )
+    else:
+        st.info(
+            "A rendered preview is unavailable. The document name, page, "
+            "and exact source line are shown above."
+        )
 
 
 def _is_navigation_widget_key(key: str) -> bool:
@@ -8240,40 +8254,127 @@ def _render_personalize_child_sources(
             )
 
 
+def _personalize_source_pages(
+    state: Mapping[str, object],
+    child_id: str,
+    list_input: ListInput,
+    *,
+    use_document_selection: bool,
+) -> tuple[tuple[int, str], ...]:
+    """Return the real source pages read for one student's retained list."""
+
+    extractions = state.get("extracted_lists", {})
+    envelope = (
+        extractions.get(child_id)
+        if isinstance(extractions, Mapping)
+        else None
+    )
+    evidence: dict[int, str] = {}
+    if isinstance(envelope, ExtractionEnvelope):
+        for requirement in envelope.requirements:
+            sources = requirement.sources or (
+                RequirementSource(
+                    source_req_id=requirement.req_id,
+                    document_name=requirement.source_document,
+                    section_name=requirement.source_section,
+                    page_number=requirement.source_page,
+                    exact_line=requirement.raw_text,
+                    quantity=requirement.quantity,
+                ),
+            )
+            for source in sources:
+                if (
+                    source.document_name
+                    and source.document_name
+                    != list_input.resolved_document_name
+                ):
+                    continue
+                evidence.setdefault(source.page_number, source.exact_line)
+        for unavailable in envelope.catalog_unavailable_items:
+            if (
+                unavailable.document_name
+                and unavailable.document_name
+                != list_input.resolved_document_name
+            ):
+                continue
+            evidence.setdefault(
+                unavailable.page_number,
+                unavailable.source_line,
+            )
+        selection = envelope.document_selection
+        selected_pages = (
+            selection.selected_page_numbers
+            if selection is not None
+            else ()
+        )
+    else:
+        selected_pages = ()
+
+    if selected_pages and use_document_selection:
+        page_numbers = tuple(dict.fromkeys(selected_pages))
+    elif evidence:
+        page_numbers = tuple(sorted(evidence))
+    elif list_input.source_page_texts:
+        page_numbers = tuple(
+            range(
+                NONPAGINATED_SOURCE_PAGE,
+                len(list_input.source_page_texts) + 1,
+            )
+        )
+    else:
+        page_numbers = (NONPAGINATED_SOURCE_PAGE,)
+
+    return tuple(
+        (
+            page_number,
+            evidence.get(
+                page_number,
+                _personalize_source_line(list_input),
+            ),
+        )
+        for page_number in page_numbers
+    )
+
+
 def _render_personalize_session_sources(
     st: Any,
     labels_by_child: Mapping[str, str],
 ) -> None:
-    """Render one aggregate source disclosure on the Summary tab."""
+    """Render one source card per student with every page actually read."""
 
     sources = tuple(st.session_state.get("list_inputs", ()))
     if not sources:
         return
-    pasted_count = sum(
-        source.input_kind == "pasted" for source in sources
-    )
-    uploaded_count = len(sources) - pasted_count
-    parts = [f"{len(sources)} {'list' if len(sources) == 1 else 'lists'}"]
-    if pasted_count:
-        parts.append(f"{pasted_count} pasted")
-    if uploaded_count:
-        parts.append(f"{uploaded_count} uploaded")
-    with st.expander(
-        " · ".join(parts),
-        key="personalize-summary-sources:expanded",
-        on_change="rerun",
-    ):
-        for index, source in enumerate(sources):
-            child_label = labels_by_child.get(source.child_id, "Student")
-            section_labels = _personalize_section_labels(
+    st.markdown("**Sources used**")
+    for child_id, child_label in labels_by_child.items():
+        child_sources = tuple(
+            source for source in sources if source.child_id == child_id
+        )
+        if not child_sources:
+            continue
+        page_entries = tuple(
+            (source, page_number, source_line)
+            for source in child_sources
+            for page_number, source_line in _personalize_source_pages(
                 st.session_state,
-                source.child_id,
+                child_id,
+                source,
+                use_document_selection=len(child_sources) == 1,
             )
+        )
+        section_labels = _personalize_section_labels(
+            st.session_state,
+            child_id,
+        )
+        with st.container(
+            border=True,
+            key=f"personalize-summary-source-card:{child_id}",
+        ):
+            st.markdown(escape_streamlit_dollars(f"**{child_label}**"))
             if section_labels:
                 st.caption(
                     escape_streamlit_dollars(
-                        f"{child_label} · "
-                        + (
+                        (
                             "Section read: "
                             if len(section_labels) == 1
                             else "Sections read: "
@@ -8281,17 +8382,29 @@ def _render_personalize_session_sources(
                         + _join_names(section_labels)
                     )
                 )
-            _render_source_reference(
-                st,
-                source,
-                page_number=NONPAGINATED_SOURCE_PAGE,
-                source_line=_personalize_source_line(source),
-                key=f"personalize-summary-source:{index}",
-                button_label=_personalize_source_button_label(
+            with st.popover(
+                "Open source pages",
+                use_container_width=True,
+            ):
+                for index, (
                     source,
-                    child_label=child_label,
-                ),
-            )
+                    page_number,
+                    source_line,
+                ) in enumerate(page_entries):
+                    if index:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                    reference = build_source_reference(
+                        source,
+                        page_number=page_number,
+                        source_line=source_line,
+                    )
+                    st.markdown(
+                        escape_streamlit_dollars(
+                            f"**{reference.document_name} · "
+                            f"page {reference.page_number}**"
+                        )
+                    )
+                    _render_source_reference_content(st, reference)
 
 
 def _render_personalize_summary(
@@ -8302,8 +8415,10 @@ def _render_personalize_summary(
     unavailable_by_child: Mapping[str, Mapping[str, str]] | None = None,
     all_flag_groups: Sequence[ReviewFlagGroup] = (),
     original_items: Mapping[str, SupplyItemReview] | None = None,
+    offers: Sequence[Offer] = (),
+    child_labels: Mapping[str, str] | None = None,
     view_revision: int,
-) -> None:
+) -> tuple[dict[str, SupplyItemReview], tuple[str, ...]]:
     """Render BR-52's complete production Personalize summary."""
 
     decision_count = _personalize_total_decision_count(sections)
@@ -8315,361 +8430,207 @@ def _render_personalize_summary(
     else:
         st.success("Nothing left to decide.")
 
-    default_groups = {
+    decision_groups = {
         group.group_id: group
         for section in sections
         for group in section.decision_groups
     }
-    confirmed_group_ids = frozenset(
+    confirmed_group_ids = set(
         str(group_id)
         for group_id in st.session_state.get(
             PERSONALIZE_CONFIRMED_GROUP_IDS_KEY,
             (),
         )
     )
-
     labels_by_child = {
         section.child_id: section.child_label for section in sections
     }
+    labels_by_child.update(child_labels or {})
     _render_personalize_session_sources(st, labels_by_child)
 
     st.markdown(
         """
         <style>
-        div[class*="st-key-personalize-summary-student-warning-"] {
-            border: 2px solid #c27a00 !important;
-            background: #fffaf0 !important;
-        }
-        div[class*="st-key-personalize-summary-student-ready-"] {
-            border: 1px solid #cbd5df !important;
+        div[class*="st-key-personalize-summary-lane-"] {
+            min-height: 12rem;
             background: #ffffff !important;
+        }
+        @media (max-width: 700px) {
+            .st-key-personalize-summary-columns
+            > div[data-testid="stHorizontalBlock"] {
+                flex-direction: column !important;
+            }
+            .st-key-personalize-summary-columns
+            > div[data-testid="stHorizontalBlock"]
+            > div[data-testid="stColumn"] {
+                width: 100% !important;
+                flex: 1 1 100% !important;
+            }
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
-    for section in sections:
-        card_state = "warning" if section.decision_count else "ready"
-        safe_child_id = re.sub(
-            r"[^a-z0-9]+",
-            "-",
-            section.child_id.casefold(),
-        ).strip("-")
-        with st.container(
-            border=True,
-            key=(
-                f"personalize-summary-student-{card_state}-"
-                f"{safe_child_id}"
-            ),
-        ):
-            name_column, count_column, action_column = st.columns(
-                [1.8, 3.2, 1.25]
-            )
-            display_name = (
-                f"{section.child_label} · Classroom"
-                if section.is_classroom
-                else section.child_label
-            )
-            name_column.markdown(
-                escape_streamlit_dollars(f"**{display_name}**")
-            )
-            count_column.write(
-                escape_streamlit_dollars(
-                    f"{section.decision_count} "
-                    f"{'needs' if section.decision_count == 1 else 'need'} "
-                    f"a decision · {section.optional_count} optional · "
-                    f"{section.item_count} in cart"
-                )
-            )
-            action_column.button(
-                f"Open {section.child_label}",
-                key=(
-                    "personalize-action:student-jump:"
-                    f"{view_revision}:{section.child_id}"
-                ),
-                on_click=_select_personalize_tab,
-                args=(st.session_state, section.child_id),
-                use_container_width=True,
-            )
-
-    if default_groups:
-        st.caption(
-            "Accept the app's current recommendation for every item that "
-            "still has a default choice."
-        )
-        st.button(
-            "Accept all remaining recommendations",
-            key=f"personalize-action:approve-all:{view_revision}",
-            on_click=_approve_personalize_groups,
-            args=(st.session_state, tuple(default_groups)),
-            use_container_width=True,
-        )
-    return
-
-    list_inputs = tuple(st.session_state.get("list_inputs", ()))
-    has_pasted_sources = any(
-        list_input.input_kind == "pasted" for list_input in list_inputs
-    )
-    has_uploaded_sources = any(
-        list_input.input_kind == "uploaded" for list_input in list_inputs
-    )
-    if has_pasted_sources and has_uploaded_sources:
-        st.markdown("**Source lists and documents**")
-    elif has_pasted_sources:
-        st.markdown("**Source list**")
-    else:
-        st.markdown("**Source documents**")
-    labels_by_child = {
-        section.child_id: section.child_label for section in sections
-    }
-    if not list_inputs:
-        st.caption("No source documents are available in this session.")
-    for index, list_input in enumerate(list_inputs):
-        child_label = labels_by_child.get(list_input.child_id, "Student")
-        source_line = list_input.resolved_document_name
-        if list_input.source_page_texts:
-            first_page_lines = list_input.source_page_texts[0].splitlines()
-            if first_page_lines:
-                source_line = first_page_lines[0]
-        _render_source_reference(
-            st,
-            list_input,
-            page_number=NONPAGINATED_SOURCE_PAGE,
-            source_line=source_line,
-            key=f"personalize-summary-source:{index}",
-            button_label=escape_streamlit_dollars(
-                (
-                    f"View pasted list · {child_label}"
-                    if list_input.input_kind == "pasted"
-                    else (
-                        f"View source · {child_label} · "
-                        f"{_source_document_button_label(list_input.resolved_document_name)}"
-                    )
-                )
-            ),
-        )
-
-    st.markdown("**The Supply List**")
-    show_student_column = len(sections) > 1
-    item_column_widths = (
-        [1.15, 2.45, 2.2, 0.8]
-        if show_student_column
-        else [3.2, 2.2, 0.8]
-    )
-    item_header = st.columns(item_column_widths)
-    item_headers = (
-        ("Student", "Item", "Status", "Quantity")
-        if show_student_column
-        else ("Item", "Status", "Quantity")
-    )
-    for column, label in zip(item_header, item_headers, strict=True):
-        column.markdown(f"**{label}**")
-
-    unavailable_lookup = unavailable_by_child or {}
-    student_order = {
-        section.child_id: index
-        for index, section in enumerate(sections)
-    }
-    decision_group_by_row = {
+    group_by_row = {
         row_id: group.group_id
         for group in all_flag_groups
         for row_id in group.row_ids
     }
-    parent_edited_group_ids = frozenset(
-        st.session_state.get(PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY, ())
-    )
     originals = original_items or {}
-    summary_rows: list[
-        tuple[int, int, str, str, str, str, str, str, str | None]
-    ] = []
-    unavailable_rows: list[
-        tuple[int, str, str, str, str, str]
-    ] = []
+    edited_by_id: dict[str, SupplyItemReview] = {}
+    show_student = len(sections) > 1
+
+    def item_label(item: SupplyItemReview) -> str:
+        label = _review_summary_item_text(item)
+        if show_student:
+            label += f" · {labels_by_child.get(item.child_id, 'Student')}"
+        return escape_streamlit_dollars(label)
+
+    with st.container(key="personalize-summary-columns"):
+        decision_column, optional_column, cart_column = st.columns(
+            [1.1, 0.9, 1.1],
+            gap="large",
+        )
+
+        with decision_column.container(
+            border=True,
+            key="personalize-summary-lane-decisions",
+        ):
+            st.markdown(f"**Decisions needed ({decision_count})**")
+            if not decision_groups:
+                st.caption("No decisions are waiting.")
+            for group in decision_groups.values():
+                members = tuple(
+                    item_by_id[row_id]
+                    for row_id in group.row_ids
+                    if row_id in item_by_id
+                )
+                if not members:
+                    continue
+                representative = item_by_id[group.representative_id]
+                with st.popover(
+                    item_label(representative),
+                    use_container_width=True,
+                ):
+                    edited, confirmed = _render_compact_review_row(
+                        st,
+                        members,
+                        labels_by_child,
+                        key_prefix=group.group_id,
+                        offers=offers,
+                        flag_messages=group.messages,
+                        original_items=originals,
+                        view_revision=view_revision,
+                    )
+                    edited_by_id.update(edited)
+                    if confirmed:
+                        confirmed_group_ids.add(group.group_id)
+            if decision_groups:
+                st.caption(
+                    "Use the current recommendation shown for every "
+                    "decision in this column."
+                )
+                st.button(
+                    "Use these recommendations",
+                    key=(
+                        "personalize-action:approve-all:"
+                        f"{view_revision}"
+                    ),
+                    on_click=_approve_personalize_groups,
+                    args=(st.session_state, tuple(decision_groups)),
+                    use_container_width=True,
+                )
+
+        optional_items = tuple(
+            item_by_id[item_id]
+            for section in sections
+            for item_id in section.optional_item_ids
+            if item_id in item_by_id
+        )
+        with optional_column.container(
+            border=True,
+            key="personalize-summary-lane-optional",
+        ):
+            st.markdown(f"**Optional ({len(optional_items)})**")
+            if not optional_items:
+                st.caption("No optional items were listed.")
+            for item in optional_items:
+                with st.popover(
+                    item_label(item),
+                    use_container_width=True,
+                ):
+                    edited_by_id[item.review_id] = (
+                        _render_optional_review_row(
+                            st,
+                            item,
+                            key_prefix=f"optional:{item.review_id}",
+                            offers=offers,
+                            original_item=originals.get(item.review_id),
+                        )
+                    )
+
+        cart_items = tuple(
+            item_by_id[item_id]
+            for section in sections
+            for item_id in section.settled_item_ids
+            if item_id in item_by_id
+        )
+        with cart_column.container(
+            border=True,
+            key="personalize-summary-lane-cart",
+        ):
+            st.markdown(f"**In cart ({len(cart_items)})**")
+            if not cart_items:
+                st.caption("No items are in the cart yet.")
+            for item in cart_items:
+                with st.popover(
+                    item_label(item),
+                    use_container_width=True,
+                ):
+                    edited_by_id[item.review_id] = (
+                        _render_settled_review_row(
+                            st,
+                            item,
+                            key_prefix=personalize_settled_row_key_prefix(
+                                item
+                            ),
+                            offers=offers,
+                            original_item=originals.get(item.review_id),
+                            ai_recommendation_approved=(
+                                group_by_row.get(item.review_id)
+                                in confirmed_group_ids
+                            ),
+                        )
+                    )
+
+    unavailable_lookup = unavailable_by_child or {}
+    unavailable_rows: list[tuple[str, str, str]] = []
+    excluded_items: list[SupplyItemReview] = []
     for section in sections:
-        pending_ids = frozenset(section.pending_item_ids)
-        conditional_ids = frozenset(section.additional_pending_item_ids)
         unavailable_items = unavailable_lookup.get(section.child_id, {})
-        for item_id in section.cart_item_ids:
-            item = item_by_id.get(item_id)
-            if item is None:
-                continue
-            group_id = decision_group_by_row.get(item_id)
-            if item_id in pending_ids:
-                reason = _personalize_decision_reason(
-                    item,
-                    conditional=item_id in conditional_ids,
-                    original_item=originals.get(item_id),
-                )
-                status = f"Action needed · {reason}"
-                status_order = 0
-            elif group_id in confirmed_group_ids:
-                status = "AI recommendation approved"
-                status_order = 1
-            elif (
-                group_id in parent_edited_group_ids
-                or _review_item_or_quantity_changed(
-                    item,
-                    originals.get(item_id),
-                )
-            ):
-                status = "Changed by you"
-                status_order = 1
-            else:
-                status = "Included in your cart"
-                status_order = 1
-            summary_rows.append(
-                (
-                    status_order,
-                    student_order[section.child_id],
-                    section.child_label,
-                    section.child_id,
-                    item_id,
-                    _review_summary_quantity_text(item),
-                    _review_summary_item_text(item),
-                    status,
-                    group_id,
-                )
-            )
         for item_id in section.unstocked_item_ids:
             item = item_by_id.get(item_id)
             unavailable_text = unavailable_items.get(item_id)
             if item is not None:
-                quantity_text = _review_summary_quantity_text(item)
-                item_text = _review_summary_item_text(item)
-            else:
-                quantity_text, item_text = _split_summary_quantity_and_item(
-                    str(unavailable_text)
+                text = (
+                    f"{_review_summary_quantity_text(item)} "
+                    f"{_review_summary_item_text(item)}"
                 )
+            else:
+                text = str(unavailable_text)
             unavailable_rows.append(
                 (
-                    student_order[section.child_id],
                     section.child_label,
-                    section.child_id,
                     item_id,
-                    quantity_text,
-                    item_text,
+                    text,
                 )
             )
         for item_id in section.excluded_item_ids:
             item = item_by_id.get(item_id)
-            if item is None:
-                continue
-            summary_rows.append(
-                (
-                    1,
-                    student_order[section.child_id],
-                    section.child_label,
-                    section.child_id,
-                    item_id,
-                    _review_summary_quantity_text(item),
-                    _review_summary_item_text(item),
-                    "Left out of your cart",
-                    None,
-                )
-            )
-
-    summary_rows.sort(key=lambda row: (row[0], row[1]))
-    decision_rows = tuple(row for row in summary_rows if row[0] == 0)
-    remaining_rows = tuple(row for row in summary_rows if row[0] != 0)
-
-    def render_rows(
-        rows: Sequence[
-            tuple[int, int, str, str, str, str, str, str, str | None]
-        ],
-    ) -> None:
-        for (
-            _,
-            _,
-            child_label,
-            child_id,
-            item_id,
-            quantity_text,
-            item_text,
-            status,
-            group_id,
-        ) in rows:
-            columns = st.columns(item_column_widths)
-            item_column_index = 1 if show_student_column else 0
-            row_status_column_index = 2 if show_student_column else 1
-            quantity_column_index = 3 if show_student_column else 2
-            if show_student_column:
-                columns[0].write(
-                    escape_streamlit_dollars(child_label)
-                )
-            columns[quantity_column_index].write(
-                escape_streamlit_dollars(quantity_text)
-            )
-            original = originals.get(item_id)
-            if (
-                original is not None
-                and item_id in item_by_id
-                and item_by_id[item_id].required_quantity
-                != original.required_quantity
-            ):
-                columns[quantity_column_index].caption(
-                    escape_streamlit_dollars(
-                        "List requested: "
-                        + _review_summary_quantity_text(original)
-                    )
-                )
-            columns[item_column_index].button(
-                escape_streamlit_dollars(item_text),
-                key=(
-                    "personalize-action:item-jump:"
-                    f"{view_revision}:{child_id}:{item_id}"
-                ),
-                on_click=_select_personalize_tab,
-                args=(
-                    st.session_state,
-                    child_id,
-                    _personalize_item_anchor(item_id),
-                ),
-                use_container_width=True,
-            )
-            if (
-                original is not None
-                and item_id in item_by_id
-                and item_by_id[item_id].item_name != original.item_name
-            ):
-                columns[item_column_index].caption(
-                    escape_streamlit_dollars(
-                        "List requested: "
-                        + _review_summary_item_text(original)
-                    )
-                )
-            columns[row_status_column_index].write(
-                escape_streamlit_dollars(status)
-            )
-            if group_id in default_groups:
-                checkbox_key = (
-                    "personalize-confirm-summary:"
-                    f"{group_id}:{child_id}:{item_id}"
-                )
-                columns[row_status_column_index].checkbox(
-                    "Accept this AI recommendation",
-                    value=group_id in confirmed_group_ids,
-                    key=checkbox_key,
-                    on_change=_set_personalize_group_confirmation,
-                    args=(
-                        st.session_state,
-                        group_id,
-                        checkbox_key,
-                    ),
-                )
-
-    render_rows(decision_rows)
-
-    if default_groups:
-        st.button(
-            "Approve all AI recommendations",
-            key=f"personalize-action:approve-all:{view_revision}",
-            on_click=_approve_personalize_groups,
-            args=(st.session_state, tuple(default_groups)),
-            use_container_width=True,
-        )
+            if item is not None:
+                excluded_items.append(item)
 
     if unavailable_rows:
-        unavailable_rows.sort(key=lambda row: row[0])
         with st.container(
             border=True,
             key="personalize-unavailable-summary",
@@ -8680,89 +8641,31 @@ def _render_personalize_summary(
             st.write(
                 "These simulated stores do not carry the following items."
             )
-            for (
-                _,
-                child_label,
-                child_id,
-                item_id,
-                quantity_text,
-                item_text,
-            ) in unavailable_rows:
-                columns = st.columns(item_column_widths)
-                item_column_index = 1 if show_student_column else 0
-                row_status_column_index = (
-                    2 if show_student_column else 1
-                )
-                quantity_column_index = (
-                    3 if show_student_column else 2
-                )
-                if show_student_column:
-                    columns[0].write(
-                        escape_streamlit_dollars(child_label)
+            for child_label, _, item_text in unavailable_rows:
+                st.write(
+                    escape_streamlit_dollars(
+                        f"{child_label}: {item_text}"
                     )
-                columns[quantity_column_index].write(
-                    escape_streamlit_dollars(quantity_text)
                 )
-                columns[item_column_index].button(
-                    escape_streamlit_dollars(item_text),
-                    key=(
-                        "personalize-action:unavailable-jump:"
-                        f"{view_revision}:{child_id}:{item_id}"
-                    ),
-                    on_click=_select_personalize_tab,
-                    args=(
-                        st.session_state,
-                        child_id,
-                        _personalize_item_anchor(item_id),
-                    ),
+
+    if excluded_items:
+        with st.expander(f"Left out ({len(excluded_items)})"):
+            for item in excluded_items:
+                with st.popover(
+                    item_label(item),
                     use_container_width=True,
-                )
-                columns[row_status_column_index].write(
-                    "Buy this item elsewhere"
-                )
+                ):
+                    edited_by_id[item.review_id] = (
+                        _render_excluded_review_row(
+                            st,
+                            item,
+                            key_prefix=f"excluded:{item.review_id}",
+                            offers=offers,
+                            original_item=originals.get(item.review_id),
+                        )
+                    )
 
-    render_rows(remaining_rows)
-
-    st.markdown("**By student**")
-    header_columns = st.columns([2.2, 0.85, 1.15, 1.05, 0.8, 1.75])
-    for column, label in zip(
-        header_columns[:5],
-        PERSONALIZE_SUMMARY_COLUMNS,
-        strict=True,
-    ):
-        column.markdown(f"**{label}**")
-    for section in sections:
-        columns = st.columns([2.2, 0.85, 1.15, 1.05, 0.8, 1.75])
-        columns[0].button(
-            section.child_label,
-            key=(
-                "personalize-action:student-jump:"
-                f"{view_revision}:{section.child_id}"
-            ),
-            on_click=_select_personalize_tab,
-            args=(st.session_state, section.child_id),
-        )
-        columns[1].write(str(section.item_count))
-        columns[2].write(str(section.decision_count))
-        columns[3].write(str(section.unstocked_count))
-        columns[4].write(str(section.excluded_count))
-        columns[5].button(
-            "Approve defaults",
-            key=(
-                "personalize-action:approve-student:"
-                f"{view_revision}:{section.child_id}"
-            ),
-            use_container_width=True,
-            disabled=not bool(section.decision_groups),
-            on_click=_approve_personalize_groups,
-            args=(
-                st.session_state,
-                tuple(
-                    group.group_id
-                    for group in section.decision_groups
-                ),
-            ),
-        )
+    return edited_by_id, tuple(confirmed_group_ids)
 
 
 def _review_control_update(
@@ -9903,19 +9806,19 @@ def _render_optional_review_row(
     item: SupplyItemReview,
     *,
     key_prefix: str,
+    offers: Sequence[Offer],
+    original_item: SupplyItemReview | None = None,
 ) -> SupplyItemReview:
-    """Show BR-05's current excluded optional-item behavior without choices."""
+    """Render an optional item with the same reversible controls as other rows."""
 
-    with st.container(border=True, key=f"{key_prefix}:card"):
-        columns = st.columns([4.2, 1.1])
-        columns[0].write(
-            escape_streamlit_dollars(_review_summary_item_text(item))
-        )
-        columns[1].write(
-            escape_streamlit_dollars(_review_summary_quantity_text(item))
-        )
-        st.caption("Optional item · left out of the cart")
-    return item
+    original = original_item or item
+    return _render_settled_review_row(
+        st,
+        item,
+        key_prefix=key_prefix,
+        offers=offers,
+        original_item=original,
+    )
 
 
 def _new_review_item_from_controls(
@@ -12150,17 +12053,25 @@ def _render_review(st: Any) -> None:
 
     with st.container(key="personalize-view-content"):
         if active_tab == "summary":
-            _render_personalize_summary(
+            summary_edits, summary_confirmed_ids = (
+                _render_personalize_summary(
                 st,
                 student_sections,
                 item_by_id,
                 unavailable_by_child=unavailable_by_child,
                 all_flag_groups=flag_groups,
                 original_items=original_items,
+                offers=review_offers,
+                child_labels=child_labels,
                 view_revision=int(
                     st.session_state[PERSONALIZE_VIEW_REVISION_KEY]
                 ),
+                )
             )
+            edited_by_id.update(summary_edits)
+            for group_id in summary_confirmed_ids:
+                if group_id not in confirmed_flag_group_ids:
+                    confirmed_flag_group_ids.append(group_id)
         else:
             student_section = student_section_by_child[str(active_tab)]
             child_id = student_section.child_id
@@ -12290,27 +12201,6 @@ def _render_review(st: Any) -> None:
                 edited_by_id.update(edited)
                 if confirmed and group.group_id not in confirmed_flag_group_ids:
                     confirmed_flag_group_ids.append(group.group_id)
-            optional_items = tuple(
-                item_by_id[item_id]
-                for item_id in student_section.optional_item_ids
-                if item_id in item_by_id
-            )
-            if optional_items:
-                _render_personalize_heading(
-                    st,
-                    f"Optional — your call ({len(optional_items)})",
-                    "These items were marked optional on the list and are "
-                    "currently left out of the cart.",
-                )
-                for item in optional_items:
-                    edited_by_id[item.review_id] = (
-                        _render_optional_review_row(
-                            st,
-                            item,
-                            key_prefix=f"optional:{item.review_id}",
-                        )
-                    )
-
             settled_items = tuple(
                 item_by_id[item_id]
                 for item_id in student_section.settled_item_ids
@@ -12461,8 +12351,7 @@ def _render_review(st: Any) -> None:
             ):
                 st.markdown("**Need to add something?**")
                 st.caption(
-                    "Add an item that was missing from the list or was not "
-                    "read correctly."
+                    "Add an item that was missing from the list."
                 )
                 added = _new_review_item_from_controls(
                     st,
@@ -12480,6 +12369,31 @@ def _render_review(st: Any) -> None:
                     _item_display_name(added.item_name),
                 )
                 st.rerun()
+
+            optional_items = tuple(
+                item_by_id[item_id]
+                for item_id in student_section.optional_item_ids
+                if item_id in item_by_id
+            )
+            if optional_items:
+                _render_personalize_heading(
+                    st,
+                    f"Optional — your call ({len(optional_items)})",
+                    "These items were marked optional on the list and are "
+                    "currently left out of the cart.",
+                )
+                for item in optional_items:
+                    edited_by_id[item.review_id] = (
+                        _render_optional_review_row(
+                            st,
+                            item,
+                            key_prefix=f"optional:{item.review_id}",
+                            offers=review_offers,
+                            original_item=original_items.get(
+                                item.review_id
+                            ),
+                        )
+                    )
 
             scroll_target = st.session_state.pop(
                 "personalize_scroll_target",

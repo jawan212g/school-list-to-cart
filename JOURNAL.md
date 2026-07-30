@@ -4490,3 +4490,68 @@ choice no longer applies. Please review it again.`
 
 This copy contains no hedge because both the source change and invalidated
 choice are deterministic state comparisons, not an inference.
+
+## 2026-07-30 — A targeted regression passed before it proved the defect
+
+### Testing-series finding
+
+The duplicate-choice carry-forward regression originally targeted the right
+production behavior and still passed before the correction. Its assertion
+proved only that the expected row existed somewhere after navigation; it did
+not prove that stale pre-merge rows were absent or that the parent's resolved
+choice was the row Personalize actually used. Strengthening the same test to
+assert the complete rendered result made it fail correctly on x86 run
+`30580086902`.
+
+This differs from the earlier impossible-fixture cases. The input and route
+were production-shaped, but the assertion was too weak to distinguish a fresh
+derived result from a stale one. A green targeted test was therefore false
+reassurance until its negative assertion was added.
+
+### Open correctness boundary
+
+The duplicate-resolution completion marker means the parent saw the evidence
+and submitted that screen. It does not mean the parent separately confirmed
+the extracted quantity or wording. Personalize currently uses that marker to
+suppress the generic low-confidence reading question, so a product-identity
+answer can silence a transcription question the parent did not answer. This
+remains unchanged pending a separate rules decision.
+
+## 2026-07-30 — Personalize Summary made reviewable in place
+
+### Objective
+
+Make the Personalize Summary useful for checking sources, resolving visible
+decisions, and revisiting included or optional items without leaving Summary.
+
+### Work completed
+
+- Replaced the student-count cards with three responsive lanes: decisions
+  needed, optional items, and items in the cart.
+- Put each item name on a keyboard- and touch-accessible popover containing the
+  same production review controls used in the student view.
+- Restored the bulk recommendation action only inside the decisions lane,
+  after the recommendations it applies to are visible.
+- Added one source card per student. Each card shows the sections read and
+  opens every selected document page rather than defaulting to page 1.
+- Kept unavailable items in their own red-bordered action block and retained a
+  separate disclosure for items deliberately left out.
+- Made optional items reversible through the same settled-row controls used by
+  already-owned and do-not-buy items.
+- Moved optional items below the add-an-item panel in each student view and
+  removed the suggestion that the app might have read a missing item
+  incorrectly.
+
+### Verification boundary
+
+ARM64 exercises the production render function with production-shaped source
+envelopes. The new optional-item lifecycle and Streamlit popover state require
+the x86 AppTest workflow and are not considered verified until that run passes.
+
+### Deferred decision
+
+School-provided items remain display-only. A parent override should be a
+specific action such as `Add this to my cart instead`, preserve the school's
+source line, and record that the parent chose to buy an item the list said
+would be provided. That behavior was proposed but not implemented in this
+pass.

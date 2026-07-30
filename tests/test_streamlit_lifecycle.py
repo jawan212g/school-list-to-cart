@@ -246,6 +246,16 @@ st.session_state.setdefault(
                     quantity=2,
                     extraction_confidence=1.0,
                 ),
+                Requirement(
+                    req_id="tissues",
+                    child_id="child-1",
+                    raw_text="1 box of tissues, optional",
+                    canonical_item="tissues",
+                    quantity=1,
+                    is_required=False,
+                    requirement_type="optional",
+                    extraction_confidence=1.0,
+                ),
             )
         )
     },
@@ -896,11 +906,53 @@ def test_personalize_item_expanders_and_controls_keep_independent_state() -> Non
     assert test_app.number_input(key=erasers_quantity.key).value == 5
 
 
+def test_personalize_optional_item_can_return_to_cart() -> None:
+    """FR-12: an optional item is left out by default but is not a one-way door."""
+
+    test_app = _run_personalize_screen()
+    optional_item = next(
+        item
+        for item in test_app.session_state["review_items"]
+        if item.item_name == "tissues"
+    )
+    assert optional_item.optional is True
+    expander_key = app.personalize_row_expander_key(
+        f"optional:{optional_item.review_id}"
+    )
+    test_app.session_state[expander_key] = True
+    test_app.run()
+    _assert_no_exception(test_app)
+    optional_checkbox = next(
+        checkbox
+        for checkbox in test_app.checkbox
+        if checkbox.label == "This item is optional"
+    )
+    optional_checkbox.set_value(False).run()
+    _assert_no_exception(test_app)
+
+    updated = next(
+        item
+        for item in test_app.session_state["review_items"]
+        if item.review_id == optional_item.review_id
+    )
+    assert updated.optional is False
+    assert any(
+        "In your cart (3)" in markdown.value
+        for markdown in test_app.markdown
+    )
+
+
 def test_personalize_edit_survives_summary_round_trip_without_button_crash() -> None:
     """A flagged student view can be edited, left, and reopened safely."""
 
     test_app = _run_personalize_decision_screen()
-    _click_label(test_app, "Open Jawan")
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    navigation.set_value("child-1").run()
+    _assert_no_exception(test_app)
     assert (
         test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY]
         == "child-1"
