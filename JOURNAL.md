@@ -4396,10 +4396,14 @@ been: they exercised UI states production could not create.
 
 ### Resolution
 
-Each settled row now passes its own tracked expander state back as the initial
-open value when Streamlit rebuilds an expander identity. Opening or editing one
-row neither opens nor closes a sibling row. No item value or merge behavior was
-changed.
+The first attempted correction passed the expander widget value back as its
+initial open value. The x86 AppTest remained red because that widget-owned value
+is itself tied to the remounted identity.
+
+Each settled row now mirrors its open state into a separate non-widget key and
+uses that durable value when Streamlit rebuilds an expander identity. Opening or
+editing one row neither opens nor closes a sibling row. No item value or merge
+behavior was changed.
 
 ### Verification boundary
 

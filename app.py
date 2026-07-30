@@ -7522,6 +7522,12 @@ def personalize_row_expander_key(key_prefix: str) -> str:
     return f"{key_prefix}:expanded"
 
 
+def personalize_row_open_state_key(key_prefix: str) -> str:
+    """Return the durable non-widget open-state key for one review row."""
+
+    return f"{key_prefix}:open-state"
+
+
 def personalize_settled_expander_key(item: SupplyItemReview) -> str:
     """Return the production expander key for one settled Personalize row."""
 
@@ -9500,9 +9506,14 @@ def _render_settled_review_row(
         key_prefix=key_prefix,
     )
     expander_key = personalize_row_expander_key(key_prefix)
+    open_state_key = personalize_row_open_state_key(key_prefix)
+    if expander_key in st.session_state:
+        st.session_state[open_state_key] = bool(
+            st.session_state[expander_key]
+        )
     with st.expander(
         escape_streamlit_dollars(review_understanding_text(item)),
-        expanded=bool(st.session_state.get(expander_key, False)),
+        expanded=bool(st.session_state.get(open_state_key, False)),
         key=expander_key,
         on_change="rerun",
     ):
