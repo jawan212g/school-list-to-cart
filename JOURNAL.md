@@ -4548,6 +4548,13 @@ ARM64 exercises the production render function with production-shaped source
 envelopes. The new optional-item lifecycle and Streamlit popover state require
 the x86 AppTest workflow and are not considered verified until that run passes.
 
+The first x86 run selected a same-labelled checkbox from the wrong rendered
+row, so the test was corrected to scope the control through the Tissues
+disclosure. The next run proved a real one-rerun lag: the optional value was
+saved, but section grouping had already used the earlier value. Optional widget
+state is now resolved before the single BR-52 section model is built, so the
+item moves into the cart on the same interaction.
+
 ### Deferred decision
 
 School-provided items remain display-only. A parent override should be a

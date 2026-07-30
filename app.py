@@ -11802,13 +11802,18 @@ def _render_review(st: Any) -> None:
     edited_group_ids: set[str] = set()
     for item in items:
         prefix = (
-            f"excluded:{item.review_id}"
-            if (
-                item.already_owned
-                or item.review_status == "deleted"
-                or item.required_quantity == EXCLUDED_REQUIREMENT_QUANTITY
+            f"optional:{item.review_id}"
+            if item.optional
+            else (
+                f"excluded:{item.review_id}"
+                if (
+                    item.already_owned
+                    or item.review_status == "deleted"
+                    or item.required_quantity
+                    == EXCLUDED_REQUIREMENT_QUANTITY
+                )
+                else personalize_settled_row_key_prefix(item)
             )
-            else personalize_settled_row_key_prefix(item)
         )
         resolved = _resolve_detail_widget_values(
             st.session_state,
