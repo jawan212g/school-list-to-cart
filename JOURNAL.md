@@ -4155,3 +4155,59 @@ readers.
 - Verify in the deployed app that the first animated Working status scrolls to
   the top, later progress reruns do not pull the page back, and a later
   extraction episode scrolls once again.
+
+## 2026-07-30 — Verify duplicate-screen claims against source evidence
+
+### Objective
+
+Stop the duplicate-resolution screen from claiming identical source wording is
+different, and stop presenting equal quantities as contrasting values.
+
+### Audit finding
+
+The production screen had three explanations that were more specific than
+their guards:
+
+- Its introduction said source lines used different wording without comparing
+  them.
+- Its same-product rationale always said the lines were worded differently,
+  although the identity rule had not compared the parent-visible source text.
+- Its ambiguous-description heading claimed one description used one
+  potentially meaningful word, while the rule only established that the
+  residual description-token sets differed.
+
+The equal-quantity header used verified source values, but phrased two equal
+values as a contrast. Quantity rationale arithmetic and outcomes, the
+different-product source details, parent override results, and item exclusion
+results were confirmed to be guarded by the state they describe.
+
+### Work completed
+
+- Compared the same parent-visible item descriptions used in the evidence
+  table after trimming surrounding whitespace and folding case. Punctuation,
+  word differences, word order, and internal spacing remain meaningful
+  differences.
+- Exact matches now say: `Both lines match exactly, so we've treated them as
+  the same product.`
+- Different descriptions retain the existing hedged same-product rationale.
+- Equal two-source quantities now say: `Both parts of the list ask for N.`
+- Neutralized the screen introduction and ambiguous-description heading so
+  neither asserts an observation the code did not make.
+- Added a production-screen test using the real Backpack evidence from the
+  5th and Highly Capable Class sections.
+
+### Files changed
+
+- `agent/rules.py`
+- `agent/requirement_merge.py`
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing and remaining work
+
+- Focused merge and app tests: 149 passed.
+- Full ARM64 suite: 420 passed, 1 x86-only module skipped.
+- Run the x86 workflow before treating the change as complete.
+- The same/different control remains unchanged. Identical source descriptions
+  may justify de-emphasizing it in a later, separately approved UI pass.

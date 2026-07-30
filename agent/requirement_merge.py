@@ -280,6 +280,10 @@ def resolve_item_decision_state(
                 decision.conflict_type,
                 decision.canonical_item.replace("_", " "),
                 _decision_source_values(decision),
+                tuple(
+                    source_item_description(source.exact_line)
+                    for source in decision.sources
+                ),
             )
             if is_preselected
             else None

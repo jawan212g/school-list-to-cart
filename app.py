@@ -10704,9 +10704,8 @@ def _render_requirement_merge(st: Any) -> None:
 
     st.header("Choose what goes in the cart")
     st.write(
-        "Some list lines look like they may refer to the same item but use "
-        "different wording. Choose which items to include and what quantity "
-        "belongs in the cart."
+        "Some list lines may refer to the same item. Choose which items to "
+        "include and what quantity belongs in the cart."
     )
     pending_errors = tuple(
         st.session_state.get("requirement_merge_validation_errors", ())
@@ -10746,10 +10745,21 @@ def _render_requirement_merge(st: Any) -> None:
             st.subheader(f"{item_name} for {child_label}")
             if decision.conflict_type == "quantity_only":
                 quantities = tuple(source.quantity for source in decision.sources)
-                st.write(
-                    f"One part of the list asks for {quantities[0]} and "
-                    f"another asks for {quantities[1]}."
-                )
+                if len(set(quantities)) == 1:
+                    quantity_subject = (
+                        "Both parts"
+                        if len(quantities) == 2
+                        else "Each part"
+                    )
+                    st.write(
+                        f"{quantity_subject} of the list ask for "
+                        f"{quantities[0]}."
+                    )
+                else:
+                    st.write(
+                        f"One part of the list asks for {quantities[0]} and "
+                        f"another asks for {quantities[1]}."
+                    )
             elif decision.conflict_type == "different_products":
                 st.write(
                     "The list specifies "
@@ -10758,8 +10768,8 @@ def _render_requirement_merge(st: Any) -> None:
                 )
             else:
                 st.write(
-                    "One description uses a word that could mean a product "
-                    "difference or could simply be general wording."
+                    "The descriptions differ in a way that could mean a "
+                    "product difference or could simply be general wording."
                 )
 
             list_input = input_by_child.get(decision.child_id)

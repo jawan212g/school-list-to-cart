@@ -673,10 +673,23 @@ def product_identity_rationale(
     ],
     item_name: str,
     source_values: Sequence[tuple[str, str]],
+    source_lines: Sequence[str] = (),
 ) -> str:
     """Generate BR-43/BR-45's default product-identity rationale."""
 
     if conflict_type != "different_products":
+        normalized_lines = tuple(
+            source_line.strip().casefold()
+            for source_line in source_lines
+        )
+        if (
+            len(normalized_lines) > 1
+            and len(set(normalized_lines)) == 1
+        ):
+            return (
+                "Both lines match exactly, so we've treated them as the "
+                "same product."
+            )
         return (
             "We believe both lines describe the same thing, just worded "
             "differently."

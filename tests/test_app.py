@@ -5690,6 +5690,141 @@ def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> Non
     )
 
 
+def test_lists_merge_screen_names_identical_backpack_wording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identical Backpack evidence gets the exact-match rationale."""
+
+    requirements = (
+        Requirement(
+            req_id="backpack-grade",
+            child_id="child-1",
+            raw_text="Backpack or book bag",
+            canonical_item="backpacks",
+            quantity=1,
+            source_document="Machiasschoolsupplylist 1.pdf",
+            source_section="5th",
+            source_page=2,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="backpack-capable",
+            child_id="child-1",
+            raw_text="Backpack or book bag",
+            canonical_item="backpacks",
+            quantity=1,
+            source_document="Machiasschoolsupplylist 1.pdf",
+            source_section="Highly Capable Class",
+            source_page=3,
+            extraction_confidence=1.0,
+        ),
+    )
+    envelope = ExtractionEnvelope(requirements=requirements)
+    _, result = consolidate_extractions({"child-1": envelope})
+
+    monkeypatch.setattr(
+        app,
+        "_render_merge_source_rows",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_merge_quantity_controls",
+        lambda *args, **kwargs: ("source", 1),
+    )
+
+    class MergeScreenRecorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {
+                "requirement_merge_result": result,
+                "unmerged_extracted_lists": {"child-1": envelope},
+                "intake": {
+                    "children": (
+                        {"child_id": "child-1", "label": "Jawan"},
+                    )
+                },
+                "list_inputs": (),
+            }
+            self.writes: list[str] = []
+            self.captions: list[str] = []
+
+        def __enter__(self) -> "MergeScreenRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def container(self, **kwargs: object) -> "MergeScreenRecorder":
+            del kwargs
+            return self
+
+        def expander(
+            self,
+            label: str,
+            **kwargs: object,
+        ) -> "MergeScreenRecorder":
+            del label, kwargs
+            return self
+
+        def header(self, value: object) -> None:
+            del value
+
+        def subheader(self, value: object) -> None:
+            del value
+
+        def write(self, value: object) -> None:
+            self.writes.append(str(value))
+
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del value, kwargs
+
+        def caption(self, value: object) -> None:
+            self.captions.append(str(value))
+
+        def radio(
+            self,
+            label: str,
+            options: tuple[str, ...],
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, options, kwargs
+            return str(self.session_state[key])
+
+        def checkbox(
+            self,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> bool:
+            del label, kwargs
+            self.session_state.setdefault(key, False)
+            return bool(self.session_state[key])
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del label, kwargs
+            return False
+
+        def error(self, value: object) -> None:
+            del value
+
+    recorder = MergeScreenRecorder()
+    app._render_requirement_merge(recorder)
+
+    assert "Both parts of the list ask for 1." in recorder.writes
+    assert (
+        "Rationale: Both lines match exactly, so we've treated them as the "
+        "same product."
+        in recorder.captions
+    )
+    assert all(
+        "worded differently" not in caption
+        for caption in recorder.captions
+    )
+
+
 def test_custom_quantity_choice_highlights_until_parent_enters_value() -> None:
     """FR-12: the custom quantity field has explicit pending state."""
 
