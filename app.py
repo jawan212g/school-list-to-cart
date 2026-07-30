@@ -3638,6 +3638,30 @@ def _build_pasted_list_input(
     )
 
 
+def _build_uploaded_list_input(
+    *,
+    child_id: str,
+    document_name: str,
+    data: bytes,
+    mime_type: str,
+) -> ListInput:
+    """Build one validated upload, reusing BR-64 for plain-text evidence."""
+
+    if mime_type == "text/plain":
+        text_input = _build_pasted_list_input(
+            child_id=child_id,
+            text=data.decode("utf-8"),
+            document_name=document_name,
+        )
+        return replace(text_input, input_kind="uploaded")
+    return ListInput(
+        child_id=child_id,
+        source=data,
+        mime_type=mime_type,
+        document_name=document_name,
+    )
+
+
 def _list_input_bytes(list_input: ListInput) -> bytes | None:
     """Return retained session-only source bytes for an evidence preview."""
 
@@ -3833,11 +3857,21 @@ def _render_source_reference_content(
         if reference.page_number is not None
         else ""
     )
-    st.caption(
-        escape_streamlit_dollars(
-            f"Cited line on this page: {reference.source_line}"
+    if (
+        reference.source_line.strip()
+        and reference.source_line.strip() != reference.document_name.strip()
+    ):
+        st.caption(
+            escape_streamlit_dollars(
+                f"Cited line on this page: {reference.source_line}"
+            )
         )
-    )
+    else:
+        st.caption(
+            escape_streamlit_dollars(
+                f"Source document: {reference.document_name}{page_text}"
+            )
+        )
     if reference.rendered_page is not None:
         st.image(
             reference.rendered_page,
@@ -3854,9 +3888,23 @@ def _render_source_reference_content(
             wrap_lines=False,
         )
     else:
+        if reference.mime_type == (
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
+        ):
+            unavailable_message = (
+                "A preview of this DOCX file is unavailable. Open the "
+                "original file on your device, or upload it as a PDF or TXT "
+                "file to preview it here."
+            )
+        else:
+            format_name = reference.mime_type or "uploaded"
+            unavailable_message = (
+                f"A preview of this {format_name} file is unavailable. Open "
+                "the original file on your device to review it."
+            )
         st.info(
-            "A rendered preview is unavailable. The document name, page, "
-            "and exact source line are shown above."
+            unavailable_message
         )
 
 
@@ -5725,11 +5773,11 @@ def _build_individual_list_input(
             mime_type = validate_uploaded_document(draft.name, data)
         except ValueError as error:
             raise ValueError(f"{child['label']}: {error}") from error
-        return ListInput(
+        return _build_uploaded_list_input(
             child_id=str(child["child_id"]),
-            source=data,
-            mime_type=mime_type,
             document_name=draft.name,
+            data=data,
+            mime_type=mime_type,
         )
     pasted = str(st.session_state.get(f"list_paste_{index}", ""))
     if not pasted.strip():
@@ -5802,13 +5850,14 @@ def _build_list_inputs(
                 raise ValueError("Choose the shared district file.")
             data = draft.data
             mime_type = validate_uploaded_document(draft.name, data)
+            shared_input = _build_uploaded_list_input(
+                child_id=str(children[0]["child_id"]),
+                document_name=draft.name,
+                data=data,
+                mime_type=mime_type,
+            )
             return tuple(
-                ListInput(
-                    child_id=str(child["child_id"]),
-                    source=data,
-                    mime_type=mime_type,
-                    document_name=draft.name,
-                )
+                replace(shared_input, child_id=str(child["child_id"]))
                 for child in children
             )
         pasted = str(st.session_state.get("shared_list_paste", ""))

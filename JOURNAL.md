@@ -4728,6 +4728,46 @@ reported but deliberately not changed in this pass.
 No merge behavior, quantity selection, extraction, matching, pricing,
 optimizer, gate, or business threshold changed.
 
+## 2026-07-30 — Uploaded TXT source previews reuse BR-64
+
+### Objective
+
+Make uploaded plain-text lists viewable through the same source popovers as
+pasted text, and make unavailable-preview copy truthful about its source.
+
+### Diagnosis
+
+The upload builder retained TXT as raw bytes without `source_page_texts`, so
+the shared source renderer never entered BR-64's text-backed branch. When no
+real evidence line was available, two callers supplied the filename as
+`source_line`; the shared popover then labeled that filename as a cited line.
+
+### Work completed
+
+- Added one validated-upload builder that routes TXT through the existing
+  BR-64 pasted-text builder, then retains its uploaded-input identity and
+  filename.
+- Reused that builder for individual and shared uploads.
+- Made the shared popover distinguish a genuine cited line from a document-name
+  fallback.
+- Replaced the generic DOCX placeholder with format-specific guidance to open
+  the original or upload PDF/TXT for an in-app preview.
+- Added production-shaped tests for individual TXT upload retention, text-page
+  rendering, genuine cited-line copy, and the DOCX fallback.
+
+### Format audit
+
+PDF source pages render as images; JPG/JPEG and PNG render their retained
+images; TXT now renders exact retained text pages. DOCX remains the only
+accepted format without an in-app preview and now says so explicitly. A
+structurally corrupt PDF can still raise during page rendering after passing
+the lightweight upload signature check.
+
+### Architecture
+
+No new model call, extraction interpretation, matching behavior, money path,
+optimizer calculation, approval condition, or business threshold changed.
+
 ## 2026-07-30 — Duplicate exclusion uses one authoritative quantity state
 
 ### Defect

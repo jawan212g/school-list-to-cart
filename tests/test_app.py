@@ -1106,8 +1106,125 @@ def test_uploaded_list_draft_survives_setup_and_review_navigation() -> None:
 
     assert len(inputs) == 1
     assert inputs[0].child_id == "child-1"
-    assert inputs[0].source == b"24 pencils"
+    assert inputs[0].source == "24 pencils"
     assert inputs[0].mime_type == "text/plain"
+    assert inputs[0].input_kind == "uploaded"
+    assert inputs[0].source_page_texts == ("24 pencils",)
+
+
+def test_uploaded_text_source_popover_renders_the_retained_text() -> None:
+    """BR-64: uploaded TXT uses the same viewable text pages as pasted input."""
+
+    state: dict[str, object] = {
+        "shared_list_for_all": False,
+        "list_mode_0": "Upload a file",
+        "list_upload_0": SimpleNamespace(
+            name="grade5.txt",
+            getvalue=lambda: b"24 pencils\n1 box of tissues\n",
+        ),
+    }
+    (list_input,) = app._build_list_inputs(
+        SimpleNamespace(session_state=state),
+        ({"child_id": "child-1", "label": "Jesse"},),
+    )
+
+    class Popover:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    class SourceControl:
+        session_state: dict[str, object] = {}
+        captions: list[str] = []
+        text_pages: list[str] = []
+        info_messages: list[str] = []
+
+        @staticmethod
+        def popover(label: str, **kwargs: object) -> Popover:
+            del label, kwargs
+            return Popover()
+
+        @classmethod
+        def caption(cls, value: str) -> None:
+            cls.captions.append(value)
+
+        @classmethod
+        def code(
+            cls,
+            value: str,
+            *,
+            language: str | None,
+            wrap_lines: bool,
+        ) -> None:
+            assert language is None
+            assert wrap_lines is False
+            cls.text_pages.append(value)
+
+        @staticmethod
+        def image(value: bytes, **kwargs: object) -> None:
+            del value, kwargs
+            raise AssertionError("TXT must render as retained text")
+
+        @classmethod
+        def info(cls, value: str) -> None:
+            cls.info_messages.append(value)
+
+    app._render_source_reference(
+        SourceControl(),
+        list_input,
+        page_number=1,
+        source_line="24 pencils",
+        key="uploaded-text",
+    )
+
+    assert SourceControl.captions == [
+        "Cited line on this page: 24 pencils"
+    ]
+    assert SourceControl.text_pages == [
+        "24 pencils\n1 box of tissues\n"
+    ]
+    assert SourceControl.info_messages == []
+
+
+def test_docx_source_fallback_names_the_format_and_action() -> None:
+    """An unrenderable DOCX never calls its filename a cited source line."""
+
+    class SourceContentRecorder:
+        captions: list[str] = []
+        info_messages: list[str] = []
+
+        @classmethod
+        def caption(cls, value: str) -> None:
+            cls.captions.append(value)
+
+        @classmethod
+        def info(cls, value: str) -> None:
+            cls.info_messages.append(value)
+
+    app._render_source_reference_content(
+        SourceContentRecorder(),
+        app.SourceReference(
+            document_name="grade5.docx",
+            page_number=1,
+            source_line="grade5.docx",
+            rendered_page=None,
+            text_page=None,
+            mime_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+        ),
+    )
+
+    assert SourceContentRecorder.captions == [
+        "Source document: grade5.docx · page 1"
+    ]
+    assert SourceContentRecorder.info_messages == [
+        "A preview of this DOCX file is unavailable. Open the original file "
+        "on your device, or upload it as a PDF or TXT file to preview it here."
+    ]
 
 
 def test_individual_budgets_include_students_and_classrooms() -> None:
