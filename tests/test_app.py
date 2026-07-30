@@ -3259,8 +3259,8 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     assert summary.radio_label_visibility == "collapsed"
     assert "1 decision remains." in summary.messages
     assert summary.buttons[:5] == [
-        "Approve all remaining defaults",
         "Notebook paper",
+        "Approve all AI recommendations",
         "graphing calculator",
         "Pencils",
         "Backpack",
@@ -3268,7 +3268,10 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     assert "**The Supply List**" in summary.messages
     assert "**Quantity**" in summary.messages
     assert "**Item**" in summary.messages
-    assert "Action needed · Choose the package size" in summary.writes
+    assert (
+        "Action needed · Pack count missing · "
+        "AI assumed 150 per package"
+    ) in summary.writes
     assert "Included in your cart" in summary.writes
     assert "Left out of your cart" in summary.writes
     assert "Buy this item elsewhere" in summary.writes
@@ -3277,8 +3280,9 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         for value in summary.writes
         if value in {"0", "1", "2"}
     ][-4:]
-    assert [0.8, 3.2, 2.2] in summary.column_specs
-    assert [1.15, 0.8, 2.45, 2.2] not in summary.column_specs
+    assert [3.2, 2.2, 0.8] in summary.column_specs
+    assert summary.column_specs.count([3.2, 2.2, 0.8]) >= 4
+    assert [1.15, 2.45, 2.2, 0.8] not in summary.column_specs
     assert "personalize-unavailable-summary" in summary.container_keys
     assert any(
         "#b42318" in message
@@ -3286,10 +3290,10 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         for message in summary.messages
     )
     assert summary.events.index(
-        ("button", "Approve all remaining defaults")
-    ) < summary.events.index(("markdown", "**Status**"))
+        ("write", "Action needed · Pack count missing · AI assumed 150 per package")
+    ) < summary.events.index(("button", "Approve all AI recommendations"))
     assert summary.events.index(
-        ("write", "Action needed · Choose the package size")
+        ("write", "Action needed · Pack count missing · AI assumed 150 per package")
     ) < summary.events.index(
         ("container", "personalize-unavailable-summary")
     ) < summary.events.index(
@@ -3328,14 +3332,27 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     )
     assert "personalize_active_tab" not in state
 
-    final_summary.check("Accept this default")
+    final_summary.check("Accept this AI recommendation")
     assert state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] == frozenset(
         {"review-flag-1"}
     )
     approved_summary = ReviewScreenRecorder()
     app._render_review(approved_summary)
     assert "Nothing left to decide." in approved_summary.messages
-    assert "Accept this default" not in approved_summary.checkbox_callbacks
+    assert "AI recommendation approved" in approved_summary.writes
+    assert (
+        "Accept this AI recommendation"
+        not in approved_summary.checkbox_callbacks
+    )
+    assert "Approve all AI recommendations" not in approved_summary.buttons
+    state.set_widget("settled:flagged:quantity", 2)
+    edited_summary = ReviewScreenRecorder()
+    app._render_review(edited_summary)
+    assert "Changed by you" in edited_summary.writes
+    assert state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] == frozenset()
+    assert state[app.PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] == frozenset(
+        {"review-flag-1"}
+    )
 
 
 def test_personalize_student_cards_render_each_decision_before_acknowledgement(
@@ -3493,6 +3510,9 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
             self.checkbox_callbacks: list[
                 tuple[str, str, object, tuple[object, ...]]
             ] = []
+            self.button_callbacks: list[
+                tuple[str, object, tuple[object, ...]]
+            ] = []
             self.container_keys: list[str] = []
             self.components = SimpleNamespace(
                 v1=SimpleNamespace(html=lambda *args, **kwargs: None)
@@ -3646,6 +3666,15 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
             if isinstance(key, str):
                 self.session_state.register_button(key)
             self.events.append(("button", label))
+            on_click = kwargs.get("on_click")
+            if on_click is not None:
+                self.button_callbacks.append(
+                    (
+                        label,
+                        on_click,
+                        tuple(kwargs.get("args", ())),
+                    )
+                )
             return False
 
         def rerun(self) -> None:
@@ -3670,73 +3699,71 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     app._render_review(recorder)
     events = recorder.events
 
-    expected_decisions = (
-        "**Decision: How many are needed?**",
-        "**Decision: Is this reading correct?**",
-        "**Decision: Which quantity should we use?**",
-        "**Decision: How many items are in the listed package?**",
-        "**Decision: Which item does the list mean?**",
-        "**Decision: What must stay exact?**",
-        "**Decision: Which ambiguous color should we use?**",
-    )
-    for decision in expected_decisions:
-        assert ("markdown", decision) in events
-
-    assert ("number_input", "Enter the quantity") in events
-    assert ("radio", "Choose what to do with this reading") in events
-    assert recorder.radio_options[
-        "Choose what to do with this reading"
-    ] == (
-        "Accept this reading",
-        "Edit the item or quantity",
-        "Remove this item",
-    )
-    assert ("number_input", "Quantity to put in the cart") in events
-    assert ("checkbox", "Any pack size is fine") in events
-    assert ("number_input", "Items in the listed package") in events
-    assert ("selectbox", "Item to put in the cart") in events
-    assert ("text_input", "Required brand, if one applies") in events
-    assert ("checkbox", "Equivalent brands are okay") in events
-    assert ("text_input", "Acceptable colors") in events
-    assert ("caption", "What the list said") in events
-    assert ("write", "1 blunt-tip scissors") in events
-    assert ("caption", "What we understood") in events
     assert sum(
-        event == ("checkbox", "I have checked this choice")
+        event == ("radio", "Choose what to send to the cart")
         for event in events
     ) == 7
-    student_confirmation = next(
-        record
-        for record in recorder.checkbox_callbacks
-        if record[0] == "I have checked this choice"
+    assert recorder.radio_options[
+        "Choose what to send to the cart"
+    ] == (
+        "Accept the AI recommendation",
+        "Edit the item or quantity",
     )
-    _, confirmation_key, confirmation_callback, confirmation_args = (
-        student_confirmation
+    assert sum(
+        event == ("button", "Send selection to cart")
+        for event in events
+    ) == 7
+    assert (
+        "checkbox",
+        "I have checked this choice",
+    ) not in events
+    assert (
+        "warning",
+        "The list did not give a quantity for pencils. "
+        "The AI recommended 1.",
+    ) in events
+    assert (
+        "warning",
+        "The list did not say how many notebook paper were in the package. "
+        "The AI assumed 150 per package.",
+    ) in events
+    state.set_widget(
+        "review-flag-1:decision-action",
+        "Edit the item or quantity",
     )
-    state.set_widget(confirmation_key, True)
-    confirmation_callback(*confirmation_args)  # type: ignore[operator]
+    state.set_widget("review-flag-1:decision-item", "markers")
+    state.set_widget("review-flag-1:decision-quantity", 5)
+    edited_recorder = DecisionScreenRecorder()
+    app._render_review(edited_recorder)
+    assert (
+        "markdown",
+        "**5 markers**",
+    ) in edited_recorder.events
+    assert (
+        "caption",
+        "List requested: 1 pencil",
+    ) in edited_recorder.events
+    edited_send = next(
+        callback
+        for callback in edited_recorder.button_callbacks
+        if callback[0] == "Send selection to cart"
+    )
+    edited_send[1](*edited_send[2])  # type: ignore[operator]
+    assert state[app.PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] == (
+        frozenset({"review-flag-1"})
+    )
+    assert tuple(state["review_items"])[0].item_name == "markers"
+    assert tuple(state["review_items"])[0].required_quantity == 5
+
+    accepting_send = [
+        callback
+        for callback in recorder.button_callbacks
+        if callback[0] == "Send selection to cart"
+    ][1]
+    accepting_send[1](*accepting_send[2])  # type: ignore[operator]
     assert state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] == frozenset(
-        {"review-flag-1"}
+        {"review-flag-2"}
     )
-    for control in (
-        ("number_input", "Enter the quantity"),
-        ("radio", "Choose what to do with this reading"),
-        ("number_input", "Quantity to put in the cart"),
-        ("checkbox", "Any pack size is fine"),
-        ("selectbox", "Item to put in the cart"),
-        ("text_input", "Required brand, if one applies"),
-        ("text_input", "Acceptable colors"),
-    ):
-        control_position = events.index(control)
-        acknowledgement_position = next(
-            index
-            for index, event in enumerate(events)
-            if (
-                index > control_position
-                and event == ("checkbox", "I have checked this choice")
-            )
-        )
-        assert control_position < acknowledgement_position
 
     unavailable_position = events.index(
         ("expander", "Not available from these stores (1)")
@@ -3747,6 +3774,244 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
         recorder.container_keys
     )
     assert "add:child-1:add" in state.button_keys
+
+
+def test_personalize_edit_updates_student_summary_and_detail_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-52: production Personalize uses one resolved item and quantity."""
+
+    original = SupplyItemReview(
+        review_id="crayon",
+        req_id="crayon",
+        child_id="child-1",
+        item_name="crayons",
+        required_quantity=1,
+        brand="Crayola",
+        source_text="1 Crayola crayon",
+        confidence=1.0,
+    )
+
+    class StrictState(dict[str, object]):
+        def __init__(self, values: dict[str, object]) -> None:
+            super().__init__(values)
+            self.widget_keys: set[str] = set()
+            self.button_keys: set[str] = set()
+            self.application_assignments: set[str] = set()
+
+        def __setitem__(self, key: str, value: object) -> None:
+            self.application_assignments.add(key)
+            if key in self.button_keys or key in self.widget_keys:
+                raise AssertionError(f"Application assigned widget key {key}")
+            super().__setitem__(key, value)
+
+        def set_widget(self, key: str, value: object) -> None:
+            dict.__setitem__(self, key, value)
+
+        def register_widget(self, key: str) -> None:
+            self.widget_keys.add(key)
+
+        def register_button(self, key: str) -> None:
+            if key in self.application_assignments:
+                raise AssertionError(
+                    f"Button key was assigned before render: {key}"
+                )
+            self.button_keys.add(key)
+
+    state = StrictState({
+        "intake": {
+            "children": (
+                {"child_id": "child-1", "label": "Kevin"},
+            )
+        },
+        "extracted_lists": {"child-1": ExtractionEnvelope()},
+        "review_items": (original,),
+        "parent_added_review_items": (),
+        "extraction_errors": {},
+        "list_inputs": (),
+        app.PERSONALIZE_SELECTED_VIEW_KEY: "child-1",
+    })
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.session_state = state
+            self.messages: list[tuple[str, str]] = []
+            self.buttons: list[str] = []
+            self.input_values: dict[str, object] = {}
+            self.components = SimpleNamespace(
+                v1=SimpleNamespace(html=lambda *args, **kwargs: None)
+            )
+
+        def __enter__(self) -> "Recorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def columns(
+            self,
+            spec: object,
+            **kwargs: object,
+        ) -> tuple["Recorder", ...]:
+            del kwargs
+            count = spec if isinstance(spec, int) else len(spec)
+            return tuple(self for _ in range(count))
+
+        def container(self, **kwargs: object) -> "Recorder":
+            del kwargs
+            return self
+
+        def expander(self, label: str, **kwargs: object) -> "Recorder":
+            del kwargs
+            self.messages.append(("expander", label))
+            return self
+
+        def _record(self, kind: str, value: object) -> None:
+            self.messages.append((kind, str(value)))
+
+        def header(self, value: object) -> None:
+            self._record("header", value)
+
+        def subheader(self, value: object) -> None:
+            self._record("subheader", value)
+
+        def caption(self, value: object) -> None:
+            self._record("caption", value)
+
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del kwargs
+            self._record("markdown", value)
+
+        def warning(self, value: object) -> None:
+            self._record("warning", value)
+
+        def success(self, value: object) -> None:
+            self._record("success", value)
+
+        def error(self, value: object) -> None:
+            self._record("error", value)
+
+        def write(self, value: object) -> None:
+            self._record("write", value)
+
+        def _widget(
+            self,
+            key: str,
+            value: object,
+        ) -> object:
+            if key not in state:
+                state.set_widget(key, value)
+            state.register_widget(key)
+            self.input_values[key] = state[key]
+            return state[key]
+
+        def radio(
+            self,
+            label: str,
+            options: tuple[str, ...],
+            *,
+            key: str,
+            index: int | None = 0,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            selected = options[0 if index is None else index]
+            return str(self._widget(key, selected))
+
+        def selectbox(
+            self,
+            label: str,
+            *,
+            options: tuple[str, ...],
+            key: str,
+            index: int = 0,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            return str(self._widget(key, options[index]))
+
+        def number_input(
+            self,
+            label: str,
+            *,
+            key: str,
+            value: int,
+            **kwargs: object,
+        ) -> int:
+            del label, kwargs
+            return int(self._widget(key, value))
+
+        def text_input(
+            self,
+            label: str,
+            *,
+            key: str,
+            value: str = "",
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            return str(self._widget(key, value))
+
+        def checkbox(
+            self,
+            label: str,
+            *,
+            key: str,
+            value: bool = False,
+            **kwargs: object,
+        ) -> bool:
+            del label, kwargs
+            return bool(self._widget(key, value))
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            key = kwargs.get("key")
+            if isinstance(key, str):
+                state.register_button(key)
+            self.buttons.append(label)
+            return False
+
+        def rerun(self) -> None:
+            raise AssertionError("No control was clicked")
+
+    monkeypatch.setattr(
+        app,
+        "_personalize_source_summary",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        app,
+        "_new_review_item_from_controls",
+        lambda *args, **kwargs: None,
+    )
+
+    first = Recorder()
+    app._render_review(first)
+    state.set_widget("settled:crayon:quantity", 2)
+    state.set_widget("settled:crayon:item", "markers")
+
+    edited_student = Recorder()
+    app._render_review(edited_student)
+    assert any(
+        kind == "markdown" and "2 Crayola markers" in text
+        for kind, text in edited_student.messages
+    )
+    assert (
+        "caption",
+        "List requested: 1 Crayola crayon",
+    ) in edited_student.messages
+    assert edited_student.input_values["settled:crayon:quantity"] == 2
+    assert edited_student.input_values["settled:crayon:item"] == "markers"
+
+    app._select_personalize_tab(state, "summary")
+    summary = Recorder()
+    app._render_review(summary)
+    assert "Crayola Markers" in summary.buttons
+    assert ("write", "2") in summary.messages
+    assert ("caption", "List requested: 1") in summary.messages
+    assert (
+        "caption",
+        "List requested: Crayola Crayons",
+    ) in summary.messages
 
 
 def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
@@ -3896,7 +4161,7 @@ def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
     assert pdf_path.name in recorder.popovers[1]
     assert recorder.text_sources == [typed_text]
     assert len(recorder.pdf_pages) == 1
-    assert [1.15, 0.8, 2.45, 2.2] in recorder.column_specs
+    assert [1.15, 2.45, 2.2, 0.8] in recorder.column_specs
     assert "**Quantity**" in recorder.messages
     assert "**Item**" in recorder.messages
     assert "**Quantity and item**" not in recorder.messages

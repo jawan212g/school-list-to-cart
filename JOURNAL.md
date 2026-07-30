@@ -3416,3 +3416,55 @@ rows.
 Deploy the Personalize-only change and confirm that Summary item jumps,
 per-item approvals, and both unavailable blocks render correctly in the hosted
 Streamlit runtime.
+
+## 2026-07-29 - Personalize final pass
+
+### Objective
+
+Make parent edits authoritative everywhere on Personalize while retaining the
+original list request and simplifying each unresolved AI recommendation to one
+accept-or-edit decision.
+
+### Work completed
+
+- Diagnosed the stale-label defect: detail widgets returned current values,
+  while the student label and Summary rendered the prior durable review model
+  until the bottom of the rerun.
+- Added one Personalize resolution boundary that commits current item and
+  quantity values before student and Summary content is derived.
+- Retained an immutable session-scoped snapshot of each list-requested item and
+  quantity, displayed only when the parent changes either value.
+- Reordered the Supply List table to Item, Status, Quantity, with Student first
+  only for multi-student sessions, and removed package counts from Summary
+  quantity text.
+- Replaced decision-specific control collections with two choices: accept the
+  AI recommendation or edit the item/quantity, committed by a
+  `Send selection to cart` action.
+- Moved approve-all below the pending rows, renamed acceptance controls, and
+  persisted whether an AI recommendation or parent edit resolved each item.
+- Kept unavailable items in their red action block and renamed the separate,
+  collapsed excluded-item section to `Not being purchased`.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused Personalize tests:
+  `py -3.12-arm64 -m pytest -q tests/test_app.py -k "personalize or review_understanding"`
+  -> 12 passed, 99 deselected.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 418 passed, 1 skipped in
+  3.38 seconds.
+- The production `_render_review` path was exercised with the strict
+  session-state double for item and quantity edits, original-value display,
+  decision commits, Summary acceptance, durable AI marks, and clearing those
+  marks after a parent edit.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 environment, so final visual
+  alignment and wrapping still require inspection after deployment. No local
+  Streamlit run was attempted.

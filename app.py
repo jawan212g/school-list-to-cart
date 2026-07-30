@@ -192,6 +192,10 @@ PERSONALIZE_SELECTED_VIEW_KEY = "personalize_selected_view"
 PERSONALIZE_VIEW_REVISION_KEY = "personalize_view_revision"
 PERSONALIZE_VIEW_WIDGET_KEY = "personalize_view_control"
 PERSONALIZE_CONFIRMED_GROUP_IDS_KEY = "personalize_confirmed_group_ids"
+PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY = (
+    "personalize_parent_edited_group_ids"
+)
+PERSONALIZE_ORIGINAL_ITEMS_KEY = "personalize_original_review_items"
 DEFAULT_TAX_STATE_OPTION = "Choose a state — use the 7.0% default"
 DEVELOPMENT_DEBUG_ENV = "SCHOOL_CART_DEBUG"
 DEBUG_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -6786,12 +6790,7 @@ def _review_summary_quantity_text(item: SupplyItemReview) -> str:
     }.get(item.unit, item.unit)
     if quantity != 1:
         container += "es" if container.endswith("x") else "s"
-    package_text = (
-        f" ({item.package_size} each)"
-        if item.package_size is not None
-        else ""
-    )
-    return f"{quantity} {container}{package_text}"
+    return f"{quantity} {container}"
 
 
 def _review_summary_item_text(item: SupplyItemReview) -> str:
@@ -7227,6 +7226,13 @@ def _set_personalize_group_confirmation(
     )
     if bool(state.get(widget_key, False)):
         confirmed.add(group_id)
+        parent_edited = set(
+            state.get(PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY, ())
+        )
+        parent_edited.discard(group_id)
+        state[PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] = frozenset(
+            parent_edited
+        )
     else:
         confirmed.discard(group_id)
     state[PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] = frozenset(confirmed)
@@ -7243,6 +7249,138 @@ def _approve_personalize_groups(
     )
     confirmed.update(group_ids)
     state[PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] = frozenset(confirmed)
+    parent_edited = set(
+        state.get(PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY, ())
+    )
+    parent_edited.difference_update(group_ids)
+    state[PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] = frozenset(
+        parent_edited
+    )
+
+
+def _initialize_personalize_original_items(
+    state: MutableMapping[str, Any],
+    items: Sequence[SupplyItemReview],
+) -> Mapping[str, SupplyItemReview]:
+    """Retain the list-requested item and quantity before parent edits."""
+
+    originals = dict(state.get(PERSONALIZE_ORIGINAL_ITEMS_KEY, {}))
+    changed = False
+    for item in items:
+        if item.review_id not in originals:
+            originals[item.review_id] = item.model_copy(deep=True)
+            changed = True
+    if changed or PERSONALIZE_ORIGINAL_ITEMS_KEY not in state:
+        state[PERSONALIZE_ORIGINAL_ITEMS_KEY] = originals
+    return originals
+
+
+def _review_item_or_quantity_changed(
+    current: SupplyItemReview,
+    original: SupplyItemReview | None,
+) -> bool:
+    """Return whether a parent changed the two prominent review values."""
+
+    return bool(
+        original is not None
+        and (
+            current.item_name != original.item_name
+            or current.required_quantity != original.required_quantity
+        )
+    )
+
+
+def _resolve_detail_widget_values(
+    state: Mapping[str, Any],
+    item: SupplyItemReview,
+    *,
+    key_prefix: str,
+) -> SupplyItemReview:
+    """Resolve item and quantity from mounted detail widgets before display."""
+
+    updates: dict[str, object] = {}
+    item_key = f"{key_prefix}:item"
+    quantity_key = f"{key_prefix}:quantity"
+    item_value = state.get(item_key)
+    if isinstance(item_value, str) and item_value in ALLOWED_CATEGORIES:
+        updates["item_name"] = item_value
+    quantity_value = state.get(quantity_key)
+    if isinstance(quantity_value, int):
+        updates["required_quantity"] = max(
+            quantity_value,
+            EXCLUDED_REQUIREMENT_QUANTITY,
+        )
+    return item.model_copy(update=updates) if updates else item
+
+
+def _replace_review_items_in_state(
+    state: MutableMapping[str, Any],
+    replacements: Mapping[str, SupplyItemReview],
+) -> None:
+    """Commit review edits without assigning any widget-owned key."""
+
+    state["review_items"] = tuple(
+        replacements.get(item.review_id, item)
+        for item in state.get("review_items", ())
+    )
+    state["parent_added_review_items"] = tuple(
+        replacements.get(item.review_id, item)
+        for item in state.get("parent_added_review_items", ())
+    )
+
+
+def _commit_personalize_decision(
+    state: MutableMapping[str, Any],
+    group_id: str,
+    members: Sequence[SupplyItemReview],
+    action_key: str,
+    item_key: str,
+    quantity_key: str,
+) -> None:
+    """Send an AI recommendation or parent edit into BR-52's durable state."""
+
+    action = str(state.get(action_key, "Accept the AI recommendation"))
+    confirmed = set(
+        state.get(PERSONALIZE_CONFIRMED_GROUP_IDS_KEY, ())
+    )
+    parent_edited = set(
+        state.get(PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY, ())
+    )
+    replacements: dict[str, SupplyItemReview] = {}
+    if action == "Edit the item or quantity":
+        item_name = str(state.get(item_key, members[0].item_name))
+        quantity = int(
+            state.get(
+                quantity_key,
+                members[0].required_quantity
+                or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY,
+            )
+        )
+        edited = members[0].model_copy(
+            update={
+                "item_name": item_name,
+                "required_quantity": quantity,
+            }
+        )
+        replacements = {
+            member.review_id: (
+                edited
+                if member.review_id == edited.review_id
+                else _copy_shared_review_edits(edited, member)
+            )
+            for member in members
+        }
+        confirmed.discard(group_id)
+        parent_edited.add(group_id)
+    else:
+        confirmed.add(group_id)
+        parent_edited.discard(group_id)
+    if replacements:
+        _replace_review_items_in_state(state, replacements)
+    state[PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] = frozenset(confirmed)
+    state[PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] = frozenset(
+        parent_edited
+    )
 
 
 def _personalize_total_decision_count(
@@ -7271,23 +7409,87 @@ def _personalize_decision_reason(
     """Return one short parent-facing reason for a pending item."""
 
     if conditional:
-        return "Choose the option that applies"
+        return "Condition unclear · choose the option that applies"
     issue_codes = frozenset(item.issue_codes)
     if "low_confidence" in issue_codes:
-        return "Check the list reading"
+        return (
+            "Reading unclear · AI read "
+            + review_understanding_text(item)
+        )
     if "ambiguous_package_size" in issue_codes:
-        return "Choose the package size"
+        assumed = item.package_size or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY
+        return f"Pack count missing · AI assumed {assumed} per package"
     if "quantity_range" in issue_codes:
-        return "Choose the quantity"
+        return (
+            "Quantity range listed · AI chose "
+            f"{item.required_quantity or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY}"
+        )
     if "missing_quantity" in issue_codes:
-        return "Enter a quantity"
+        return (
+            "Quantity missing · AI chose "
+            f"{item.required_quantity or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY}"
+        )
     if "ambiguous_item" in issue_codes:
-        return "Choose the item"
+        return (
+            "Item unclear · AI chose "
+            + _item_display_name(item.item_name)
+        )
     if AMBIGUOUS_UNNAMED_BRAND_REQUIREMENT_ISSUE in issue_codes:
-        return "Choose the brand rule"
+        return "Brand rule unclear · AI allows equivalent brands"
     if issue_codes:
-        return "Check the item details"
-    return "Choose how to handle this item"
+        detail = next(iter(issue_codes)).replace("_", " ")
+        return f"{detail.capitalize()} unclear · check the AI choice"
+    return "Choice needed · check the AI recommendation"
+
+
+def _personalize_decision_explanation(
+    item: SupplyItemReview,
+) -> str:
+    """Name the exact uncertainty and the AI recommendation on its card."""
+
+    issue_codes = frozenset(item.issue_codes)
+    item_text = _item_display_name(item.item_name).casefold()
+    quantity = (
+        item.required_quantity or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY
+    )
+    if "low_confidence" in issue_codes:
+        return (
+            "The source line was unclear. The AI read it as "
+            f"{review_understanding_text(item)}."
+        )
+    if "ambiguous_package_size" in issue_codes:
+        assumed = item.package_size or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY
+        return (
+            f"The list did not say how many {item_text} were in the package. "
+            f"The AI assumed {assumed} per package."
+        )
+    if "quantity_range" in issue_codes:
+        maximum = item.quantity_max or quantity
+        return (
+            f"The list gave a range of {quantity} to {maximum}. "
+            f"The AI recommended {quantity}."
+        )
+    if "missing_quantity" in issue_codes:
+        return (
+            f"The list did not give a quantity for {item_text}. "
+            f"The AI recommended {quantity}."
+        )
+    if "ambiguous_item" in issue_codes:
+        return (
+            "The item wording was unclear. The AI interpreted it as "
+            f"{item_text}."
+        )
+    if AMBIGUOUS_UNNAMED_BRAND_REQUIREMENT_ISSUE in issue_codes:
+        return (
+            "The list prohibited substitutes but did not name a brand. "
+            "The AI left equivalent brands allowed."
+        )
+    if issue_codes:
+        detail = next(iter(issue_codes)).replace("_", " ")
+        return (
+            f"The {detail} was unclear. Check the AI recommendation shown."
+        )
+    return "Check the AI recommendation shown."
 
 
 def _render_personalize_summary(
@@ -7296,6 +7498,8 @@ def _render_personalize_summary(
     item_by_id: Mapping[str, SupplyItemReview],
     *,
     unavailable_by_child: Mapping[str, Mapping[str, str]] | None = None,
+    all_flag_groups: Sequence[ReviewFlagGroup] = (),
+    original_items: Mapping[str, SupplyItemReview] | None = None,
     view_revision: int,
 ) -> None:
     """Render BR-52's complete production Personalize summary."""
@@ -7351,30 +7555,17 @@ def _render_personalize_summary(
     st.markdown("**The Supply List**")
     show_student_column = len(sections) > 1
     item_column_widths = (
-        [1.15, 0.8, 2.45, 2.2]
+        [1.15, 2.45, 2.2, 0.8]
         if show_student_column
-        else [0.8, 3.2, 2.2]
+        else [3.2, 2.2, 0.8]
     )
     item_header = st.columns(item_column_widths)
     item_headers = (
-        ("Student", "Quantity", "Item", "Status")
+        ("Student", "Item", "Status", "Quantity")
         if show_student_column
-        else ("Quantity", "Item", "Status")
+        else ("Item", "Status", "Quantity")
     )
-    status_column_index = len(item_headers) - 1
-    item_header[status_column_index].button(
-        "Approve all remaining defaults",
-        key=f"personalize-action:approve-all:{view_revision}",
-        disabled=not bool(default_groups),
-        on_click=_approve_personalize_groups,
-        args=(st.session_state, tuple(default_groups)),
-        use_container_width=True,
-    )
-    for index, (column, label) in enumerate(
-        zip(item_header, item_headers, strict=True)
-    ):
-        if index != status_column_index:
-            column.write("")
+    for column, label in zip(item_header, item_headers, strict=True):
         column.markdown(f"**{label}**")
 
     unavailable_lookup = unavailable_by_child or {}
@@ -7384,10 +7575,13 @@ def _render_personalize_summary(
     }
     decision_group_by_row = {
         row_id: group.group_id
-        for section in sections
-        for group in section.decision_groups
+        for group in all_flag_groups
         for row_id in group.row_ids
     }
+    parent_edited_group_ids = frozenset(
+        st.session_state.get(PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY, ())
+    )
+    originals = original_items or {}
     summary_rows: list[
         tuple[int, int, str, str, str, str, str, str, str | None]
     ] = []
@@ -7402,6 +7596,7 @@ def _render_personalize_summary(
             item = item_by_id.get(item_id)
             if item is None:
                 continue
+            group_id = decision_group_by_row.get(item_id)
             if item_id in pending_ids:
                 reason = _personalize_decision_reason(
                     item,
@@ -7409,6 +7604,18 @@ def _render_personalize_summary(
                 )
                 status = f"Action needed · {reason}"
                 status_order = 0
+            elif group_id in confirmed_group_ids:
+                status = "AI recommendation approved"
+                status_order = 1
+            elif (
+                group_id in parent_edited_group_ids
+                or _review_item_or_quantity_changed(
+                    item,
+                    originals.get(item_id),
+                )
+            ):
+                status = "Changed by you"
+                status_order = 1
             else:
                 status = "Included in your cart"
                 status_order = 1
@@ -7422,7 +7629,7 @@ def _render_personalize_summary(
                     _review_summary_quantity_text(item),
                     _review_summary_item_text(item),
                     status,
-                    decision_group_by_row.get(item_id),
+                    group_id,
                 )
             )
         for item_id in section.unstocked_item_ids:
@@ -7484,9 +7691,9 @@ def _render_personalize_summary(
             group_id,
         ) in rows:
             columns = st.columns(item_column_widths)
-            quantity_column_index = 1 if show_student_column else 0
-            item_column_index = 2 if show_student_column else 1
-            row_status_column_index = 3 if show_student_column else 2
+            item_column_index = 1 if show_student_column else 0
+            row_status_column_index = 2 if show_student_column else 1
+            quantity_column_index = 3 if show_student_column else 2
             if show_student_column:
                 columns[0].write(
                     escape_streamlit_dollars(child_label)
@@ -7494,6 +7701,19 @@ def _render_personalize_summary(
             columns[quantity_column_index].write(
                 escape_streamlit_dollars(quantity_text)
             )
+            original = originals.get(item_id)
+            if (
+                original is not None
+                and item_id in item_by_id
+                and item_by_id[item_id].required_quantity
+                != original.required_quantity
+            ):
+                columns[quantity_column_index].caption(
+                    escape_streamlit_dollars(
+                        "List requested: "
+                        + _review_summary_quantity_text(original)
+                    )
+                )
             columns[item_column_index].button(
                 escape_streamlit_dollars(item_text),
                 key=(
@@ -7508,16 +7728,27 @@ def _render_personalize_summary(
                 ),
                 use_container_width=True,
             )
+            if (
+                original is not None
+                and item_id in item_by_id
+                and item_by_id[item_id].item_name != original.item_name
+            ):
+                columns[item_column_index].caption(
+                    escape_streamlit_dollars(
+                        "List requested: "
+                        + _review_summary_item_text(original)
+                    )
+                )
             columns[row_status_column_index].write(
                 escape_streamlit_dollars(status)
             )
-            if group_id is not None:
+            if group_id in default_groups:
                 checkbox_key = (
                     "personalize-confirm-summary:"
                     f"{group_id}:{child_id}:{item_id}"
                 )
                 columns[row_status_column_index].checkbox(
-                    "Accept this default",
+                    "Accept this AI recommendation",
                     value=group_id in confirmed_group_ids,
                     key=checkbox_key,
                     on_change=_set_personalize_group_confirmation,
@@ -7529,6 +7760,15 @@ def _render_personalize_summary(
                 )
 
     render_rows(decision_rows)
+
+    if default_groups:
+        st.button(
+            "Approve all AI recommendations",
+            key=f"personalize-action:approve-all:{view_revision}",
+            on_click=_approve_personalize_groups,
+            args=(st.session_state, tuple(default_groups)),
+            use_container_width=True,
+        )
 
     if unavailable_rows:
         unavailable_rows.sort(key=lambda row: row[0])
@@ -7551,11 +7791,11 @@ def _render_personalize_summary(
                 item_text,
             ) in unavailable_rows:
                 columns = st.columns(item_column_widths)
-                quantity_column_index = (
-                    1 if show_student_column else 0
-                )
-                item_column_index = 2 if show_student_column else 1
+                item_column_index = 1 if show_student_column else 0
                 row_status_column_index = (
+                    2 if show_student_column else 1
+                )
+                quantity_column_index = (
                     3 if show_student_column else 2
                 )
                 if show_student_column:
@@ -7802,9 +8042,15 @@ def _render_review_detail_controls(
         tuple[RequirementSource, ListInput | None]
     ] = (),
     hidden_fields: frozenset[str] = frozenset(),
+    original_item: SupplyItemReview | None = None,
 ) -> SupplyItemReview:
     """Render secondary item editing controls inside a collapsed expander."""
 
+    item = _resolve_detail_widget_values(
+        st.session_state,
+        item,
+        key_prefix=key_prefix,
+    )
     visibility = review_detail_field_visibility(item, offers)
     with st.expander(PERSONALIZE_DECISION_DETAIL_LABEL):
         if source_references:
@@ -7844,6 +8090,14 @@ def _render_review_detail_controls(
                 format_func=_item_display_name,
                 key=f"{key_prefix}:item",
             )
+            if (
+                original_item is not None
+                and item_name != original_item.item_name
+            ):
+                first.caption(
+                    "List requested: "
+                    + _review_summary_item_text(original_item)
+                )
         quantity = (
             item.required_quantity
             if item.required_quantity is not None
@@ -7857,6 +8111,14 @@ def _render_review_detail_controls(
                 step=1,
                 key=f"{key_prefix}:quantity",
             ))
+            if (
+                original_item is not None
+                and quantity != original_item.required_quantity
+            ):
+                second.caption(
+                    "List requested: "
+                    + _review_summary_quantity_text(original_item)
+                )
         unit = first.selectbox(
             "Unit",
             options=("each", "pack", "box", "ream"),
@@ -8115,7 +8377,7 @@ def show_item_source_on_main(
     return not reasons.isdisjoint(PERSONALIZE_SOURCE_CONTROL_REASONS)
 
 
-def _render_primary_review_decisions(
+def _render_legacy_primary_review_decisions(
     st: Any,
     item: SupplyItemReview,
     *,
@@ -8336,6 +8598,60 @@ def _render_primary_review_decisions(
     return item.model_copy(update=updates), frozenset(hidden_fields)
 
 
+def _render_primary_review_decisions(
+    st: Any,
+    item: SupplyItemReview,
+    *,
+    key_prefix: str,
+) -> tuple[SupplyItemReview, frozenset[str]]:
+    """Render A-18's two explicit ways to resolve an AI recommendation."""
+
+    action_key = f"{key_prefix}:decision-action"
+    item_key = f"{key_prefix}:decision-item"
+    quantity_key = f"{key_prefix}:decision-quantity"
+    action = st.radio(
+        "Choose what to send to the cart",
+        (
+            "Accept the AI recommendation",
+            "Edit the item or quantity",
+        ),
+        key=action_key,
+    )
+    if action != "Edit the item or quantity":
+        return item, frozenset({"item", "quantity"})
+
+    item_column, quantity_column = st.columns(2)
+    category_options = tuple(sorted(ALLOWED_CATEGORIES))
+    item_name = item_column.selectbox(
+        "Item",
+        options=category_options,
+        index=category_options.index(item.item_name),
+        format_func=_item_display_name,
+        key=item_key,
+    )
+    quantity = int(
+        quantity_column.number_input(
+            "Quantity",
+            min_value=MINIMUM_ACTIVE_REQUIREMENT_QUANTITY,
+            value=(
+                item.required_quantity
+                or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY
+            ),
+            step=1,
+            key=quantity_key,
+        )
+    )
+    return (
+        item.model_copy(
+            update={
+                "item_name": item_name,
+                "required_quantity": quantity,
+            }
+        ),
+        frozenset({"item", "quantity"}),
+    )
+
+
 def _render_compact_review_row(
     st: Any,
     members: Sequence[SupplyItemReview],
@@ -8344,10 +8660,35 @@ def _render_compact_review_row(
     key_prefix: str,
     offers: Sequence[Offer],
     flag_messages: Sequence[str] = (),
+    original_items: Mapping[str, SupplyItemReview] | None = None,
 ) -> tuple[dict[str, SupplyItemReview], bool]:
     """Render one parent-first item card in the required verification order."""
 
     representative = members[0]
+    originals = original_items or {}
+    action_key = f"{key_prefix}:decision-action"
+    item_key = f"{key_prefix}:decision-item"
+    quantity_key = f"{key_prefix}:decision-quantity"
+    preview = representative
+    if (
+        st.session_state.get(action_key)
+        == "Edit the item or quantity"
+    ):
+        preview = representative.model_copy(
+            update={
+                "item_name": st.session_state.get(
+                    item_key,
+                    representative.item_name,
+                ),
+                "required_quantity": int(
+                    st.session_state.get(
+                        quantity_key,
+                        representative.required_quantity
+                        or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY,
+                    )
+                ),
+            }
+        )
     with st.container(border=True):
         affected_labels = tuple(
             dict.fromkeys(
@@ -8355,12 +8696,20 @@ def _render_compact_review_row(
                 for member in members
             )
         )
-        item_heading = review_understanding_text(representative)
+        item_heading = review_understanding_text(preview)
         if len(affected_labels) > 1:
             item_heading += " · " + _join_names(affected_labels)
         st.markdown(
             escape_streamlit_dollars(f"**{item_heading}**")
         )
+        original = originals.get(representative.review_id)
+        if _review_item_or_quantity_changed(preview, original):
+            st.caption(
+                escape_streamlit_dollars(
+                    "List requested: "
+                    + review_understanding_text(original)
+                )
+            )
 
         source_inputs = {
             (
@@ -8443,40 +8792,21 @@ def _render_compact_review_row(
         if main_messages:
             st.warning(
                 escape_streamlit_dollars(
-                    " ".join(main_messages)
+                    _personalize_decision_explanation(representative)
                 )
             )
 
-        edited_representative, hidden_fields = (
-            _render_primary_review_decisions(
-                st,
-                representative,
-                key_prefix=key_prefix,
-            )
-        )
         if flag_messages:
-            confirmation_key = (
-                f"personalize-confirm-student:{key_prefix}"
-            )
-            confirmed = st.checkbox(
-                "I have checked this choice",
-                value=(
-                    key_prefix
-                    in st.session_state.get(
-                        PERSONALIZE_CONFIRMED_GROUP_IDS_KEY,
-                        (),
-                    )
-                ),
-                key=confirmation_key,
-                on_change=_set_personalize_group_confirmation,
-                args=(
-                    st.session_state,
-                    key_prefix,
-                    confirmation_key,
-                ),
+            edited_representative, hidden_fields = (
+                _render_primary_review_decisions(
+                    st,
+                    representative,
+                    key_prefix=key_prefix,
+                )
             )
         else:
-            confirmed = True
+            edited_representative = representative
+            hidden_fields = frozenset()
         edited_representative = _render_review_detail_controls(
             st,
             edited_representative,
@@ -8485,19 +8815,39 @@ def _render_compact_review_row(
             decision_messages=decision_messages,
             source_references=tuple(detail_source_references),
             hidden_fields=hidden_fields,
+            original_item=original,
         )
+        if flag_messages:
+            st.button(
+                "Send selection to cart",
+                key=f"personalize-action:send-selection:{key_prefix}",
+                type="primary",
+                on_click=_commit_personalize_decision,
+                args=(
+                    st.session_state,
+                    key_prefix,
+                    tuple(members),
+                    action_key,
+                    item_key,
+                    quantity_key,
+                ),
+                use_container_width=True,
+            )
+    committed_representative = (
+        representative if flag_messages else edited_representative
+    )
     edited = {
         member.review_id: (
-            edited_representative
+            committed_representative
             if member.review_id == representative.review_id
             else _copy_shared_review_edits(
-                edited_representative,
+                committed_representative,
                 member,
             )
         )
         for member in members
     }
-    return edited, confirmed
+    return edited, not bool(flag_messages)
 
 
 def _render_settled_review_row(
@@ -8506,20 +8856,37 @@ def _render_settled_review_row(
     *,
     key_prefix: str,
     offers: Sequence[Offer],
+    original_item: SupplyItemReview | None = None,
+    ai_recommendation_approved: bool = False,
 ) -> SupplyItemReview:
     """Render one settled Personalize item as a single scannable line."""
 
+    item = _resolve_detail_widget_values(
+        st.session_state,
+        item,
+        key_prefix=key_prefix,
+    )
     st.markdown(
         escape_streamlit_dollars(
             f"✓ {review_understanding_text(item)}"
         )
     )
+    if _review_item_or_quantity_changed(item, original_item):
+        st.caption(
+            escape_streamlit_dollars(
+                "List requested: "
+                + review_understanding_text(original_item)
+            )
+        )
+    elif ai_recommendation_approved:
+        st.caption("AI recommendation approved by you")
     return _render_review_detail_controls(
         st,
         item,
         key_prefix=key_prefix,
         offers=offers,
         decision_messages=review_system_decision_messages(item),
+        original_item=original_item,
     )
 
 
@@ -8529,26 +8896,34 @@ def _render_excluded_review_row(
     *,
     key_prefix: str,
     offers: Sequence[Offer],
+    original_item: SupplyItemReview | None = None,
 ) -> SupplyItemReview:
     """Render one excluded item with its editable production controls."""
 
-    st.markdown(
-        escape_streamlit_dollars(review_understanding_text(item))
-    )
+    original = original_item or item
+    st.markdown(escape_streamlit_dollars(_review_summary_item_text(item)))
     if item.provided_by_school:
         st.caption("Already provided by school")
     elif item.already_owned:
-        st.caption("Marked as already owned")
+        st.caption("You already own this item")
     elif item.optional:
         st.caption("Optional item left out of the cart")
     elif item.review_status == "deleted":
-        st.caption("Removed from the cart")
+        st.caption("Excluded by you")
+    st.caption(
+        escape_streamlit_dollars(
+            "List requested: "
+            + _review_summary_quantity_text(original)
+            + " Â· Current quantity: 0"
+        )
+    )
     return _render_review_detail_controls(
         st,
         item,
         key_prefix=key_prefix,
         offers=offers,
         decision_messages=review_system_decision_messages(item),
+        original_item=original,
     )
 
 
@@ -10451,6 +10826,67 @@ def _render_review(st: Any) -> None:
         st.session_state.get("parent_added_review_items", ())
     )
     items = tuple(st.session_state["review_items"]) + pending_added_items
+    original_items = _initialize_personalize_original_items(
+        st.session_state,
+        items,
+    )
+    initial_flag_groups = review_flag_groups(items)
+    group_by_row = {
+        row_id: group.group_id
+        for group in initial_flag_groups
+        for row_id in group.row_ids
+    }
+    resolved_items: list[SupplyItemReview] = []
+    edited_group_ids: set[str] = set()
+    for item in items:
+        prefix = (
+            f"excluded:{item.review_id}"
+            if (
+                item.already_owned
+                or item.review_status == "deleted"
+                or item.required_quantity == EXCLUDED_REQUIREMENT_QUANTITY
+            )
+            else f"settled:{item.review_id}"
+        )
+        resolved = _resolve_detail_widget_values(
+            st.session_state,
+            item,
+            key_prefix=prefix,
+        )
+        resolved_items.append(resolved)
+        if _review_item_or_quantity_changed(
+            resolved,
+            original_items.get(item.review_id),
+        ):
+            group_id = group_by_row.get(item.review_id)
+            if group_id is not None:
+                edited_group_ids.add(group_id)
+    items = tuple(resolved_items)
+    if edited_group_ids:
+        confirmed_before = set(
+            st.session_state.get(
+                PERSONALIZE_CONFIRMED_GROUP_IDS_KEY,
+                (),
+            )
+        )
+        confirmed_before.difference_update(edited_group_ids)
+        st.session_state[PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] = (
+            frozenset(confirmed_before)
+        )
+        parent_edited_before = set(
+            st.session_state.get(
+                PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY,
+                (),
+            )
+        )
+        parent_edited_before.update(edited_group_ids)
+        st.session_state[PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] = (
+            frozenset(parent_edited_before)
+        )
+        _replace_review_items_in_state(
+            st.session_state,
+            {item.review_id: item for item in items},
+        )
     review_offers = tuple(load_catalog())
     all_unstocked_items = catalog_unstocked_review_items(
         items,
@@ -10465,7 +10901,15 @@ def _render_review(st: Any) -> None:
         st.session_state,
         (group.group_id for group in flag_groups),
     )
-    acknowledged_group_ids = tuple(confirmed_group_ids)
+    parent_edited_group_ids = frozenset(
+        st.session_state.get(
+            PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY,
+            (),
+        )
+    )
+    acknowledged_group_ids = tuple(
+        confirmed_group_ids | parent_edited_group_ids
+    )
     unhandled_groups = unhandled_review_flag_groups(
         items,
         flag_groups,
@@ -10635,6 +11079,8 @@ def _render_review(st: Any) -> None:
                 student_sections,
                 item_by_id,
                 unavailable_by_child=unavailable_by_child,
+                all_flag_groups=flag_groups,
+                original_items=original_items,
                 view_revision=int(
                     st.session_state[PERSONALIZE_VIEW_REVISION_KEY]
                 ),
@@ -10720,6 +11166,7 @@ def _render_review(st: Any) -> None:
                     key_prefix=group.group_id,
                     offers=review_offers,
                     flag_messages=group.messages,
+                    original_items=original_items,
                 )
                 edited_by_id.update(edited)
                 if confirmed and group.group_id not in confirmed_flag_group_ids:
@@ -10787,6 +11234,11 @@ def _render_review(st: Any) -> None:
                     item,
                     key_prefix=f"settled:{item.review_id}",
                     offers=review_offers,
+                    original_item=original_items.get(item.review_id),
+                    ai_recommendation_approved=(
+                        group_by_row.get(item.review_id)
+                        in confirmed_group_ids
+                    ),
                 )
             if not settled_items:
                 st.caption("No settled items are currently in the cart.")
@@ -10805,7 +11257,7 @@ def _render_review(st: Any) -> None:
             }
             if excluded_items:
                 with st.expander(
-                    f"Excluded from cart ({len(excluded_items)})",
+                    f"Not being purchased ({len(excluded_items)})",
                     expanded=requested_scroll_target in excluded_anchors,
                 ):
                     for item in excluded_items:
@@ -10822,6 +11274,9 @@ def _render_review(st: Any) -> None:
                                 item,
                                 key_prefix=f"excluded:{item.review_id}",
                                 offers=review_offers,
+                                original_item=original_items.get(
+                                    item.review_id
+                                ),
                             )
                         )
 
