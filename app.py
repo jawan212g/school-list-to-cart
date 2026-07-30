@@ -7492,7 +7492,7 @@ def _clear_source_review_widget_state(
         prefix
         for item in source_items
         for prefix in (
-            f"settled:{item.review_id}",
+            personalize_settled_row_key_prefix(item),
             f"excluded:{item.review_id}",
             f"optional:{item.review_id}",
         )
@@ -7508,6 +7508,26 @@ def _clear_source_review_widget_state(
             for prefix in prefixes
         ):
             state.pop(key, None)
+
+
+def personalize_settled_row_key_prefix(item: SupplyItemReview) -> str:
+    """Return the production widget prefix for one settled Personalize row."""
+
+    return f"settled:{item.review_id}"
+
+
+def personalize_row_expander_key(key_prefix: str) -> str:
+    """Return one Personalize disclosure key from its production row prefix."""
+
+    return f"{key_prefix}:expanded"
+
+
+def personalize_settled_expander_key(item: SupplyItemReview) -> str:
+    """Return the production expander key for one settled Personalize row."""
+
+    return personalize_row_expander_key(
+        personalize_settled_row_key_prefix(item)
+    )
 
 
 def _refresh_personalize_review_cache(
@@ -9479,7 +9499,7 @@ def _render_settled_review_row(
         item,
         key_prefix=key_prefix,
     )
-    expander_key = f"{key_prefix}:expanded"
+    expander_key = personalize_row_expander_key(key_prefix)
     with st.expander(
         escape_streamlit_dollars(review_understanding_text(item)),
         key=expander_key,
@@ -11632,7 +11652,7 @@ def _render_review(st: Any) -> None:
                 or item.review_status == "deleted"
                 or item.required_quantity == EXCLUDED_REQUIREMENT_QUANTITY
             )
-            else f"settled:{item.review_id}"
+            else personalize_settled_row_key_prefix(item)
         )
         resolved = _resolve_detail_widget_values(
             st.session_state,
@@ -12052,7 +12072,7 @@ def _render_review(st: Any) -> None:
                     edited_by_id[item.review_id] = _render_settled_review_row(
                         st,
                         item,
-                        key_prefix=f"settled:{item.review_id}",
+                        key_prefix=personalize_settled_row_key_prefix(item),
                         offers=review_offers,
                         original_item=original_items.get(item.review_id),
                         ai_recommendation_approved=(

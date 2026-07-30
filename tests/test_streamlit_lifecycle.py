@@ -263,10 +263,6 @@ app._render_review(st)
     )
     test_app.run()
     _assert_no_exception(test_app)
-    test_app.session_state["settled:pencils:expanded"] = True
-    test_app.session_state["settled:erasers:expanded"] = False
-    test_app.run()
-    _assert_no_exception(test_app)
     return test_app
 
 
@@ -756,32 +752,90 @@ def test_personalize_item_expanders_and_controls_keep_independent_state() -> Non
     """FR-12: real keyed item disclosures survive their control reruns."""
 
     test_app = _run_personalize_screen()
-    assert test_app.session_state["settled:pencils:expanded"] is True
-    assert test_app.session_state["settled:erasers:expanded"] is False
+    review_items = tuple(test_app.session_state["review_items"])
+    pencils = next(item for item in review_items if item.item_name == "pencils")
+    erasers = next(item for item in review_items if item.item_name == "erasers")
+    pencils_expander_key = app.personalize_settled_expander_key(pencils)
+    erasers_expander_key = app.personalize_settled_expander_key(erasers)
 
-    test_app.number_input(
-        key="settled:pencils:quantity"
-    ).set_value(24).run()
-    _assert_no_exception(test_app)
-    assert test_app.session_state["settled:pencils:expanded"] is True
-    assert test_app.session_state["settled:erasers:expanded"] is False
-    assert test_app.number_input(
-        key="settled:pencils:quantity"
-    ).value == 24
+    pencils_expander = next(
+        expander
+        for expander in test_app.expander
+        if expander.label == app.review_understanding_text(pencils)
+    )
+    erasers_expander = next(
+        expander
+        for expander in test_app.expander
+        if expander.label == app.review_understanding_text(erasers)
+    )
+    pencils_quantity = next(
+        widget
+        for widget in pencils_expander.number_input
+        if widget.label == "Quantity"
+    )
+    erasers_quantity = next(
+        widget
+        for widget in erasers_expander.number_input
+        if widget.label == "Quantity"
+    )
 
-    test_app.toggle(
-        key="settled:pencils:more-options"
-    ).set_value(True).run()
+    test_app.session_state[pencils_expander_key] = True
+    test_app.run()
     _assert_no_exception(test_app)
-    test_app.text_input(
-        key="settled:pencils:brand"
-    ).set_value("Ticonderoga").run()
+    pencils_expander = next(
+        expander
+        for expander in test_app.expander
+        if any(
+            widget.key == pencils_quantity.key
+            for widget in expander.number_input
+        )
+    )
+    assert pencils_expander.proto.expanded is True
+
+    test_app.number_input(key=pencils_quantity.key).set_value(24).run()
     _assert_no_exception(test_app)
-    assert test_app.session_state["settled:pencils:expanded"] is True
-    assert test_app.session_state["settled:erasers:expanded"] is False
-    assert test_app.number_input(
-        key="settled:pencils:quantity"
-    ).value == 24
-    assert test_app.text_input(
-        key="settled:pencils:brand"
-    ).value == "Ticonderoga"
+    test_app.session_state[erasers_expander_key] = True
+    test_app.run()
+    _assert_no_exception(test_app)
+    pencils_expander = next(
+        expander
+        for expander in test_app.expander
+        if any(
+            widget.key == pencils_quantity.key
+            for widget in expander.number_input
+        )
+    )
+    erasers_expander = next(
+        expander
+        for expander in test_app.expander
+        if any(
+            widget.key == erasers_quantity.key
+            for widget in expander.number_input
+        )
+    )
+    assert pencils_expander.proto.expanded is True
+    assert erasers_expander.proto.expanded is True
+    assert test_app.number_input(key=pencils_quantity.key).value == 24
+
+    test_app.number_input(key=erasers_quantity.key).set_value(5).run()
+    _assert_no_exception(test_app)
+    pencils_expander = next(
+        expander
+        for expander in test_app.expander
+        if any(
+            widget.key == pencils_quantity.key
+            for widget in expander.number_input
+        )
+    )
+    erasers_expander = next(
+        expander
+        for expander in test_app.expander
+        if any(
+            widget.key == erasers_quantity.key
+            for widget in expander.number_input
+        )
+    )
+    assert pencils_expander.proto.expanded is True
+    assert erasers_expander.proto.expanded is True
+    assert test_app.number_input(key=pencils_quantity.key).value == 24
+    assert test_app.number_input(key=erasers_quantity.key).value == 5

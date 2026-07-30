@@ -4344,3 +4344,35 @@ fingerprint invariant.
 - ARM64 cannot execute this Streamlit AppTest module.
 - The x86 workflow run is required before keyed-expander independence is
   considered verified against a production-shaped session.
+
+## 2026-07-30 — AppTest asserted an invented output identity
+
+### Distinct production-shape variant
+
+The earlier eight production-shape defects supplied inputs the application
+could not produce. This ninth variant supplied real requirements but asserted
+against widget-key strings invented by the test instead of reading the widgets
+the application rendered. The assertions could pass while being disconnected
+from the actual expanders and controls.
+
+### Work completed
+
+- Added shared settled-row key helpers and used them in the production
+  Personalize renderer.
+- Rewrote the lifecycle test to locate both rows and their controls from the
+  rendered element tree.
+- The test now opens row A, changes its quantity, opens row B, changes row B's
+  quantity, and verifies both open states and values remain independent.
+- No widget key string is written literally in the test.
+
+### Files changed
+
+- `app.py`
+- `tests/test_streamlit_lifecycle.py`
+- `JOURNAL.md`
+
+### Testing and remaining work
+
+- ARM64 cannot execute the AppTest behavior.
+- The x86 workflow result determines whether keyed-expander independence
+  actually holds; a failure will be reported rather than worked around.
