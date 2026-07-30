@@ -6099,6 +6099,11 @@ def _submit_merge_choices_to_personalize(
                 "review_items": organize_extractions({"child-1": envelope}),
                 "parent_added_review_items": (),
             }
+            if decision.quantity_interrupt is not None:
+                self.session_state[
+                    f"{decision.quantity_interrupt.interrupt_id}:"
+                    "parent-confirmed"
+                ] = True
             if callable(configure_state):
                 configure_state(self.session_state, decision)
 

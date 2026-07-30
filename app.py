@@ -109,6 +109,9 @@ from agent.rules import (
     MINIMUM_ACTIVE_REQUIREMENT_QUANTITY,
     MINIMUM_BUDGET_CENTS,
     MODEL_MAX_CONCURRENCY,
+    LOW_CONFIDENCE_IDENTITY_ISSUE,
+    LOW_CONFIDENCE_OTHER_DETAILS_ISSUE,
+    LOW_CONFIDENCE_QUANTITY_ISSUE,
     NONPAGINATED_SOURCE_PAGE,
     NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     PARENT_EDITABLE_DETAIL_FIELDS,
@@ -8007,6 +8010,27 @@ def _personalize_total_decision_count(
     return len(decision_ids)
 
 
+def _personalize_low_confidence_issue(
+    issue_codes: Iterable[str],
+) -> str | None:
+    """Return the field-scoped low-confidence issue, if one is present."""
+
+    return next(
+        (
+            issue
+            for issue in issue_codes
+            if issue
+            in {
+                "low_confidence",
+                LOW_CONFIDENCE_IDENTITY_ISSUE,
+                LOW_CONFIDENCE_QUANTITY_ISSUE,
+                LOW_CONFIDENCE_OTHER_DETAILS_ISSUE,
+            }
+        ),
+        None,
+    )
+
+
 def _personalize_decision_reason(
     item: SupplyItemReview,
     *,
@@ -8018,7 +8042,8 @@ def _personalize_decision_reason(
     if conditional:
         return "Condition unclear · choose the option that applies"
     issue_codes = frozenset(item.issue_codes)
-    if "low_confidence" in issue_codes:
+    low_confidence_issue = _personalize_low_confidence_issue(issue_codes)
+    if low_confidence_issue is not None:
         if (
             original_item is not None
             and (
@@ -8027,6 +8052,12 @@ def _personalize_decision_reason(
             )
         ):
             return "Reading changed by you"
+        if low_confidence_issue == LOW_CONFIDENCE_QUANTITY_ISSUE:
+            return "Quantity unclear · product choice confirmed by you"
+        if low_confidence_issue == LOW_CONFIDENCE_IDENTITY_ISSUE:
+            return "Item details unclear · quantity confirmed by you"
+        if low_confidence_issue == LOW_CONFIDENCE_OTHER_DETAILS_ISSUE:
+            return "Other details unclear · item and quantity confirmed by you"
         return (
             "Reading unclear · AI read "
             + review_understanding_text(item)
@@ -8091,7 +8122,8 @@ def _personalize_decision_explanation(
     quantity = (
         item.required_quantity or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY
     )
-    if "low_confidence" in issue_codes:
+    low_confidence_issue = _personalize_low_confidence_issue(issue_codes)
+    if low_confidence_issue is not None:
         if (
             original_item is not None
             and (
@@ -8102,6 +8134,21 @@ def _personalize_decision_explanation(
             return (
                 "You changed this reading to "
                 f"{review_understanding_text(item)}."
+            )
+        if low_confidence_issue == LOW_CONFIDENCE_QUANTITY_ISSUE:
+            return (
+                "You confirmed which product the lines describe. The "
+                f"quantity may still be unclear; the AI read {quantity}."
+            )
+        if low_confidence_issue == LOW_CONFIDENCE_IDENTITY_ISSUE:
+            return (
+                f"You confirmed the quantity as {quantity}. The item or its "
+                "other details may still be unclear."
+            )
+        if low_confidence_issue == LOW_CONFIDENCE_OTHER_DETAILS_ISSUE:
+            return (
+                "You confirmed the item and quantity. Other details on the "
+                "source line may still be unclear."
             )
         return (
             "The source line was unclear. The AI read it as "
@@ -9184,8 +9231,9 @@ def _render_legacy_primary_review_decisions(
     handled_issues: set[str] = set()
     issue_codes = tuple(dict.fromkeys(item.issue_codes))
 
-    if "low_confidence" in issue_codes:
-        handled_issues.add("low_confidence")
+    low_confidence_issue = _personalize_low_confidence_issue(issue_codes)
+    if low_confidence_issue is not None:
+        handled_issues.add(low_confidence_issue)
         st.markdown("**Decision: Is this reading correct?**")
         source_column, interpretation_column = st.columns(2)
         source_column.caption("What the list said")
@@ -10874,9 +10922,12 @@ def apply_merge_quick_choice(
     quantity_keys: Mapping[str, str],
     choices: Mapping[str, Mapping[str, int] | int | None],
     custom_pending_key: str | None = None,
+    confirmation_key: str | None = None,
 ) -> None:
     """Synchronize editable quantities after a BR-30 radio shortcut."""
 
+    if confirmation_key is not None:
+        state[confirmation_key] = True
     selected = choices.get(str(state.get(choice_key)))
     if selected is None:
         if custom_pending_key is not None:
@@ -10896,12 +10947,24 @@ def mark_merge_quantities_custom(
     choice_key: str,
     custom_label: str,
     custom_pending_key: str | None = None,
+    confirmation_key: str | None = None,
 ) -> None:
     """Keep radio and number inputs as two views of one selection state."""
 
     state[choice_key] = custom_label
     if custom_pending_key is not None:
         state[custom_pending_key] = False
+    if confirmation_key is not None:
+        state[confirmation_key] = True
+
+
+def mark_merge_quantity_confirmed(
+    state: MutableMapping[str, Any],
+    confirmation_key: str,
+) -> None:
+    """Record that a parent actively changed one variant quantity."""
+
+    state[confirmation_key] = True
 
 
 def apply_merge_item_exclusion(
@@ -11058,6 +11121,7 @@ def _render_merge_quantity_controls(
     choice_key = f"{interrupt.interrupt_id}:choice"
     quantity_key = f"{interrupt.interrupt_id}:quantity"
     custom_pending_key = f"{interrupt.interrupt_id}:custom-pending"
+    confirmation_key = f"{interrupt.interrupt_id}:parent-confirmed"
     quantity_keys = {interrupt.interrupt_id: quantity_key}
     if st.session_state.get(choice_key) not in quick_choices:
         st.session_state[choice_key] = default_choice_label
@@ -11074,6 +11138,7 @@ def _render_merge_quantity_controls(
             quantity_keys,
             quick_choices,
             custom_pending_key,
+            confirmation_key,
         ),
     )
     visible_rationale = visible_quantity_preselection_rationale(
@@ -11106,6 +11171,7 @@ def _render_merge_quantity_controls(
                     choice_key,
                     MERGE_CUSTOM_QUANTITY_LABEL,
                     custom_pending_key,
+                    confirmation_key,
                 ),
             )
         )
@@ -11129,6 +11195,7 @@ def _render_merge_variant_controls(
     selected: dict[str, int] = {}
     for variant in decision.variants:
         quantity_key = f"{variant.variant_id}:quantity"
+        confirmation_key = f"{variant.variant_id}:parent-confirmed"
         if quantity_key not in st.session_state:
             st.session_state[quantity_key] = variant.default_quantity
         variant_values = [
@@ -11163,6 +11230,8 @@ def _render_merge_variant_controls(
                 min_value=0,
                 step=1,
                 key=quantity_key,
+                on_change=mark_merge_quantity_confirmed,
+                args=(st.session_state, confirmation_key),
                 help="Set a kind to zero if you do not want it in the cart.",
             )
         )
@@ -11447,13 +11516,38 @@ def _render_requirement_merge(st: Any) -> None:
     quantity_choices = {
         interrupt_id: int(quantity)
         for interrupt_id, (_, quantity) in selections.items()
-        if quantity is not None
+        if (
+            quantity is not None
+            and bool(
+                st.session_state.get(
+                    f"{interrupt_id}:parent-confirmed"
+                )
+            )
+        )
+    }
+    confirmed_variant_quantity_choices = {
+        decision_id: {
+            variant_id: quantity
+            for variant_id, quantity in quantities.items()
+            if bool(
+                st.session_state.get(
+                    f"{variant_id}:parent-confirmed"
+                )
+            )
+        }
+        for decision_id, quantities in variant_quantity_choices.items()
+    }
+    confirmed_variant_quantity_choices = {
+        decision_id: quantities
+        for decision_id, quantities
+        in confirmed_variant_quantity_choices.items()
+        if quantities
     }
     merged, resolved = consolidate_extractions(
         st.session_state["unmerged_extracted_lists"],
         quantity_choices=quantity_choices,
         constraint_choices={},
-        variant_quantity_choices=variant_quantity_choices,
+        variant_quantity_choices=confirmed_variant_quantity_choices,
         product_identity_choices=product_identity_choices,
         excluded_decision_ids=excluded_decision_ids,
     )

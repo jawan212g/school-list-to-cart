@@ -15,8 +15,12 @@ from agent.requirement_merge import (
 )
 from agent.rules import (
     AMBIGUOUS_PRODUCT_DESCRIPTORS,
+    LOW_CONFIDENCE_IDENTITY_ISSUE,
+    LOW_CONFIDENCE_QUANTITY_ISSUE,
     PLAUSIBLE_ANNUAL_MAXIMUM_BY_ITEM,
     SINGLE_INSTANCE_REQUIREMENT_ITEMS,
+    SYSTEM_DECISION_PARENT_CONFIRMED_PRODUCT_IDENTITY,
+    SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY,
 )
 from agent.aggregate import aggregate_requirements
 from agent.optimize import OptimizationConfig, optimize_cart
@@ -105,6 +109,99 @@ def test_quantity_total_remains_an_explicit_parent_choice() -> None:
     )
 
     assert resolved.requirements[0].quantity == 3
+
+
+def test_parent_selected_quantity_confirms_only_quantity_reading() -> None:
+    """BR-44: a selected quantity does not suppress identity uncertainty."""
+
+    requirements = (
+        _requirement("grade-5", 1, "5th Grade", 2).model_copy(
+            update={"extraction_confidence": 0.5}
+        ),
+        _requirement("hc", 2, "Highly Capable Class", 3).model_copy(
+            update={"extraction_confidence": 0.5}
+        ),
+    )
+    initial = consolidate_requirements(requirements)
+    interrupt_id = initial.interrupts[0].interrupt_id
+
+    resolved = consolidate_requirements(
+        requirements,
+        quantity_choices={interrupt_id: 3},
+    )
+    requirement = resolved.requirements[0]
+    row = organize_extractions(
+        {"child-1": ExtractionEnvelope(requirements=(requirement,))}
+    )[0]
+
+    assert SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY in (
+        requirement.system_decisions
+    )
+    assert SYSTEM_DECISION_PARENT_CONFIRMED_PRODUCT_IDENTITY not in (
+        requirement.system_decisions
+    )
+    assert row.issue_codes == (LOW_CONFIDENCE_IDENTITY_ISSUE,)
+
+
+def test_different_products_answer_keeps_unread_quantity_uncertainty() -> None:
+    """BR-44: an identity answer never confirms untouched variant quantities."""
+
+    requirements = (
+        Requirement(
+            req_id="graph",
+            child_id="child-1",
+            raw_text="1 graph paper composition notebook",
+            canonical_item="composition_notebooks",
+            quantity=1,
+            attributes={"ruling": "graph"},
+            source_document="district.pdf",
+            source_section="5th Grade",
+            source_page=2,
+            extraction_confidence=0.5,
+        ),
+        Requirement(
+            req_id="regular",
+            child_id="child-1",
+            raw_text="4 regular composition notebooks",
+            canonical_item="composition_notebooks",
+            quantity=4,
+            attributes={"ruling": "wide"},
+            source_document="district.pdf",
+            source_section="Highly Capable Class",
+            source_page=3,
+            extraction_confidence=0.5,
+        ),
+    )
+    initial = consolidate_requirements(requirements)
+    decision = item_decisions(initial)[0]
+
+    resolved = consolidate_requirements(
+        requirements,
+        product_identity_choices={decision.decision_id: "different"},
+    )
+    rows = organize_extractions(
+        {
+            "child-1": ExtractionEnvelope(
+                requirements=resolved.requirements
+            )
+        }
+    )
+
+    assert len(rows) == 2
+    assert all(
+        SYSTEM_DECISION_PARENT_CONFIRMED_PRODUCT_IDENTITY
+        in row.system_decisions
+        for row in rows
+    )
+    assert all(
+        SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY
+        not in row.system_decisions
+        for row in rows
+    )
+    assert all(
+        row.issue_codes == (LOW_CONFIDENCE_QUANTITY_ISSUE,)
+        for row in rows
+    )
 
 
 @pytest.mark.parametrize(
@@ -318,8 +415,8 @@ def test_graph_and_regular_composition_books_are_different_products() -> None:
     )
 
 
-def test_reviewed_composition_variants_do_not_ask_about_same_sources_again() -> None:
-    """A completed duplicate decision carries into the Personalize rows."""
+def test_reviewed_composition_identity_keeps_quantity_review_open() -> None:
+    """BR-44: product identity does not confirm unread variant quantities."""
 
     envelope = ExtractionEnvelope(
         requirements=(
@@ -360,7 +457,16 @@ def test_reviewed_composition_variants_do_not_ask_about_same_sources_again() -> 
 
     assert len(rows) == 2
     assert tuple(row.required_quantity for row in rows) == (1, 4)
-    assert review_flag_groups(rows) == ()
+    groups = review_flag_groups(rows)
+    assert len(groups) == 2
+    assert all(
+        group.messages
+        == (
+            "The quantity may be unclear. Compare it with the source shown "
+            "here.",
+        )
+        for group in groups
+    )
     assert AMBIGUOUS_PRODUCT_DESCRIPTORS == frozenset()
 
 

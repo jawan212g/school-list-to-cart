@@ -26,7 +26,8 @@ from agent.rules import (
     SINGLE_INSTANCE_REQUIREMENT_ITEMS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
     SYSTEM_DECISION_MERGED_QUANTITY_PREFIX,
-    SYSTEM_DECISION_PARENT_REVIEWED_DUPLICATE_SOURCES,
+    SYSTEM_DECISION_PARENT_CONFIRMED_PRODUCT_IDENTITY,
+    SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY,
     SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX,
     SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX,
     SYSTEM_DECISION_RECONCILED_BRAND,
@@ -835,6 +836,16 @@ def _resolved_variant_requirements(
             raise ValueError("A variant quantity cannot be negative")
         if quantity == 0:
             continue
+        variant_system_decisions = system_decisions
+        if variant.variant_id in quantities:
+            variant_system_decisions = tuple(
+                dict.fromkeys(
+                    (
+                        *variant_system_decisions,
+                        SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY,
+                    )
+                )
+            )
         attributes = (
             variant.attributes.model_dump()
             if any(
@@ -886,7 +897,7 @@ def _resolved_variant_requirements(
                         not in (None, "")
                         else ()
                     ),
-                    "system_decisions": system_decisions,
+                    "system_decisions": variant_system_decisions,
                 }
             )
         )
@@ -1053,7 +1064,7 @@ def consolidate_requirements(
                 dict.fromkeys(
                     (
                         *system_decisions,
-                        SYSTEM_DECISION_PARENT_REVIEWED_DUPLICATE_SOURCES,
+                        SYSTEM_DECISION_PARENT_CONFIRMED_PRODUCT_IDENTITY,
                     )
                 )
             )
@@ -1088,10 +1099,7 @@ def consolidate_requirements(
                 _resolved_variant_requirements(
                     first,
                     variants,
-                    {
-                        variant.variant_id: variant.default_quantity
-                        for variant in variants
-                    },
+                    {},
                     sources,
                     attributes,
                     brand_lock,
@@ -1132,6 +1140,15 @@ def consolidate_requirements(
                     )
                 )
             )
+            if quantity_interrupt.interrupt_id in choices:
+                system_decisions = tuple(
+                    dict.fromkeys(
+                        (
+                            *system_decisions,
+                            SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY,
+                        )
+                    )
+                )
         merged.append(
             first.model_copy(
                 update={

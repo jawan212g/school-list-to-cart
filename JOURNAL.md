@@ -4570,3 +4570,35 @@ specific action such as `Add this to my cart instead`, preserve the school's
 source line, and record that the parent chose to buy an item the list said
 would be provided. That behavior was proposed but not implemented in this
 pass.
+
+## 2026-07-30 — Duplicate review confirmation made field-specific
+
+### Finding
+
+The earlier `parent_reviewed_duplicate_sources` marker proved only that the
+parent submitted the duplicate-resolution screen. Personalize treated it as
+confirmation of the entire source reading and removed every low-confidence
+question, including quantities the parent never selected.
+
+### Resolution
+
+- Replaced the broad marker with independent product-identity and quantity
+  confirmations.
+- A same/different answer confirms only product identity.
+- A quantity is confirmed only when the parent actively changes a quick
+  choice, custom quantity, or individual variant quantity.
+- Untouched prefilled quantities do not receive a confirmation marker.
+- Personalize now scopes any remaining low-confidence review to identity,
+  quantity, or other details instead of suppressing the whole source line.
+
+### Regression coverage
+
+- A parent-selected merged quantity removes quantity uncertainty while
+  retaining unresolved identity/detail review.
+- A different-products answer leaves both untouched variant quantities
+  reviewable.
+
+### Architecture
+
+The markers and review classification are deterministic. No model call,
+matching behavior, price, or optimizer calculation changed.

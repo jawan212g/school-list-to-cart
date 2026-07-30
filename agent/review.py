@@ -11,11 +11,15 @@ from agent.rules import (
     CONFIDENCE_FLOOR,
     COUNT_BASED_CATEGORIES,
     ITEM_FULFILLMENT_PREFERENCE_DEFAULT,
+    LOW_CONFIDENCE_IDENTITY_ISSUE,
+    LOW_CONFIDENCE_OTHER_DETAILS_ISSUE,
+    LOW_CONFIDENCE_QUANTITY_ISSUE,
     NONPAGINATED_SOURCE_PAGE,
     PACKAGE_QUANTITY_STATE_DEFAULT,
     STANDARD_CONTAINER_CONTENT_COUNTS,
     STANDARD_PACK_COUNTS,
-    SYSTEM_DECISION_PARENT_REVIEWED_DUPLICATE_SOURCES,
+    SYSTEM_DECISION_PARENT_CONFIRMED_PRODUCT_IDENTITY,
+    SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY,
     unnamed_brand_requirement_needs_review,
 )
 from agent.schema import (
@@ -148,6 +152,21 @@ def review_issue_explanations(
             messages.append(
                 "The original line may be unclear. Compare it with the source "
                 "shown here."
+            )
+        elif issue == LOW_CONFIDENCE_QUANTITY_ISSUE:
+            messages.append(
+                "The quantity may be unclear. Compare it with the source "
+                "shown here."
+            )
+        elif issue == LOW_CONFIDENCE_IDENTITY_ISSUE:
+            messages.append(
+                "The item or its details may be unclear. The quantity was "
+                "confirmed by you."
+            )
+        elif issue == LOW_CONFIDENCE_OTHER_DETAILS_ISSUE:
+            messages.append(
+                "Other details on the original line may be unclear. The item "
+                "and quantity were confirmed by you."
             )
         elif issue == "quantity_range":
             if (
@@ -343,12 +362,24 @@ def _review_issues(requirement: Requirement) -> tuple[str, ...]:
     issues: list[str] = []
     if requirement.quantity < 1:
         issues.append("missing_quantity")
-    if (
-        requirement.extraction_confidence < float(CONFIDENCE_FLOOR)
-        and SYSTEM_DECISION_PARENT_REVIEWED_DUPLICATE_SOURCES
-        not in requirement.system_decisions
-    ):
-        issues.append("low_confidence")
+    if requirement.extraction_confidence < float(CONFIDENCE_FLOOR):
+        identity_confirmed = (
+            SYSTEM_DECISION_PARENT_CONFIRMED_PRODUCT_IDENTITY
+            in requirement.system_decisions
+        )
+        quantity_confirmed = (
+            SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY
+            in requirement.system_decisions
+        )
+        issues.append(
+            LOW_CONFIDENCE_OTHER_DETAILS_ISSUE
+            if identity_confirmed and quantity_confirmed
+            else LOW_CONFIDENCE_QUANTITY_ISSUE
+            if identity_confirmed
+            else LOW_CONFIDENCE_IDENTITY_ISSUE
+            if quantity_confirmed
+            else "low_confidence"
+        )
     if requirement.quantity_is_range:
         issues.append("quantity_range")
     if (
