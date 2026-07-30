@@ -479,6 +479,13 @@ def test_ungraded_list_actual_screen_path_does_not_block_and_extracts(
         def write(self, value: str) -> None:
             self.parent_text.append(value)
 
+        def html(
+            self,
+            value: str,
+            **kwargs: object,
+        ) -> None:
+            del value, kwargs
+
         def update(self, **kwargs: object) -> None:
             del kwargs
 
@@ -962,6 +969,13 @@ def test_replacement_working_path_reuses_other_student_document_and_selection(
 
         def write(self, value: str) -> None:
             del value
+
+        def html(
+            self,
+            value: str,
+            **kwargs: object,
+        ) -> None:
+            del value, kwargs
 
         def update(self, **kwargs: object) -> None:
             del kwargs

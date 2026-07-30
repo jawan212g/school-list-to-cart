@@ -34,6 +34,52 @@ def _assert_no_exception(test_app: AppTest) -> None:
     assert not test_app.exception
 
 
+def _run_working_progress_screen() -> AppTest:
+    """Mount the production router with deterministic empty list inspection."""
+
+    test_app = AppTest.from_string(
+        """
+import streamlit as st
+import app
+from agent.pipeline import ListInput
+
+def inspect_without_model(*args, **kwargs):
+    return {}, {}
+
+app._inspect_list_inputs = inspect_without_model
+st.session_state.setdefault(
+    "intake",
+    {
+        "children": (
+            {
+                "child_id": "child-1",
+                "label": "Maya",
+                "grade": "Grade 2",
+            },
+        ),
+        "demo_mode": False,
+    },
+)
+st.session_state.setdefault(
+    "list_inputs",
+    (
+        ListInput(
+            child_id="child-1",
+            source="1 box of pencils",
+            mime_type="text/plain",
+            document_name="Maya's supply list",
+        ),
+    ),
+)
+st.session_state.setdefault("screen", "working")
+app.main()
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
 def _run_section_screen() -> AppTest:
     """Mount the production section screen with production Pydantic models."""
 
@@ -114,6 +160,47 @@ if st.session_state.get("screen") == "sections":
     test_app.run()
     _assert_no_exception(test_app)
     return test_app
+
+
+def test_working_progress_scroll_is_marked_once_per_episode() -> None:
+    """Working-screen reruns keep one scroll marker until a new episode."""
+
+    test_app = _run_working_progress_screen()
+
+    assert (
+        test_app.session_state[app.WORK_EPISODE_COUNTER_KEY] == 1
+    )
+    assert test_app.session_state[app.WORK_EPISODE_ACTIVE_KEY] == 1
+    assert test_app.session_state[app.WORK_SCROLL_COMPLETED_KEY] == 1
+
+    test_app.run()
+    _assert_no_exception(test_app)
+    assert (
+        test_app.session_state[app.WORK_EPISODE_COUNTER_KEY] == 1
+    )
+    assert test_app.session_state[app.WORK_EPISODE_ACTIVE_KEY] == 1
+    assert test_app.session_state[app.WORK_SCROLL_COMPLETED_KEY] == 1
+
+    test_app.session_state["screen"] = "intake"
+    test_app.run()
+    _assert_no_exception(test_app)
+    assert (
+        test_app.session_state[app.WORK_EPISODE_ACTIVE_KEY] is None
+    )
+    assert (
+        test_app.session_state[app.WORK_SCROLL_COMPLETED_KEY] is None
+    )
+
+    test_app.session_state["screen"] = "working"
+    test_app.session_state["structure_cache_ready"] = False
+    test_app.session_state["extraction_cache_ready"] = False
+    test_app.run()
+    _assert_no_exception(test_app)
+    assert (
+        test_app.session_state[app.WORK_EPISODE_COUNTER_KEY] == 2
+    )
+    assert test_app.session_state[app.WORK_EPISODE_ACTIVE_KEY] == 2
+    assert test_app.session_state[app.WORK_SCROLL_COMPLETED_KEY] == 2
 
 
 def _run_personalize_screen() -> AppTest:

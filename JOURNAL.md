@@ -4105,3 +4105,53 @@ An AppTest must reproduce both the controls production makes available for the
 current session shape and the production screen router. Future AppTest fixtures
 and wrappers should be checked against both before being treated as
 production-path coverage.
+
+## 2026-07-30 — Scroll once when a Working episode begins
+
+### Objective
+
+Bring each new Working-screen episode into view once without pinning the parent
+to the top during progress reruns, and make progress changes available to screen
+readers.
+
+### Work completed
+
+- Inventoried the production progress UI: document-structure inspection, list
+  extraction, and shopping-plan building are the only animated status regions.
+  Matching, optimization, budget checking, and approval checking are narrated
+  within the plan-building status rather than separate spinners.
+- Added an incrementing Working-episode identifier, an active-episode key, and
+  an episode-specific completed-scroll key in Streamlit session state.
+- Used Streamlit 1.60's non-iframe `st.html` JavaScript support to request one
+  parent-page scroll on the first progress render in each episode. Browser-side
+  failures are caught and leave the app running without scrolling.
+- Added a visually hidden polite ARIA status region for the initial and updated
+  progress messages.
+- Cleared the active and completed-scroll episode keys whenever the production
+  router renders a screen other than `working`; the counter remains so the next
+  episode receives a new identity.
+
+### Testing and limitation
+
+- Added an x86 AppTest that enters the real `main()` router, confirms the same
+  episode and scroll marker survive a Working rerun, confirms both guards clear
+  after leaving, and confirms a second Working entry receives a new episode and
+  scroll marker.
+- AppTest cannot execute the browser JavaScript or observe scroll position. The
+  automated test covers only the session-state once-per-episode guard; the
+  physical page movement requires deployed-browser verification.
+- Updated two existing Working-screen recorders with Streamlit 1.60's `html`
+  surface so they continue to exercise the production renderer.
+
+### Files changed
+
+- `app.py`
+- `tests/test_streamlit_lifecycle.py`
+- `tests/test_sections.py`
+- `JOURNAL.md`
+
+### Remaining work
+
+- Verify in the deployed app that the first animated Working status scrolls to
+  the top, later progress reruns do not pull the page back, and a later
+  extraction episode scrolls once again.

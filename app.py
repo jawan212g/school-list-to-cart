@@ -7,6 +7,7 @@ import os
 import re
 import unicodedata
 from contextlib import nullcontext
+from html import escape as escape_html
 from io import BytesIO
 from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -204,6 +205,9 @@ PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY = (
     "personalize_parent_edited_group_ids"
 )
 PERSONALIZE_ORIGINAL_ITEMS_KEY = "personalize_original_review_items"
+WORK_EPISODE_COUNTER_KEY = "working_progress_episode_counter"
+WORK_EPISODE_ACTIVE_KEY = "working_progress_active_episode"
+WORK_SCROLL_COMPLETED_KEY = "working_scroll_completed_episode"
 DEFAULT_TAX_STATE_OPTION = "Choose a state — use the 7.0% default"
 DEVELOPMENT_DEBUG_ENV = "SCHOOL_CART_DEBUG"
 DEBUG_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -689,6 +693,79 @@ def progress_narration(
     if stage == "approval":
         return "Looking for anything that needs your decision"
     return "Building the shopping plan"
+
+
+def _sync_work_episode_for_screen(
+    state: MutableMapping[str, Any],
+    screen: str,
+) -> None:
+    """Clear the progress episode guards after leaving the Working screen."""
+
+    if screen != "working":
+        state[WORK_EPISODE_ACTIVE_KEY] = None
+        state[WORK_SCROLL_COMPLETED_KEY] = None
+
+
+def _active_work_episode(state: MutableMapping[str, Any]) -> int:
+    """Return one stable identifier for the current Working-screen episode."""
+
+    active_episode = state.get(WORK_EPISODE_ACTIVE_KEY)
+    if isinstance(active_episode, int) and active_episode > 0:
+        return active_episode
+    next_episode = int(state.get(WORK_EPISODE_COUNTER_KEY, 0)) + 1
+    state[WORK_EPISODE_COUNTER_KEY] = next_episode
+    state[WORK_EPISODE_ACTIVE_KEY] = next_episode
+    return next_episode
+
+
+def _render_work_progress(st: Any, message: str) -> None:
+    """Announce progress and scroll once when a work episode begins."""
+
+    episode = _active_work_episode(st.session_state)
+    should_scroll = (
+        st.session_state.get(WORK_SCROLL_COMPLETED_KEY) != episode
+    )
+    if should_scroll:
+        # Mark before rendering so an immediate rerun cannot repeat the scroll.
+        st.session_state[WORK_SCROLL_COMPLETED_KEY] = episode
+    scroll_script = (
+        """
+        <script>
+        (() => {
+          try {
+            const reduceMotion =
+              window.matchMedia &&
+              window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+            window.requestAnimationFrame(() => {
+              try {
+                window.scrollTo({
+                  top: 0,
+                  left: 0,
+                  behavior: reduceMotion ? "auto" : "smooth"
+                });
+              } catch (_error) {
+                // Scrolling is an enhancement; progress remains visible.
+              }
+            });
+          } catch (_error) {
+            // A blocked or unavailable browser API must not affect the app.
+          }
+        })();
+        </script>
+        """
+        if should_scroll
+        else ""
+    )
+    st.html(
+        (
+            '<div role="status" aria-live="polite" aria-atomic="true" '
+            'style="position:absolute;width:1px;height:1px;padding:0;'
+            'margin:-1px;overflow:hidden;clip:rect(0,0,0,0);'
+            'white-space:nowrap;border:0;">'
+            f"{escape_html(message)}</div>{scroll_script}"
+        ),
+        unsafe_allow_javascript=should_scroll,
+    )
 
 
 def money_to_cents(value: str) -> int:
@@ -3178,6 +3255,9 @@ def _initialize_state(st: Any) -> None:
         "catalog_change_notice": None,
         "ui_error_active": False,
         "progress_substep": None,
+        WORK_EPISODE_COUNTER_KEY: 0,
+        WORK_EPISODE_ACTIVE_KEY: None,
+        WORK_SCROLL_COMPLETED_KEY: None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -11906,6 +11986,10 @@ def _render_working(st: Any) -> None:
 
     if not st.session_state["structure_cache_ready"]:
         st.header("Finding the right part of each list")
+        _render_work_progress(
+            st,
+            "Looking at grades, teachers, and document sections",
+        )
         with st.status(
             "Looking at grades, teachers, and document sections",
             expanded=True,
@@ -11926,6 +12010,7 @@ def _render_working(st: Any) -> None:
                 )
                 status.update(label=message)
                 status.write(message)
+                _render_work_progress(st, message)
 
             existing_structures = dict(
                 st.session_state["document_structures"]
@@ -11984,6 +12069,7 @@ def _render_working(st: Any) -> None:
                 label="Document layout identified",
                 state="complete",
             )
+            _render_work_progress(st, "Document layout identified")
 
     structures = st.session_state["document_structures"]
     selections = st.session_state["document_selections"]
@@ -12013,6 +12099,7 @@ def _render_working(st: Any) -> None:
 
     if not st.session_state["extraction_cache_ready"]:
         st.header("Extracting the lists")
+        _render_work_progress(st, "Extracting the lists")
         with st.status("Extracting the lists", expanded=True) as status:
             status.write(
                 "Finding the items, quantities, and details on each list."
@@ -12028,6 +12115,7 @@ def _render_working(st: Any) -> None:
                 message = progress_narration(stage, completed, total)
                 status.update(label=message)
                 status.write(message)
+                _render_work_progress(st, message)
 
             existing_extractions = dict(
                 st.session_state["unmerged_extracted_lists"]
@@ -12093,6 +12181,7 @@ def _render_working(st: Any) -> None:
                 label="The lists are ready",
                 state="complete",
             )
+            _render_work_progress(st, "The lists are ready")
 
     extractions = st.session_state["extracted_lists"]
     extraction_errors = st.session_state["extraction_errors"]
@@ -12151,6 +12240,7 @@ def _render_working(st: Any) -> None:
         return
 
     st.header("Building your shopping plan")
+    _render_work_progress(st, "Combining the lists before shopping")
     with st.status(
         "Combining the lists before shopping",
         expanded=True,
@@ -12169,6 +12259,7 @@ def _render_working(st: Any) -> None:
             if message != last_detail[0]:
                 status.update(label=message)
                 status.write(message)
+                _render_work_progress(st, message)
                 last_detail[0] = message
 
         offers = _active_catalog_offers(
@@ -12192,6 +12283,7 @@ def _render_working(st: Any) -> None:
         except Exception as error:
             st.session_state["ui_error_active"] = True
             status.update(label="Cart build stopped", state="error")
+            _render_work_progress(st, "Cart build stopped")
             st.error(
                 escape_streamlit_dollars(
                     "The cart could not be built. Your setup and lists are "
@@ -12207,6 +12299,7 @@ def _render_working(st: Any) -> None:
             result.extraction_failures
         )
         status.update(label="Your shopping plan is ready", state="complete")
+        _render_work_progress(st, "Your shopping plan is ready")
     _route_pipeline_result(st, result, child_labels)
 
 
@@ -15223,6 +15316,7 @@ def main() -> None:
     _initialize_state(st)
     _apply_custom_css(st)
     screen = st.session_state["screen"]
+    _sync_work_episode_for_screen(st.session_state, screen)
     _render_app_title(st)
     progress_screen = (
         "lists"
