@@ -4693,6 +4693,46 @@ assertion was relaxed.
 No extraction, matching, pricing, optimizer, gate, or business-threshold
 behavior changed.
 
+## 2026-07-30 — Named products and decision controls stay aligned
+
+### Defects
+
+- BR-67 deterministically equated loose graph paper with notebook paper even
+  though the seeded catalog contains only wide-ruled notebook paper.
+- Literal source attributes such as `college-ruled` could be added correctly
+  by deterministic parsing and still force a low-confidence review because
+  every schema repair shared one confidence flag.
+- The compact Personalize action always edited item identity and order
+  quantity, even when the card said the uncertain field was items per package,
+  brand requirements, or other required details.
+- BR-65 compound lines produced every requirement but each card presented its
+  row in isolation, making the companion requirement easy to miss.
+
+### Resolution
+
+- Loose graph paper follows the existing liquid-glue safety pattern: it is
+  recognized by name and shown as unavailable rather than mapped to a
+  different stocked product.
+- BR-11's threshold is unchanged. Literal attributes parsed from the exact
+  source line no longer lower confidence by themselves; wrong identity,
+  quantity, units, and unsupported invented details still do.
+- Personalize derives its primary edit fields from the issue it names.
+  Package-count decisions edit items per package, and order-quantity labels
+  explicitly name items, packages, boxes, or reams.
+- Every review state for a deterministically split compound line receives
+  companion-item context derived from the same retained source identity.
+
+### Verification boundary
+
+The graph-paper and source-attribute tests exercise production extraction
+objects. The package editor is covered by an x86 AppTest that uses the actual
+Personalize render path; Streamlit remains unavailable on ARM64.
+
+### Architecture
+
+No new model call, pricing path, matching rule, optimizer calculation,
+approval condition, or numeric business threshold was added.
+
 ## 2026-07-30 — N-source duplicate-screen audit and Personalize Summary polish
 
 ### N-source audit

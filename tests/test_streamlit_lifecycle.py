@@ -363,6 +363,62 @@ app._render_review(st)
     return test_app
 
 
+def _run_personalize_package_decision_screen() -> AppTest:
+    """Mount the production Personalize path with one missing pack count."""
+
+    test_app = AppTest.from_string(
+        """
+import streamlit as st
+import app
+from agent.review import organize_extractions
+from agent.schema import ExtractionEnvelope, Requirement
+
+st.session_state.setdefault(
+    "intake",
+    {
+        "children": (
+            {
+                "child_id": "child-1",
+                "label": "Kevin",
+                "grade": "Grade 6",
+            },
+        )
+    },
+)
+st.session_state.setdefault(
+    "extracted_lists",
+    {
+        "child-1": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="red-pens",
+                    child_id="child-1",
+                    raw_text="1 Pack of Red Pens",
+                    canonical_item="pens",
+                    quantity=1,
+                    unit_type="pack",
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+    },
+)
+st.session_state.setdefault(
+    "review_items",
+    organize_extractions(dict(st.session_state["extracted_lists"])),
+)
+st.session_state.setdefault("parent_added_review_items", ())
+st.session_state.setdefault("extraction_errors", {})
+st.session_state.setdefault("list_inputs", ())
+st.session_state.setdefault(app.PERSONALIZE_SELECTED_VIEW_KEY, "child-1")
+app._render_review(st)
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
 def _run_composition_merge_screen() -> AppTest:
     """Mount the production duplicate-resolution screen with two variants."""
 
@@ -1202,7 +1258,7 @@ def test_personalize_edit_survives_summary_round_trip_without_button_crash() -> 
         if button.label == "Use all recommendations here"
     )
 
-    _click_label(test_app, "Change item or quantity")
+    _click_label(test_app, "Change this recommendation")
     assert (
         test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY]
         == "child-1"
@@ -1237,3 +1293,25 @@ def test_personalize_edit_survives_summary_round_trip_without_button_crash() -> 
         if button.label == "Use all recommendations here"
     )
     assert reopened_bulk_key != first_bulk_key
+
+
+def test_package_count_decision_edits_items_per_package_not_order_quantity() -> None:
+    """E-02: the production decision card edits the uncertainty it names."""
+
+    test_app = _run_personalize_package_decision_screen()
+    _click_label(test_app, "Change package quantity")
+
+    package_input = next(
+        widget
+        for widget in test_app.number_input
+        if widget.label == "Items per package"
+    )
+    assert package_input.value == 12
+    package_input.set_value(24).run()
+    _assert_no_exception(test_app)
+    _click_label(test_app, "Send selection to cart")
+
+    item = test_app.session_state["review_items"][0]
+    assert item.package_size == 24
+    assert item.required_quantity == 1
+    assert item.unit == "pack"

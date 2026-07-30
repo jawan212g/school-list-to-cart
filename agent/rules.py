@@ -75,7 +75,11 @@ BUDGET_PLAN_CANDIDATE_LIMIT = 50  # Bound deterministic bundle validation work.
 
 CONFIDENCE_FLOOR = Decimal("0.7")  # BR-11: extraction/match review threshold.
 CLEAR_EXTRACTION_CONFIDENCE = Decimal("0.9")  # Parent-facing confidence-band boundary.
-CORRECTED_EXTRACTION_CONFIDENCE = Decimal("0.69")  # BR-11: source-proven extraction repairs route to review.
+CORRECTED_EXTRACTION_CONFIDENCE = Decimal("0.69")
+# BR-11: repairs to identity, quantity, units, or unsupported model details
+# route below the confidence floor. A literal attribute read directly from the
+# source line does not become uncertain merely because deterministic code
+# supplied or normalized it.
 MAXIMUM_MATCH_CONFIDENCE = Decimal("1.0")  # FR-18: exact structured match.
 MINIMUM_MATCH_CONFIDENCE = Decimal("0.0")  # FR-18: missing judgment is blocked.
 
@@ -937,13 +941,13 @@ DETERMINISTIC_ITEM_SYNONYMS = {
     "college ruled paper": "notebook_paper",
     "wide ruled paper": "notebook_paper",
     "loose leaf paper": "notebook_paper",
-    "graph paper": "notebook_paper",
+    "graph paper": "graph_paper",
     "liquid glue": "liquid_glue",
 }
 # BR-67: these source phrases override a missing or conflicting model category.
-# Loose graph paper uses notebook_paper with its graph ruling attribute; the
-# seeded catalog currently has no exact graph-paper offer. Liquid glue is a
-# recognized out-of-catalog item and therefore remains visible as unavailable.
+# Loose graph paper and liquid glue are recognized out-of-catalog items and
+# therefore remain visible as unavailable; neither may be silently equated to
+# a different stocked product.
 
 # BR-72: a recognized brand supplies its implied canonical item only when the
 # source line names no product noun that resolves on its own. A resolvable

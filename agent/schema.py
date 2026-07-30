@@ -79,9 +79,13 @@ def _correct_attribute_fields(
     raw_text: str,
     canonical_item: str,
     attributes: Mapping[str, Any],
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], bool, bool]:
+    """Return source-corrected attributes and whether unsupported data was removed."""
+
     corrected = dict(attributes)
     changed = False
+    unsupported_value_removed = False
+    original_material = attributes.get("material")
     raw_evidence = _evidence_text(raw_text)
 
     if corrected.get("character") == "#2":
@@ -94,6 +98,7 @@ def _correct_attribute_fields(
     ):
         corrected["size"] = None
         changed = True
+        unsupported_value_removed = True
 
     style = _evidence_text(corrected.get("style") or "")
     for evidence, ruling in RULING_VALUES.items():
@@ -221,6 +226,9 @@ def _correct_attribute_fields(
     ):
         corrected["material"] = None
         changed = True
+        unsupported_value_removed = (
+            unsupported_value_removed or original_material is not None
+        )
     if (
         corrected.get("material") == "paper"
         and (
@@ -238,8 +246,11 @@ def _correct_attribute_fields(
     ):
         corrected["material"] = None
         changed = True
+        unsupported_value_removed = (
+            unsupported_value_removed or original_material is not None
+        )
 
-    return corrected, changed
+    return corrected, changed, unsupported_value_removed
 
 
 class RequirementAttributes(BaseModel):
@@ -408,7 +419,7 @@ class Requirement(BaseModel):
             brand_hint or proposed_brand,
         )
         canonical_item = str(normalized.get("canonical_item", ""))
-        corrected = False
+        review_worthy_correction = False
         detected_item = _canonical_item_from_raw(raw_text)
         if (
             detected_item is not None
@@ -417,7 +428,7 @@ class Requirement(BaseModel):
         ):
             canonical_item = detected_item
             normalized["canonical_item"] = detected_item
-            corrected = True
+            review_worthy_correction = True
         attributes = normalized.get("attributes")
         if attributes is None:
             attributes = {}
@@ -438,7 +449,7 @@ class Requirement(BaseModel):
                 and quantity == count
             ):
                 normalized["quantity"] = 1
-                corrected = True
+                review_worthy_correction = True
             individual_units = re.match(
                 r"^\d+\s+(?!box\b|boxes\b|pack\b|pkg\b|set\b|dozen\b)"
                 r"[A-Za-z#]",
@@ -455,15 +466,22 @@ class Requirement(BaseModel):
                     mutable_attributes["count"] = None
                 normalized["attributes"] = mutable_attributes
                 attributes = mutable_attributes
-                corrected = True
+                review_worthy_correction = True
         if isinstance(attributes, Mapping):
             explicit_count = explicit_package_count(raw_text)
             mutable_attributes = dict(attributes)
-            if mutable_attributes.get("count") != explicit_count:
-                corrected = True
+            if (
+                mutable_attributes.get("count") is not None
+                and explicit_count is None
+            ):
+                review_worthy_correction = True
             mutable_attributes["count"] = explicit_count
             attributes = mutable_attributes
-            corrected_attributes, attributes_changed = (
+            (
+                corrected_attributes,
+                _,
+                unsupported_attribute_removed,
+            ) = (
                 _correct_attribute_fields(
                     raw_text,
                     canonical_item,
@@ -471,7 +489,9 @@ class Requirement(BaseModel):
                 )
             )
             normalized["attributes"] = corrected_attributes
-            corrected = corrected or attributes_changed
+            review_worthy_correction = (
+                review_worthy_correction or unsupported_attribute_removed
+            )
             brand_hint = normalized.get("brand_hint")
             other_details = corrected_attributes.get("other_details")
             if (
@@ -485,10 +505,9 @@ class Requirement(BaseModel):
             ):
                 corrected_attributes["other_details"] = None
                 normalized["attributes"] = corrected_attributes
-                corrected = True
         confidence = normalized.get("extraction_confidence")
         if (
-            corrected
+            review_worthy_correction
             and confidence is not None
             and Decimal(str(confidence)) > CORRECTED_EXTRACTION_CONFIDENCE
         ):

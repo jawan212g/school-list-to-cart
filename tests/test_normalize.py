@@ -300,7 +300,7 @@ def test_non_range_quantity_max_is_always_null() -> None:
 
 
 def test_source_evidence_corrects_wrong_category_and_attribute_fields() -> None:
-    """BR-11: source-proven model repairs are explicit low-confidence output."""
+    """BR-11: literal attributes stay clear; unsupported or wrong identity does not."""
 
     composition = Requirement(
         req_id="composition",
@@ -354,7 +354,7 @@ def test_source_evidence_corrects_wrong_category_and_attribute_fields() -> None:
     assert binder.attributes.connector == "three-ring"
     assert binder.attributes.size == "1.5 inch"
     assert binder.attributes.style is None
-    assert binder.extraction_confidence == 0.69
+    assert binder.extraction_confidence == 1.0
 
     assert pencils.attributes.character is None
     assert pencils.attributes.size is None
@@ -363,7 +363,7 @@ def test_source_evidence_corrects_wrong_category_and_attribute_fields() -> None:
 
     assert colored_pencils.attributes.count == 12
     assert colored_pencils.attributes.style is None
-    assert colored_pencils.extraction_confidence == 0.69
+    assert colored_pencils.extraction_confidence == 1.0
 
 
 def test_optional_and_donation_items_stay_out_of_base_budget() -> None:

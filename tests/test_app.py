@@ -3068,6 +3068,74 @@ def test_review_understanding_leads_with_plain_item_and_quantity() -> None:
     )
 
 
+def test_review_understanding_keeps_literal_paper_ruling_visible() -> None:
+    """A stated ruling distinguishes otherwise identical paper decisions."""
+
+    requirement = Requirement(
+        req_id="college-paper",
+        child_id="child-1",
+        raw_text="1 Package of College-Ruled Paper",
+        canonical_item="notebook_paper",
+        quantity=1,
+        unit_type="pack",
+        extraction_confidence=1.0,
+    )
+    item = organize_extractions(
+        {
+            "child-1": ExtractionEnvelope(
+                requirements=(requirement,),
+            )
+        }
+    )[0]
+
+    assert requirement.attributes.ruling == "college-ruled"
+    assert requirement.extraction_confidence == 1.0
+    assert item.issue_codes == ("ambiguous_package_size",)
+    assert app.review_understanding_text(item) == (
+        "1 pack of 150 notebook paper, college-ruled"
+    )
+
+
+def test_split_source_context_names_every_companion_requirement() -> None:
+    """BR-65: each split-line card names the other item read from that line."""
+
+    source = "1 Three-Ring Binder with Dividers"
+    binder = SupplyItemReview(
+        review_id="child-1:binder",
+        req_id="binder",
+        child_id="child-1",
+        item_name="binders",
+        required_quantity=1,
+        source_text=source,
+        source_document="Kevin's supply list",
+        source_page=1,
+        required_attributes={"connector": "three-ring"},
+        confidence=1.0,
+    )
+    dividers = SupplyItemReview(
+        review_id="child-1:dividers",
+        req_id="dividers",
+        child_id="child-1",
+        item_name="dividers",
+        required_quantity=1,
+        source_text=source,
+        source_document="Kevin's supply list",
+        source_page=1,
+        confidence=1.0,
+    )
+
+    context = app.review_split_source_context((binder, dividers))
+
+    assert context[binder.review_id] == (
+        'From the same list line, "1 Three-Ring Binder with Dividers", '
+        "we also read 1 set of dividers.",
+    )
+    assert context[dividers.review_id] == (
+        'From the same list line, "1 Three-Ring Binder with Dividers", '
+        "we also read 1 binder, three-ring.",
+    )
+
+
 def test_review_framing_names_cart_choices_and_uncertainty() -> None:
     """The personalization screen leads with the parent's cart choices."""
 
@@ -3900,9 +3968,11 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
         for event in events
     ) == 7
     assert sum(
-        event == ("button", "Change item or quantity")
+        event == ("button", "Change this recommendation")
         for event in events
-    ) == 7
+    ) == 5
+    assert ("button", "Change package quantity") in events
+    assert ("button", "Change brand details") in events
     assert sum(
         event == ("button", "Send selection to cart")
         for event in events
@@ -3923,9 +3993,8 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     ) in events
     state.set_widget(
         "review-flag-1:decision-action",
-        "Edit the item or quantity",
+        app.PERSONALIZE_EDIT_RECOMMENDATION_ACTION,
     )
-    state.set_widget("review-flag-1:decision-item", "markers")
     state.set_widget("review-flag-1:decision-quantity", 5)
     edited_recorder = DecisionScreenRecorder()
     app._render_review(edited_recorder)
@@ -3935,7 +4004,7 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     ) == 1
     assert (
         "markdown",
-        "**5 markers**",
+        "**5 pencils**",
     ) in edited_recorder.events
     assert (
         "caption",
@@ -3950,7 +4019,7 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     assert state[app.PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] == (
         frozenset({"review-flag-1"})
     )
-    assert tuple(state["review_items"])[0].item_name == "markers"
+    assert tuple(state["review_items"])[0].item_name == "pencils"
     assert tuple(state["review_items"])[0].required_quantity == 5
 
     accepting_default = [

@@ -146,7 +146,6 @@ def test_compound_binder_and_dividers_line_keeps_both_requirements(
             ("notebook_paper",),
             None,
         ),
-        ("1 Pack of Graph Paper", ("notebook_paper",), None),
         (
             "1 Three-Ring Binder with Dividers",
             ("binders", "dividers"),
@@ -187,6 +186,31 @@ def test_production_extraction_restores_deterministically_recognized_items(
         requirement.brand_lock is None
         for requirement in result.requirements
     )
+
+
+def test_production_extraction_keeps_graph_paper_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BR-67: loose graph paper never silently becomes lined notebook paper."""
+
+    monkeypatch.setattr(
+        extraction,
+        "_call_model_with_service_errors",
+        lambda *args, **kwargs: ExtractionEnvelope(requirements=()),
+    )
+
+    result = extraction.extract_document(
+        "1 Pack of Graph Paper",
+        child_id="child-1",
+        mime_type="text/plain",
+        client=object(),  # type: ignore[arg-type]
+    )
+
+    assert result.requirements == ()
+    assert tuple(
+        (item.item_name, item.source_line)
+        for item in result.catalog_unavailable_items
+    ) == (("graph paper", "1 Pack of Graph Paper"),)
 
 
 @pytest.mark.parametrize(
