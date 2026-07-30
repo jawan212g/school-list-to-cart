@@ -3349,3 +3349,70 @@ navigation indicator synchronized with item jumps.
   inspection of spacing and the textarea border remains a deployed-environment
   check. The emitted production CSS and production renderer behavior are
   covered by tests.
+
+## 2026-07-29 - Personalize button state and Summary actions
+
+### Objective
+
+Prevent button-state assignment failures on the Personalize screen and make
+the Summary table actionable without mixing unavailable items into the cart
+rows.
+
+### Work completed
+
+- Audited every Personalize button and moved all durable navigation,
+  confirmation, and jump state to non-widget keys.
+- Gave Summary navigation buttons visit-scoped action keys so an old button
+  identity is never reused after a view transition.
+- Replaced direct writes to student acknowledgement-widget keys with one
+  durable `personalize_confirmed_group_ids` set.
+- Made Summary per-item approvals and student-card acknowledgements update that
+  same durable confirmation set.
+- Moved approve-all directly above the Status heading.
+- Renamed the item table to `The Supply List` and split Quantity from Item.
+- Moved unavailable items into a red-bordered block after decisions and before
+  handled cart rows on both Summary and student views.
+- Strengthened the production-renderer test state to reject button-key
+  assignments both before and after button registration.
+
+### Decisions made
+
+- Conditional questions with no selected branch do not receive an
+  accept-default checkbox because no safe default exists; their item link
+  continues to open the actual choice.
+- Existing acknowledgement values under legacy checkbox keys are read once
+  into the durable confirmation set for session continuity.
+- The checked-in pre-change source did not assign the reported Summary
+  item-button key. The new visit-scoped key avoids reuse of any stale deployed
+  key while preserving the separate durable jump state.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused Personalize suite:
+  `py -3.12-arm64 -m pytest -q tests/test_app.py tests/test_review.py -x`
+  -> 129 passed in 1.45 seconds.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 417 passed, 1 skipped in
+  3.32 seconds.
+- The production `_render_review` path verified Summary navigation buttons,
+  per-item confirmation, count updates, red unavailable-block ordering, and
+  student-card confirmation with button keys treated as read-only.
+
+### Problems or limitations
+
+- The current source did not reproduce a programmatic write to the reported
+  item-button key, so the exact deployed origin could not be proven locally.
+- Streamlit is unavailable on this Windows ARM64 machine. The strict test
+  double models read-only button keys but not Streamlit's full widget cleanup,
+  frontend identity reconciliation, or automatic callback/rerun timing.
+
+### Recommended next step
+
+Deploy the Personalize-only change and confirm that Summary item jumps,
+per-item approvals, and both unavailable blocks render correctly in the hosted
+Streamlit runtime.

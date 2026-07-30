@@ -2970,13 +2970,20 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         ),
     )
     class WidgetAwareState(dict[str, object]):
-        """Reject application writes to keys owned by rendered widgets."""
+        """Enforce Streamlit's widget and stricter button state rules."""
 
         def __init__(self, values: dict[str, object]) -> None:
             super().__init__(values)
             self.widget_keys: set[str] = set()
+            self.button_keys: set[str] = set()
+            self.application_assignments: set[str] = set()
 
         def __setitem__(self, key: str, value: object) -> None:
+            self.application_assignments.add(key)
+            if key in self.button_keys:
+                raise AssertionError(
+                    f"Application assigned button-owned key {key}"
+                )
             if key in self.widget_keys:
                 raise AssertionError(
                     f"Application assigned widget-owned key {key}"
@@ -2985,6 +2992,32 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
 
         def set_widget(self, key: str, value: object) -> None:
             dict.__setitem__(self, key, value)
+
+        def register_button(self, key: str) -> None:
+            if key in self.application_assignments:
+                raise AssertionError(
+                    f"Button key was assigned before render: {key}"
+                )
+            self.button_keys.add(key)
+
+        def register_widget(self, key: str) -> None:
+            self.widget_keys.add(key)
+
+    assigned_before_button = WidgetAwareState({})
+    assigned_before_button["future-button"] = False
+    with pytest.raises(
+        AssertionError,
+        match="assigned before render",
+    ):
+        assigned_before_button.register_button("future-button")
+
+    assigned_after_button = WidgetAwareState({})
+    assigned_after_button.register_button("rendered-button")
+    with pytest.raises(
+        AssertionError,
+        match="button-owned",
+    ):
+        assigned_after_button["rendered-button"] = False
 
     state = WidgetAwareState({
         "intake": {
@@ -3023,8 +3056,13 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
             self.button_callbacks: dict[
                 str, tuple[object, tuple[object, ...]]
             ] = {}
+            self.checkbox_callbacks: dict[
+                str, tuple[str, object, tuple[object, ...]]
+            ] = {}
             self.radio_label_visibility: str | None = None
             self.column_specs: list[object] = []
+            self.container_keys: list[str] = []
+            self.events: list[tuple[str, str]] = []
             self.components = SimpleNamespace(
                 v1=SimpleNamespace(html=lambda *args, **kwargs: None)
             )
@@ -3046,7 +3084,10 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
             return tuple(self for _ in range(count))
 
         def container(self, **kwargs: object) -> "ReviewScreenRecorder":
-            del kwargs
+            key = kwargs.get("key")
+            if isinstance(key, str):
+                self.container_keys.append(key)
+                self.events.append(("container", key))
             return self
 
         def expander(
@@ -3069,6 +3110,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         def markdown(self, value: object, **kwargs: object) -> None:
             del kwargs
             self.messages.append(str(value))
+            self.events.append(("markdown", str(value)))
 
         def warning(self, value: object) -> None:
             self.messages.append(str(value))
@@ -3081,6 +3123,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
 
         def write(self, value: object) -> None:
             self.writes.append(str(value))
+            self.events.append(("write", str(value)))
 
         def radio(
             self,
@@ -3107,7 +3150,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
                     key,
                     options[selected_index],
                 )
-            self.session_state.widget_keys.add(key)
+            self.session_state.register_widget(key)
             self.radio_key = key
             self.radio_selected = str(self.session_state[key])
             if on_change is not None:
@@ -3122,11 +3165,37 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
             args: tuple[object, ...] = (),
             **kwargs: object,
         ) -> bool:
-            del kwargs
+            key = kwargs.get("key")
+            if isinstance(key, str):
+                self.session_state.register_button(key)
             self.buttons.append(label)
+            self.events.append(("button", label))
             if on_click is not None:
                 self.button_callbacks[label] = (on_click, args)
             return False
+
+        def checkbox(
+            self,
+            label: str,
+            *,
+            key: str,
+            value: bool = False,
+            on_change: object | None = None,
+            args: tuple[object, ...] = (),
+            **kwargs: object,
+        ) -> bool:
+            del kwargs
+            if key not in self.session_state:
+                self.session_state.set_widget(key, value)
+            self.session_state.register_widget(key)
+            if on_change is not None:
+                self.checkbox_callbacks[label] = (
+                    key,
+                    on_change,
+                    args,
+                )
+            self.events.append(("checkbox", label))
+            return bool(self.session_state[key])
 
         def rerun(self) -> None:
             raise AssertionError("Navigation callbacks do not request reruns")
@@ -3143,6 +3212,11 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
 
         def click(self, label: str) -> None:
             callback, args = self.button_callbacks[label]
+            callback(*args)  # type: ignore[operator]
+
+        def check(self, label: str) -> None:
+            key, callback, args = self.checkbox_callbacks[label]
+            self.session_state.set_widget(key, True)
             callback(*args)  # type: ignore[operator]
 
     monkeypatch.setattr(
@@ -3186,21 +3260,41 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     assert "1 decision remains." in summary.messages
     assert summary.buttons[:5] == [
         "Approve all remaining defaults",
-        "1 pack of 150 notebook paper",
-        "12 pencils",
-        "1 graphing calculator",
-        "0 backpacks",
+        "Notebook paper",
+        "graphing calculator",
+        "Pencils",
+        "Backpack",
     ]
+    assert "**The Supply List**" in summary.messages
+    assert "**Quantity**" in summary.messages
+    assert "**Item**" in summary.messages
     assert "Action needed · Choose the package size" in summary.writes
     assert "Included in your cart" in summary.writes
     assert "Left out of your cart" in summary.writes
-    assert (
-        "Stores do not carry this · buy it elsewhere"
-        in summary.writes
+    assert "Buy this item elsewhere" in summary.writes
+    assert ["2", "1", "1", "1"] == [
+        value
+        for value in summary.writes
+        if value in {"0", "1", "2"}
+    ][-4:]
+    assert [0.8, 3.2, 2.2] in summary.column_specs
+    assert [1.15, 0.8, 2.45, 2.2] not in summary.column_specs
+    assert "personalize-unavailable-summary" in summary.container_keys
+    assert any(
+        "#b42318" in message
+        and "personalize-unavailable-summary" in message
+        for message in summary.messages
     )
-    assert summary.writes[-4:] == ["2", "1", "1", "1"]
-    assert [3.35, 2.65] in summary.column_specs
-    assert [1.25, 2.65, 2.1] not in summary.column_specs
+    assert summary.events.index(
+        ("button", "Approve all remaining defaults")
+    ) < summary.events.index(("markdown", "**Status**"))
+    assert summary.events.index(
+        ("write", "Action needed · Choose the package size")
+    ) < summary.events.index(
+        ("container", "personalize-unavailable-summary")
+    ) < summary.events.index(
+        ("write", "Included in your cart")
+    )
 
     summary.select_view("child-1")
     student = ReviewScreenRecorder()
@@ -3233,6 +3327,15 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         for key in state.widget_keys
     )
     assert "personalize_active_tab" not in state
+
+    final_summary.check("Accept this default")
+    assert state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] == frozenset(
+        {"review-flag-1"}
+    )
+    approved_summary = ReviewScreenRecorder()
+    app._render_review(approved_summary)
+    assert "Nothing left to decide." in approved_summary.messages
+    assert "Accept this default" not in approved_summary.checkbox_callbacks
 
 
 def test_personalize_student_cards_render_each_decision_before_acknowledgement(
@@ -3333,8 +3436,15 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
         def __init__(self, values: dict[str, object]) -> None:
             super().__init__(values)
             self.widget_keys: set[str] = set()
+            self.button_keys: set[str] = set()
+            self.application_assignments: set[str] = set()
 
         def __setitem__(self, key: str, value: object) -> None:
+            self.application_assignments.add(key)
+            if key in self.button_keys:
+                raise AssertionError(
+                    f"Application assigned button-owned key {key}"
+                )
             if key in self.widget_keys:
                 raise AssertionError(
                     f"Application assigned widget-owned key {key}"
@@ -3343,6 +3453,13 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
 
         def set_widget(self, key: str, value: object) -> None:
             dict.__setitem__(self, key, value)
+
+        def register_button(self, key: str) -> None:
+            if key in self.application_assignments:
+                raise AssertionError(
+                    f"Button key was assigned before render: {key}"
+                )
+            self.button_keys.add(key)
 
     state = WidgetAwareState({
         "intake": {
@@ -3373,6 +3490,10 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
             self.session_state = state
             self.events: list[tuple[str, str]] = []
             self.radio_options: dict[str, tuple[str, ...]] = {}
+            self.checkbox_callbacks: list[
+                tuple[str, str, object, tuple[object, ...]]
+            ] = []
+            self.container_keys: list[str] = []
             self.components = SimpleNamespace(
                 v1=SimpleNamespace(html=lambda *args, **kwargs: None)
             )
@@ -3393,7 +3514,9 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
             return tuple(self for _ in range(count))
 
         def container(self, **kwargs: object) -> "DecisionScreenRecorder":
-            del kwargs
+            key = kwargs.get("key")
+            if isinstance(key, str):
+                self.container_keys.append(key)
             return self
 
         def expander(
@@ -3457,6 +3580,8 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
             *,
             key: str,
             value: bool = False,
+            on_change: object | None = None,
+            args: tuple[object, ...] = (),
             **kwargs: object,
         ) -> bool:
             del kwargs
@@ -3464,6 +3589,10 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
                 self.session_state.set_widget(key, value)
             self.session_state.widget_keys.add(key)
             self.events.append(("checkbox", label))
+            if on_change is not None:
+                self.checkbox_callbacks.append(
+                    (label, key, on_change, args)
+                )
             return bool(self.session_state[key])
 
         def number_input(
@@ -3486,7 +3615,7 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
             label: str,
             *,
             options: tuple[str, ...],
-            index: int,
+            index: int = 0,
             key: str,
             **kwargs: object,
         ) -> str:
@@ -3502,7 +3631,7 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
             label: str,
             *,
             key: str,
-            value: str,
+            value: str = "",
             **kwargs: object,
         ) -> str:
             del kwargs
@@ -3513,7 +3642,9 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
             return str(self.session_state[key])
 
         def button(self, label: str, **kwargs: object) -> bool:
-            del kwargs
+            key = kwargs.get("key")
+            if isinstance(key, str):
+                self.session_state.register_button(key)
             self.events.append(("button", label))
             return False
 
@@ -3535,12 +3666,6 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
         "_personalize_source_summary",
         lambda *args, **kwargs: None,
     )
-    monkeypatch.setattr(
-        app,
-        "_new_review_item_from_controls",
-        lambda *args, **kwargs: None,
-    )
-
     recorder = DecisionScreenRecorder()
     app._render_review(recorder)
     events = recorder.events
@@ -3580,6 +3705,19 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
         event == ("checkbox", "I have checked this choice")
         for event in events
     ) == 7
+    student_confirmation = next(
+        record
+        for record in recorder.checkbox_callbacks
+        if record[0] == "I have checked this choice"
+    )
+    _, confirmation_key, confirmation_callback, confirmation_args = (
+        student_confirmation
+    )
+    state.set_widget(confirmation_key, True)
+    confirmation_callback(*confirmation_args)  # type: ignore[operator]
+    assert state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] == frozenset(
+        {"review-flag-1"}
+    )
     for control in (
         ("number_input", "Enter the quantity"),
         ("radio", "Choose what to do with this reading"),
@@ -3605,6 +3743,10 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     )
     cart_position = events.index(("markdown", "**In your cart**"))
     assert unavailable_position < cart_position
+    assert "personalize-unavailable-student-child-1" in (
+        recorder.container_keys
+    )
+    assert "add:child-1:add" in state.button_keys
 
 
 def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
@@ -3754,11 +3896,14 @@ def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
     assert pdf_path.name in recorder.popovers[1]
     assert recorder.text_sources == [typed_text]
     assert len(recorder.pdf_pages) == 1
-    assert [1.25, 2.65, 2.1] in recorder.column_specs
+    assert [1.15, 0.8, 2.45, 2.2] in recorder.column_specs
+    assert "**Quantity**" in recorder.messages
+    assert "**Item**" in recorder.messages
+    assert "**Quantity and item**" not in recorder.messages
     assert recorder.messages.index("**Source documents**") < (
-        recorder.messages.index("**Every item**")
+        recorder.messages.index("**The Supply List**")
     )
-    assert recorder.messages.index("**Every item**") < (
+    assert recorder.messages.index("**The Supply List**") < (
         recorder.messages.index("**By student**")
     )
 

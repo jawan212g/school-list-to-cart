@@ -7,7 +7,7 @@ import os
 import re
 import unicodedata
 from io import BytesIO
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -191,6 +191,7 @@ NO_SET_BUDGET_LABEL = "No set budget"
 PERSONALIZE_SELECTED_VIEW_KEY = "personalize_selected_view"
 PERSONALIZE_VIEW_REVISION_KEY = "personalize_view_revision"
 PERSONALIZE_VIEW_WIDGET_KEY = "personalize_view_control"
+PERSONALIZE_CONFIRMED_GROUP_IDS_KEY = "personalize_confirmed_group_ids"
 DEFAULT_TAX_STATE_OPTION = "Choose a state — use the 7.0% default"
 DEVELOPMENT_DEBUG_ENV = "SCHOOL_CART_DEBUG"
 DEBUG_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -6770,6 +6771,61 @@ def review_understanding_text(item: SupplyItemReview) -> str:
     return ", ".join((text, *details))
 
 
+def _review_summary_quantity_text(item: SupplyItemReview) -> str:
+    """Show quantity separately from the item in BR-52's Summary table."""
+
+    quantity = item.required_quantity
+    if quantity is None:
+        return "Not stated"
+    if item.unit == "each":
+        return str(quantity)
+    container = {
+        "pack": "pack",
+        "box": "box",
+        "ream": "ream",
+    }.get(item.unit, item.unit)
+    if quantity != 1:
+        container += "es" if container.endswith("x") else "s"
+    package_text = (
+        f" ({item.package_size} each)"
+        if item.package_size is not None
+        else ""
+    )
+    return f"{quantity} {container}{package_text}"
+
+
+def _review_summary_item_text(item: SupplyItemReview) -> str:
+    """Show the interpreted item without repeating its quantity."""
+
+    display_name = _item_display_name(item.item_name)
+    text = f"{item.brand} {display_name}" if item.brand else display_name
+    details: list[str] = []
+    if item.brand_required:
+        details.append("brand required")
+    if item.size:
+        details.append(item.size)
+    if item.color:
+        details.append(" or ".join(item.color))
+    if item.supply_scope == "individual":
+        details.append("individual supply")
+    elif item.supply_scope == "shared":
+        details.append("shared supply")
+    if item.optional:
+        details.append("optional")
+    if item.condition:
+        details.append(f"only if {item.condition}")
+    return ", ".join((text, *details))
+
+
+def _split_summary_quantity_and_item(text: str) -> tuple[str, str]:
+    """Split a retained unavailable description for Summary display."""
+
+    match = re.match(r"^\s*(\d+)\s+(.+?)\s*$", text)
+    if match is None:
+        return "—", text
+    return match.group(1), match.group(2)
+
+
 def _parent_attribute_value(field_name: str, value: object) -> str:
     """Translate BR-50 schema values into product language."""
 
@@ -7132,6 +7188,63 @@ def _resolve_personalize_view(
     return str(selected)
 
 
+def _confirmed_personalize_group_ids(
+    state: MutableMapping[str, Any],
+    group_ids: Iterable[str],
+) -> frozenset[str]:
+    """Return BR-52's one durable set of accepted review defaults."""
+
+    known_group_ids = frozenset(group_ids)
+    confirmed = {
+        str(group_id)
+        for group_id in state.get(
+            PERSONALIZE_CONFIRMED_GROUP_IDS_KEY,
+            (),
+        )
+        if str(group_id) in known_group_ids
+    }
+    # Preserve acknowledgements made before the durable set was introduced.
+    confirmed.update(
+        group_id
+        for group_id in known_group_ids
+        if bool(state.get(f"{group_id}:confirmed", False))
+    )
+    resolved = frozenset(confirmed)
+    if state.get(PERSONALIZE_CONFIRMED_GROUP_IDS_KEY) != resolved:
+        state[PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] = resolved
+    return resolved
+
+
+def _set_personalize_group_confirmation(
+    state: MutableMapping[str, Any],
+    group_id: str,
+    widget_key: str,
+) -> None:
+    """Copy one checkbox choice into BR-52's non-widget decision state."""
+
+    confirmed = set(
+        state.get(PERSONALIZE_CONFIRMED_GROUP_IDS_KEY, ())
+    )
+    if bool(state.get(widget_key, False)):
+        confirmed.add(group_id)
+    else:
+        confirmed.discard(group_id)
+    state[PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] = frozenset(confirmed)
+
+
+def _approve_personalize_groups(
+    state: MutableMapping[str, Any],
+    group_ids: Sequence[str],
+) -> None:
+    """Accept review defaults without assigning any widget-owned key."""
+
+    confirmed = set(
+        state.get(PERSONALIZE_CONFIRMED_GROUP_IDS_KEY, ())
+    )
+    confirmed.update(group_ids)
+    state[PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] = frozenset(confirmed)
+
+
 def _personalize_total_decision_count(
     sections: Sequence[PersonalizeStudentSection],
 ) -> int:
@@ -7183,6 +7296,7 @@ def _render_personalize_summary(
     item_by_id: Mapping[str, SupplyItemReview],
     *,
     unavailable_by_child: Mapping[str, Mapping[str, str]] | None = None,
+    view_revision: int,
 ) -> None:
     """Render BR-52's complete production Personalize summary."""
 
@@ -7200,14 +7314,13 @@ def _render_personalize_summary(
         for section in sections
         for group in section.decision_groups
     }
-    if st.button(
-        "Approve all remaining defaults",
-        key="approve-all-review-defaults",
-        disabled=not bool(default_groups),
-    ):
-        for group_id in default_groups:
-            st.session_state[f"{group_id}:confirmed"] = True
-        st.rerun()
+    confirmed_group_ids = frozenset(
+        str(group_id)
+        for group_id in st.session_state.get(
+            PERSONALIZE_CONFIRMED_GROUP_IDS_KEY,
+            (),
+        )
+    )
 
     st.markdown("**Source documents**")
     list_inputs = tuple(st.session_state.get("list_inputs", ()))
@@ -7235,24 +7348,33 @@ def _render_personalize_summary(
             ),
         )
 
-    st.markdown("**Every item**")
+    st.markdown("**The Supply List**")
     show_student_column = len(sections) > 1
     item_column_widths = (
-        [1.25, 2.65, 2.1]
+        [1.15, 0.8, 2.45, 2.2]
         if show_student_column
-        else [3.35, 2.65]
+        else [0.8, 3.2, 2.2]
     )
     item_header = st.columns(item_column_widths)
     item_headers = (
-        ("Student", "Quantity and item", "Status")
+        ("Student", "Quantity", "Item", "Status")
         if show_student_column
-        else ("Quantity and item", "Status")
+        else ("Quantity", "Item", "Status")
     )
-    for column, label in zip(
-        item_header,
-        item_headers,
-        strict=True,
+    status_column_index = len(item_headers) - 1
+    item_header[status_column_index].button(
+        "Approve all remaining defaults",
+        key=f"personalize-action:approve-all:{view_revision}",
+        disabled=not bool(default_groups),
+        on_click=_approve_personalize_groups,
+        args=(st.session_state, tuple(default_groups)),
+        use_container_width=True,
+    )
+    for index, (column, label) in enumerate(
+        zip(item_header, item_headers, strict=True)
     ):
+        if index != status_column_index:
+            column.write("")
         column.markdown(f"**{label}**")
 
     unavailable_lookup = unavailable_by_child or {}
@@ -7260,8 +7382,17 @@ def _render_personalize_summary(
         section.child_id: index
         for index, section in enumerate(sections)
     }
+    decision_group_by_row = {
+        row_id: group.group_id
+        for section in sections
+        for group in section.decision_groups
+        for row_id in group.row_ids
+    }
     summary_rows: list[
-        tuple[int, int, str, str, str, str, str]
+        tuple[int, int, str, str, str, str, str, str, str | None]
+    ] = []
+    unavailable_rows: list[
+        tuple[int, str, str, str, str, str]
     ] = []
     for section in sections:
         pending_ids = frozenset(section.pending_item_ids)
@@ -7288,28 +7419,30 @@ def _render_personalize_summary(
                     section.child_label,
                     section.child_id,
                     item_id,
-                    review_understanding_text(item),
+                    _review_summary_quantity_text(item),
+                    _review_summary_item_text(item),
                     status,
+                    decision_group_by_row.get(item_id),
                 )
             )
         for item_id in section.unstocked_item_ids:
             item = item_by_id.get(item_id)
             unavailable_text = unavailable_items.get(item_id)
-            status = "Stores do not carry this · buy it elsewhere"
-            item_text = (
-                review_understanding_text(item)
-                if item is not None
-                else str(unavailable_text)
-            )
-            summary_rows.append(
+            if item is not None:
+                quantity_text = _review_summary_quantity_text(item)
+                item_text = _review_summary_item_text(item)
+            else:
+                quantity_text, item_text = _split_summary_quantity_and_item(
+                    str(unavailable_text)
+                )
+            unavailable_rows.append(
                 (
-                    1,
                     student_order[section.child_id],
                     section.child_label,
                     section.child_id,
                     item_id,
+                    quantity_text,
                     item_text,
-                    status,
                 )
             )
         for item_id in section.excluded_item_ids:
@@ -7323,40 +7456,134 @@ def _render_personalize_summary(
                     section.child_label,
                     section.child_id,
                     item_id,
-                    review_understanding_text(item),
+                    _review_summary_quantity_text(item),
+                    _review_summary_item_text(item),
                     "Left out of your cart",
+                    None,
                 )
             )
 
     summary_rows.sort(key=lambda row: (row[0], row[1]))
-    for (
-        _,
-        _,
-        child_label,
-        child_id,
-        item_id,
-        item_text,
-        status,
-    ) in summary_rows:
-        columns = st.columns(item_column_widths)
-        item_column_index = 1 if show_student_column else 0
-        status_column_index = 2 if show_student_column else 1
-        if show_student_column:
-            columns[0].write(escape_streamlit_dollars(child_label))
-        columns[item_column_index].button(
-            escape_streamlit_dollars(item_text),
-            key=f"personalize-summary-item:{child_id}:{item_id}",
-            on_click=_select_personalize_tab,
-            args=(
-                st.session_state,
+    decision_rows = tuple(row for row in summary_rows if row[0] == 0)
+    remaining_rows = tuple(row for row in summary_rows if row[0] != 0)
+
+    def render_rows(
+        rows: Sequence[
+            tuple[int, int, str, str, str, str, str, str, str | None]
+        ],
+    ) -> None:
+        for (
+            _,
+            _,
+            child_label,
+            child_id,
+            item_id,
+            quantity_text,
+            item_text,
+            status,
+            group_id,
+        ) in rows:
+            columns = st.columns(item_column_widths)
+            quantity_column_index = 1 if show_student_column else 0
+            item_column_index = 2 if show_student_column else 1
+            row_status_column_index = 3 if show_student_column else 2
+            if show_student_column:
+                columns[0].write(
+                    escape_streamlit_dollars(child_label)
+                )
+            columns[quantity_column_index].write(
+                escape_streamlit_dollars(quantity_text)
+            )
+            columns[item_column_index].button(
+                escape_streamlit_dollars(item_text),
+                key=(
+                    "personalize-action:item-jump:"
+                    f"{view_revision}:{child_id}:{item_id}"
+                ),
+                on_click=_select_personalize_tab,
+                args=(
+                    st.session_state,
+                    child_id,
+                    _personalize_item_anchor(item_id),
+                ),
+                use_container_width=True,
+            )
+            columns[row_status_column_index].write(
+                escape_streamlit_dollars(status)
+            )
+            if group_id is not None:
+                checkbox_key = (
+                    "personalize-confirm-summary:"
+                    f"{group_id}:{child_id}:{item_id}"
+                )
+                columns[row_status_column_index].checkbox(
+                    "Accept this default",
+                    value=group_id in confirmed_group_ids,
+                    key=checkbox_key,
+                    on_change=_set_personalize_group_confirmation,
+                    args=(
+                        st.session_state,
+                        group_id,
+                        checkbox_key,
+                    ),
+                )
+
+    render_rows(decision_rows)
+
+    if unavailable_rows:
+        unavailable_rows.sort(key=lambda row: row[0])
+        with st.container(
+            border=True,
+            key="personalize-unavailable-summary",
+        ):
+            st.markdown(
+                f"**Items to buy elsewhere ({len(unavailable_rows)})**"
+            )
+            st.write(
+                "These simulated stores do not carry the following items."
+            )
+            for (
+                _,
+                child_label,
                 child_id,
-                _personalize_item_anchor(item_id),
-            ),
-            use_container_width=True,
-        )
-        columns[status_column_index].write(
-            escape_streamlit_dollars(status)
-        )
+                item_id,
+                quantity_text,
+                item_text,
+            ) in unavailable_rows:
+                columns = st.columns(item_column_widths)
+                quantity_column_index = (
+                    1 if show_student_column else 0
+                )
+                item_column_index = 2 if show_student_column else 1
+                row_status_column_index = (
+                    3 if show_student_column else 2
+                )
+                if show_student_column:
+                    columns[0].write(
+                        escape_streamlit_dollars(child_label)
+                    )
+                columns[quantity_column_index].write(
+                    escape_streamlit_dollars(quantity_text)
+                )
+                columns[item_column_index].button(
+                    escape_streamlit_dollars(item_text),
+                    key=(
+                        "personalize-action:unavailable-jump:"
+                        f"{view_revision}:{child_id}:{item_id}"
+                    ),
+                    on_click=_select_personalize_tab,
+                    args=(
+                        st.session_state,
+                        child_id,
+                        _personalize_item_anchor(item_id),
+                    ),
+                    use_container_width=True,
+                )
+                columns[row_status_column_index].write(
+                    "Buy this item elsewhere"
+                )
+
+    render_rows(remaining_rows)
 
     st.markdown("**By student**")
     header_columns = st.columns([2.2, 0.85, 1.15, 1.05, 0.8, 1.75])
@@ -7370,7 +7597,10 @@ def _render_personalize_summary(
         columns = st.columns([2.2, 0.85, 1.15, 1.05, 0.8, 1.75])
         columns[0].button(
             section.child_label,
-            key=f"personalize-summary-student:{section.child_id}",
+            key=(
+                "personalize-action:student-jump:"
+                f"{view_revision}:{section.child_id}"
+            ),
             on_click=_select_personalize_tab,
             args=(st.session_state, section.child_id),
         )
@@ -7378,16 +7608,23 @@ def _render_personalize_summary(
         columns[2].write(str(section.decision_count))
         columns[3].write(str(section.unstocked_count))
         columns[4].write(str(section.excluded_count))
-        approved = columns[5].button(
+        columns[5].button(
             "Approve defaults",
-            key=f"approve-defaults:{section.child_id}",
+            key=(
+                "personalize-action:approve-student:"
+                f"{view_revision}:{section.child_id}"
+            ),
             use_container_width=True,
             disabled=not bool(section.decision_groups),
+            on_click=_approve_personalize_groups,
+            args=(
+                st.session_state,
+                tuple(
+                    group.group_id
+                    for group in section.decision_groups
+                ),
+            ),
         )
-        if approved:
-            for group in section.decision_groups:
-                st.session_state[f"{group.group_id}:confirmed"] = True
-            st.rerun()
 
 
 def _review_control_update(
@@ -8218,13 +8455,25 @@ def _render_compact_review_row(
             )
         )
         if flag_messages:
+            confirmation_key = (
+                f"personalize-confirm-student:{key_prefix}"
+            )
             confirmed = st.checkbox(
                 "I have checked this choice",
-                value=all(
-                    member.review_status == "confirmed"
-                    for member in members
+                value=(
+                    key_prefix
+                    in st.session_state.get(
+                        PERSONALIZE_CONFIRMED_GROUP_IDS_KEY,
+                        (),
+                    )
                 ),
-                key=f"{key_prefix}:confirmed",
+                key=confirmation_key,
+                on_change=_set_personalize_group_confirmation,
+                args=(
+                    st.session_state,
+                    key_prefix,
+                    confirmation_key,
+                ),
             )
         else:
             confirmed = True
@@ -10212,13 +10461,11 @@ def _render_review(st: Any) -> None:
     )
     item_by_id = {item.review_id: item for item in items}
     flag_groups = review_flag_groups(items)
-    acknowledged_group_ids = tuple(
-        group.group_id
-        for group in flag_groups
-        if bool(
-            st.session_state.get(f"{group.group_id}:confirmed", False)
-        )
+    confirmed_group_ids = _confirmed_personalize_group_ids(
+        st.session_state,
+        (group.group_id for group in flag_groups),
     )
+    acknowledged_group_ids = tuple(confirmed_group_ids)
     unhandled_groups = unhandled_review_flag_groups(
         items,
         flag_groups,
@@ -10281,6 +10528,19 @@ def _render_review(st: Any) -> None:
     }
 
     st.header("Personalize what goes in your cart")
+    st.markdown(
+        """
+        <style>
+        .st-key-personalize-unavailable-summary,
+        div[class*="st-key-personalize-unavailable-student-"] {
+            border: 2px solid #b42318 !important;
+            border-radius: 0.75rem !important;
+            background: #fff8f7 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     for child_id, error in st.session_state["extraction_errors"].items():
         st.warning(
             escape_streamlit_dollars(
@@ -10362,13 +10622,7 @@ def _render_review(st: Any) -> None:
         condition_answers.update(
             conditional_answers_for_selection(group, selected_label)
         )
-    confirmed_flag_group_ids = [
-        group.group_id
-        for group in flag_groups
-        if bool(
-            st.session_state.get(f"{group.group_id}:confirmed", False)
-        )
-    ]
+    confirmed_flag_group_ids = list(confirmed_group_ids)
     edited_by_id: dict[str, SupplyItemReview] = {}
     requested_scroll_target = st.session_state.get(
         "personalize_scroll_target"
@@ -10381,6 +10635,9 @@ def _render_review(st: Any) -> None:
                 student_sections,
                 item_by_id,
                 unavailable_by_child=unavailable_by_child,
+                view_revision=int(
+                    st.session_state[PERSONALIZE_VIEW_REVISION_KEY]
+                ),
             )
         else:
             student_section = student_section_by_child[str(active_tab)]
@@ -10474,21 +10731,42 @@ def _render_review(st: Any) -> None:
                 st.success("No decisions needed.")
 
             if envelope is not None:
-                _render_personalize_unavailable(
-                    st,
-                    child_id,
-                    envelope,
-                    tuple(
-                        item
-                        for item in all_unstocked_items
-                        if item.child_id == child_id
-                    ),
-                    scroll_target=(
-                        str(requested_scroll_target)
-                        if isinstance(requested_scroll_target, str)
-                        else None
-                    ),
+                child_unstocked_items = tuple(
+                    item
+                    for item in all_unstocked_items
+                    if item.child_id == child_id
                 )
+                child_unavailable_count = (
+                    len(child_unstocked_items)
+                    + len(unavailable_by_child.get(child_id, {}))
+                )
+                unavailable_key = (
+                    "personalize-unavailable-student-"
+                    + re.sub(
+                        r"[^a-z0-9]+",
+                        "-",
+                        child_id.casefold(),
+                    ).strip("-")
+                )
+                if child_unavailable_count:
+                    with st.container(
+                        border=True,
+                        key=unavailable_key,
+                    ):
+                        _render_personalize_unavailable(
+                            st,
+                            child_id,
+                            envelope,
+                            child_unstocked_items,
+                            scroll_target=(
+                                str(requested_scroll_target)
+                                if isinstance(
+                                    requested_scroll_target,
+                                    str,
+                                )
+                                else None
+                            ),
+                        )
 
             st.markdown("**In your cart**")
             settled_items = tuple(
