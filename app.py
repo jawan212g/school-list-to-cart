@@ -132,6 +132,7 @@ from agent.rules import (
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
     SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX,
     SYSTEM_DECISION_MERGED_QUANTITY_PREFIX,
+    SYSTEM_DECISION_PARENT_CHOSE_SCHOOL_PROVIDED_ITEM,
     SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX,
     SYSTEM_DECISION_RECONCILED_BRAND,
     SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
@@ -7005,6 +7006,14 @@ def review_system_decision_messages(
             "You marked this item as already owned, so the cart quantity is 0."
         )
     if (
+        SYSTEM_DECISION_PARENT_CHOSE_SCHOOL_PROVIDED_ITEM
+        in item.system_decisions
+    ):
+        messages.append(
+            "You chose to add this item even though the list says the school "
+            "will provide it."
+        )
+    if (
         SYSTEM_DECISION_CONSOLIDATED_SOURCES in item.system_decisions
         and len(decision_sources) > 1
         and not item.already_owned
@@ -7218,13 +7227,16 @@ def build_personalize_student_sections(
             item.review_id
             for item in child_items
             if (
-                item.is_purchasable
-                and (
-                    item.provided_by_school
-                    or item.review_status == "deleted"
-                    or item.already_owned
-                    or item.required_quantity == EXCLUDED_REQUIREMENT_QUANTITY
-                    or item.condition_applies is False
+                item.provided_by_school
+                or (
+                    item.is_purchasable
+                    and (
+                        item.review_status == "deleted"
+                        or item.already_owned
+                        or item.required_quantity
+                        == EXCLUDED_REQUIREMENT_QUANTITY
+                        or item.condition_applies is False
+                    )
                 )
                 and item.review_id not in optional_ids
             )
@@ -7894,6 +7906,56 @@ def _replace_review_items_in_state(
         replacements.get(item.review_id, item)
         for item in state.get("parent_added_review_items", ())
     )
+
+
+def _add_school_provided_item_to_cart(
+    state: MutableMapping[str, Any],
+    item: SupplyItemReview,
+) -> None:
+    """Record a parent's explicit override of school-provided source evidence."""
+
+    current_items = {
+        candidate.review_id: candidate
+        for candidate in (
+            *tuple(state.get("review_items", ())),
+            *tuple(state.get("parent_added_review_items", ())),
+        )
+    }
+    current = current_items.get(item.review_id, item)
+    decisions = tuple(
+        dict.fromkeys(
+            (
+                *current.system_decisions,
+                SYSTEM_DECISION_PARENT_CHOSE_SCHOOL_PROVIDED_ITEM,
+            )
+        )
+    )
+    updated = current.model_copy(
+        update={
+            "provided_by_school": False,
+            "is_purchasable": True,
+            "optional": False,
+            "review_status": (
+                "pending" if current.issue_codes else "confirmed"
+            ),
+            "system_decisions": decisions,
+        }
+    )
+    _replace_review_items_in_state(state, {current.review_id: updated})
+
+    existing_decisions = tuple(state.get("parent_decisions", ()))
+    response_log = DecisionLog(
+        f"personalize-school-provided-{len(existing_decisions) + 1}"
+    )
+    response_log.record_approval_response(
+        (
+            "Parent chose to add "
+            f"{_item_display_name(current.item_name)} to the cart even though "
+            "the list says the school will provide it."
+        ),
+        affected_lines=(current.req_id,),
+    )
+    state["parent_decisions"] = existing_decisions + response_log.entries
 
 
 def _commit_personalize_decision(
@@ -9853,6 +9915,13 @@ def _render_excluded_review_row(
             escape_streamlit_dollars(_review_summary_quantity_text(original))
         )
         st.caption("Already provided by school")
+        st.button(
+            "Add this to my cart instead",
+            key=f"{key_prefix}:add-school-provided",
+            on_click=_add_school_provided_item_to_cart,
+            args=(st.session_state, item),
+            use_container_width=True,
+        )
         return item
     restorable = item.model_copy(
         update={"required_quantity": original.required_quantity}
@@ -14839,7 +14908,15 @@ def source_interpretation_rows(
             requirement.canonical_item,
         )
         seen.add(key)
-        if requirement.provided_by_school:
+        if (
+            SYSTEM_DECISION_PARENT_CHOSE_SCHOOL_PROVIDED_ITEM
+            in requirement.system_decisions
+        ):
+            status = (
+                "Added to the cart by your choice — the list said the school "
+                "would provide it"
+            )
+        elif requirement.provided_by_school:
             status = "Already provided by the school — not purchased"
         elif (
             requirement.condition is not None

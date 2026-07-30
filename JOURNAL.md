@@ -4602,3 +4602,36 @@ question, including quantities the parent never selected.
 
 The markers and review classification are deterministic. No model call,
 matching behavior, price, or optimizer calculation changed.
+
+## 2026-07-30 — School-provided items are no longer a one-way status
+
+### Finding
+
+School-provided requirements were preserved as source evidence but forced to
+remain outside the cart. The parent could correct already-owned, optional, and
+do-not-buy statuses, yet could not act when the school-provided statement did
+not match their situation.
+
+### Resolution
+
+- Added an explicit `Add this to my cart instead` action to a school-provided
+  row.
+- The action changes only cart eligibility. It retains the exact source line,
+  document, section, page, and consolidated source references.
+- The requirement carries a deterministic parent-choice marker into plan
+  building, and the append-only decision log records the response with the
+  parent as actor.
+- The shopping-plan source summary states that the parent added the item even
+  though the list said the school would provide it.
+
+### Verification boundary
+
+The full ARM64 suite passes, but Streamlit is unavailable there. The production
+button callback, immediate row regrouping, provenance preservation, and
+decision recording are covered by the x86 AppTest workflow and are not treated
+as verified until that workflow passes.
+
+### Architecture
+
+No model call, matching behavior, price, optimizer calculation, or business
+threshold changed.

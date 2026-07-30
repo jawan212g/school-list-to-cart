@@ -622,6 +622,11 @@ SYSTEM_DECISION_PARENT_CONFIRMED_PRODUCT_IDENTITY = (
     "parent_confirmed_product_identity"
 )
 SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY = "parent_confirmed_quantity"
+SYSTEM_DECISION_PARENT_CHOSE_SCHOOL_PROVIDED_ITEM = (
+    "parent_chose_to_buy_school_provided_item"
+)
+# FR-12: a parent may put a school-provided line into the proposed cart; retain
+# that explicit choice so the shopping plan can explain why the item is present.
 LOW_CONFIDENCE_IDENTITY_ISSUE = "low_confidence_identity"
 LOW_CONFIDENCE_QUANTITY_ISSUE = "low_confidence_quantity"
 LOW_CONFIDENCE_OTHER_DETAILS_ISSUE = "low_confidence_other_details"

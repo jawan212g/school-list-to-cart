@@ -8,6 +8,8 @@ from typing import Any
 import pytest
 
 import app
+from agent.review import confirmed_requirements
+from agent.rules import SYSTEM_DECISION_PARENT_CHOSE_SCHOOL_PROVIDED_ITEM
 
 
 streamlit = pytest.importorskip(
@@ -255,6 +257,22 @@ st.session_state.setdefault(
                     unit_type="box",
                     is_required=False,
                     requirement_type="optional",
+                    extraction_confidence=1.0,
+                ),
+                Requirement(
+                    req_id="school-crayons",
+                    child_id="child-1",
+                    raw_text="District will provide 1 box of crayons",
+                    canonical_item="crayons",
+                    quantity=1,
+                    unit_type="box",
+                    is_required=False,
+                    is_purchasable=False,
+                    requirement_type="optional",
+                    provided_by_school=True,
+                    source_document="Maya district list.pdf",
+                    source_section="District will provide",
+                    source_page=2,
                     extraction_confidence=1.0,
                 ),
             )
@@ -945,6 +963,69 @@ def test_personalize_optional_item_can_return_to_cart() -> None:
     assert any(
         "In your cart (3)" in markdown.value
         for markdown in test_app.markdown
+    )
+
+
+def test_personalize_school_provided_item_can_be_added_with_provenance() -> None:
+    """FR-12: a parent can override a school-provided line without losing evidence."""
+
+    test_app = _run_personalize_screen()
+    original = next(
+        item
+        for item in test_app.session_state["review_items"]
+        if item.req_id == "school-crayons"
+    )
+    original_sources = original.sources
+    button = next(
+        candidate
+        for candidate in test_app.button
+        if candidate.label == "Add this to my cart instead"
+    )
+
+    button.click().run()
+    _assert_no_exception(test_app)
+
+    updated = next(
+        item
+        for item in test_app.session_state["review_items"]
+        if item.review_id == original.review_id
+    )
+    assert updated.provided_by_school is False
+    assert updated.is_purchasable is True
+    assert updated.optional is False
+    assert updated.review_status == "confirmed"
+    assert updated.source_text == original.source_text
+    assert updated.source_document == original.source_document
+    assert updated.source_section == original.source_section
+    assert updated.source_page == original.source_page
+    assert updated.sources == original_sources
+    assert (
+        SYSTEM_DECISION_PARENT_CHOSE_SCHOOL_PROVIDED_ITEM
+        in updated.system_decisions
+    )
+    assert any(
+        "In your cart (3)" in markdown.value
+        for markdown in test_app.markdown
+    )
+
+    parent_decisions = tuple(test_app.session_state["parent_decisions"])
+    assert len(parent_decisions) == 1
+    assert parent_decisions[0].actor == "parent"
+    assert parent_decisions[0].affected_lines == ("school-crayons",)
+    assert "the school will provide it" in parent_decisions[0].rationale
+
+    requirement = confirmed_requirements((updated,))[0]
+    assert requirement.is_purchasable is True
+    assert requirement.is_required is True
+    assert requirement.provided_by_school is False
+    assert requirement.raw_text == original.source_text
+    assert requirement.source_document == original.source_document
+    assert requirement.source_section == original.source_section
+    assert requirement.source_page == original.source_page
+    assert requirement.sources == original_sources
+    assert (
+        SYSTEM_DECISION_PARENT_CHOSE_SCHOOL_PROVIDED_ITEM
+        in requirement.system_decisions
     )
 
 
