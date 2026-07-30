@@ -593,9 +593,9 @@ def test_section_statement_and_submitted_scope_use_same_live_state() -> None:
     """A5: the section explanation cannot diverge from the submitted IDs."""
 
     test_app = _run_section_screen()
-    success_text = " ".join(str(item.value) for item in test_app.success)
-    assert "Will read 1st Grade" in success_text
-    assert "Highly Capable Class" not in success_text
+    scope_text = " ".join(str(item.value) for item in test_app.markdown)
+    assert "We will extract items from 1st Grade" in scope_text
+    assert "Highly Capable Class" not in scope_text
 
     question = next(
         checkbox
@@ -606,8 +606,11 @@ def test_section_statement_and_submitted_scope_use_same_live_state() -> None:
     assert question.disabled is False
     question.set_value(True).run()
     _assert_no_exception(test_app)
-    success_text = " ".join(str(item.value) for item in test_app.success)
-    assert "Will read 1st Grade and Highly Capable Class" in success_text
+    scope_text = " ".join(str(item.value) for item in test_app.markdown)
+    assert (
+        "We will extract items from 1st Grade and Highly Capable Class"
+        in scope_text
+    )
     override_selector = next(
         item
         for item in test_app.multiselect
