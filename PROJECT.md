@@ -126,7 +126,7 @@ The user starts a session and submits at least one school supply list.
 - Candidate and selected products
 - Optimized cart
 - Per-child attribution
-- Item subtotal, tax, fees, landed cost, and budget variance
+- Item subtotal, tax, fees, total cost, and budget variance
 - Approval requests and outcomes
 - Stockout replan
 - Simulated order confirmation
@@ -232,11 +232,11 @@ Catalog prices and inventory are synthetic and representative. The interface mus
 
 ## Cost and Optimization Rules
 
-### Landed cost
+### Total cost
 
 Every budget decision and every figure labeled `total` must use:
 
-`landed cost = item subtotal + sales tax + fulfillment fees`
+`total cost = item subtotal + sales tax + fulfillment fees`
 
 Item subtotal may be displayed only when clearly labeled.
 
@@ -244,15 +244,15 @@ Item subtotal may be displayed only when clearly labeled.
 
 Each store beyond the first adds a $6 implicit comparison penalty:
 
-`optimization score = landed cost + extra-store trip penalties`
+`optimization score = total cost + extra-store trip penalties`
 
-The trip penalty influences the recommendation but is not a charge and must not be included in the displayed landed cost.
+The trip penalty influences the recommendation but is not a charge and must not be included in the displayed total cost.
 
 ### Required business rules
 
 - Sales tax defaults to 7.0% and is editable.
 - Optional items are excluded from the budgeted cart.
-- Optional items may be suggested only when landed cost is no more than 90% of budget.
+- Optional items may be suggested only when total cost is no more than 90% of budget.
 - A required item may not be removed automatically.
 - When no cart meets the budget, show the minimum feasible cost, shortfall, cheaper valid alternatives, and cost-driving items.
 - Purchased units may exceed need by no more than 50% or six units, whichever is greater, unless a larger package is the only valid option.
@@ -297,7 +297,7 @@ When a price or stock change occurs:
 1. Identify the affected cart lines and requirements.
 2. Preserve unaffected cart lines and still-valid user decisions.
 3. Recompute only the affected portion when practical.
-4. Recalculate complete landed cost and budget variance.
+4. Recalculate complete total cost and budget variance.
 5. Request new approval only when a previous approval is no longer valid.
 6. Record the event and outcome in the decision log.
 
@@ -341,7 +341,7 @@ Model extraction and semantic matching can still be wrong. The controls are sche
 | Extraction recall | Required items found against hand-labeled lists | At least 90% |
 | Quantity accuracy | Correct quantity and unit | At least 85% |
 | Match acceptance | Product matches accepted by a human reviewer | At least 85% |
-| Landed cost difference | Agent cart compared with the manual baseline | At or below baseline |
+| Total cost difference | Agent cart compared with the manual baseline | At or below baseline |
 | Time to cart | Session start through final summary | Under 3 minutes |
 | Interrupt count | Approval interruptions per session | Median of 3 or fewer |
 | Budget adherence | Within budget or explicitly approved | 100% |
@@ -356,7 +356,7 @@ Measured results must come from testing and must not be claimed before evaluatio
 - Package-size and overage cases
 - Cross-child aggregation
 - Brand-lock separation
-- Tax, fulfillment-fee, and landed-cost calculations
+- Tax, fulfillment-fee, and total-cost calculations
 - Store-subset and trip-penalty decisions
 - Single-stop infeasibility and gap behavior
 - Per-child shared-package allocation
@@ -410,7 +410,7 @@ Suggested module responsibilities:
 - `src/agent/normalize.py`: canonical names, units, and ranges
 - `src/agent/aggregate.py`: cross-child aggregation
 - `src/agent/match.py`: requirements to candidate offers
-- `src/agent/optimize.py`: packages, stores, and landed cost; no model calls
+- `src/agent/optimize.py`: packages, stores, and total cost; no model calls
 - `src/agent/gate.py`: approval conditions
 - `src/agent/decisions.py`: audit trail
 - `data/`: fictional stores and seeded offers
@@ -424,7 +424,7 @@ The exact filenames may change, but the separation between probabilistic interpr
 
 - Define the core schemas.
 - Create a compact catalog fixture.
-- Implement package combinations, aggregation, landed cost, and store selection.
+- Implement package combinations, aggregation, total cost, and store selection.
 - Test the key quantity, budget, and multi-store business rules.
 
 ### Milestone 2: Text-list vertical slice
@@ -479,7 +479,7 @@ Phase 1 is complete when:
 - a teammate can open the deployed URL without local installation;
 - two lists can be submitted in one session;
 - the application produces validated requirements and an optimized cart;
-- every displayed total is landed cost;
+- every displayed total is total cost;
 - all required approval conditions are enforced;
 - a stockout produces a correct revised cart without discarding unaffected approvals;
 - adversarial input does not add an unauthorized product;

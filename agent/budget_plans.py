@@ -119,7 +119,7 @@ def apply_authorized_budget(
         else authorized_budget_cents
     )
     if budget_cents < optimization.landed_cost:
-        raise ValueError("Authorized budget cannot remain below landed cost")
+        raise ValueError("Authorized budget cannot remain below total cost")
     return replace(
         optimization,
         budget_cents=budget_cents,

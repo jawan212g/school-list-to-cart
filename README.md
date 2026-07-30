@@ -22,6 +22,10 @@ quantities, package choices, prices, tax, fees, and totals. The reading can be w
 the calculated catalog arithmetic is exact for the confirmed interpretation and
 seeded data.
 
+**Total cost** means the item subtotal plus tax and fulfillment fees. An item
+subtotal is shown only when explicitly labeled and is never presented as the total
+cost.
+
 ## Important
 
 The product catalog is **simulated**. Stores are fictional. Prices, stock, and fees are

@@ -348,7 +348,7 @@ GRADE_OPTIONS = (
     *(f"Grade {grade}" for grade in range(1, 13)),
 )
 SHOPPING_MODES: Mapping[str, str] = {
-    "Lowest landed cost": "budget",
+    "Lowest total cost": "budget",
     "Single store when possible": "single_stop",
     "Custom store limits": "custom",
 }
@@ -858,7 +858,7 @@ def format_streamlit_money(cents: int) -> str:
 
 
 def format_cost_delta(cents: int) -> str:
-    """Format one approval alternative's landed-cost change."""
+    """Format one approval alternative's total-cost change."""
 
     if cents == 0:
         return "no cost change"
@@ -867,7 +867,7 @@ def format_cost_delta(cents: int) -> str:
 
 
 def format_streamlit_cost_delta(cents: int) -> str:
-    """Format a landed-cost delta safely for Streamlit rendering."""
+    """Format a total-cost delta safely for Streamlit rendering."""
 
     return escape_streamlit_dollars(format_cost_delta(cents))
 
@@ -1260,7 +1260,7 @@ def authorize_budget_increase(
     optimization: OptimizationResult,
     decision_log: DecisionLog,
 ) -> tuple[PipelineResult, OptimizationResult]:
-    """Apply a parent-authorized BR-04 increase to the selected landed cost."""
+    """Apply a parent-authorized BR-04 increase to the selected total cost."""
 
     previous_budget = result.session.budget_total
     if previous_budget is None:
@@ -1567,9 +1567,10 @@ def _landed_delta_explanation(
     )
     direction = "Adds" if cost_delta_cents > 0 else "Saves"
     detail = f" ({', '.join(components)})" if components else ""
+    total_phrase = "to total" if cost_delta_cents > 0 else "from total"
     return (
         f"{direction} {format_money(abs(cost_delta_cents))} "
-        f"landed{detail}"
+        f"{total_phrase}{detail}"
     )
 
 
@@ -1603,8 +1604,7 @@ def _removal_explanation(
             "changes too."
         )
     return (
-        "This is the change to the full landed cart, including fulfillment "
-        "fees."
+        "This is the change to the total, including tax and fulfillment fees."
     )
 
 
@@ -1710,7 +1710,7 @@ def _legacy_budget_approval_content(
             cost_delta_cents=0,
             explanation=(
                 "Keeps every required item covered at the minimum achievable "
-                f"landed cost of {format_money(optimization.landed_cost)}."
+                f"total cost of {format_money(optimization.landed_cost)}."
             ),
             affected_children=all_children,
             is_recommended=True,
@@ -1762,7 +1762,7 @@ def _legacy_budget_approval_content(
             cheaper_descriptions.append(
                 (
                     f"{offer.title} from {store_name}, saving "
-                    f"{format_money(abs(choice.cost_delta_cents))} landed"
+                    f"{format_money(abs(choice.cost_delta_cents))} from total"
                 )
             )
             substitution_options.append(
@@ -1797,7 +1797,7 @@ def _legacy_budget_approval_content(
             (
                 f"{rank}. {item_name} for "
                 f"{_join_names(affected_children)} — "
-                f"{format_money(contribution)} marginal landed "
+                f"{format_money(contribution)} marginal total-cost "
                 "contribution. Cheaper catalog alternatives: "
                 f"{cheaper_text}."
             )
@@ -1829,7 +1829,7 @@ def _legacy_budget_approval_content(
         )
     message_lines = [
         (
-            "Minimum achievable landed cost: "
+            "Minimum achievable total cost: "
             f"{format_money(optimization.landed_cost)}."
         ),
         (
@@ -1837,7 +1837,7 @@ def _legacy_budget_approval_content(
             f"Shortfall: {format_money(optimization.shortfall_cents)}."
         ),
         "",
-        "Required lines ranked by marginal landed contribution:",
+        "Required lines ranked by marginal total-cost contribution:",
         *ranked_lines,
     ]
     options.extend(substitution_options)
@@ -1879,7 +1879,7 @@ def _budget_approval_content(
     if analysis.substitutions_reach_budget:
         message = (
             "Cheaper substitutions alone can reach the entered budget. "
-            "Current required-cart landed cost: "
+            "Current required-cart total cost: "
             f"{format_money(analysis.baseline_landed_cost_cents)}; current "
             f"shortfall: {format_money(analysis.original_shortfall_cents)}. "
             f"The listed substitutions save {format_money(substitution_saving)}."
@@ -1892,7 +1892,7 @@ def _budget_approval_content(
         )
         message = (
             "Cheaper substitutions alone cannot reach the entered budget. "
-            "Current required-cart landed cost: "
+            "Current required-cart total cost: "
             f"{format_money(analysis.baseline_landed_cost_cents)}; shortfall: "
             f"{format_money(analysis.original_shortfall_cents)}. The listed "
             f"substitutions save {format_money(substitution_saving)}, leaving "
@@ -1916,7 +1916,8 @@ def _budget_approval_content(
 
     def plan_explanation(plan: BudgetPlan) -> str:
         return (
-            f"Result: {format_money(plan.resulting_landed_cost_cents)} landed. "
+            f"Resulting total cost: "
+            f"{format_money(plan.resulting_landed_cost_cents)}. "
             f"You would source: {unmet_text(plan)}."
         )
 
@@ -1931,7 +1932,7 @@ def _budget_approval_content(
                     - analysis.baseline_landed_cost_cents
                 ),
                 explanation=(
-                    "Resulting landed cost: "
+                    "Resulting total cost: "
                     f"{format_money(analysis.substitution_only_landed_cost_cents)}; "
                     "all required items remain covered."
                 ),
@@ -1981,7 +1982,7 @@ def _budget_approval_content(
             cost_delta_cents=0,
             explanation=(
                 "Keeps every required item covered at "
-                f"{format_money(optimization.landed_cost)} landed."
+                f"total cost of {format_money(optimization.landed_cost)}."
             ),
             affected_children=all_children,
             is_recommended=not options,
@@ -2236,7 +2237,7 @@ def _approval_recommendation(
     attribute_labels = _attribute_labels(result, line)
     if attribute_labels:
         return (
-            f"{recommended}; it is the current lowest-landed-cost stocked "
+            f"{recommended}; it is the current lowest-total-cost stocked "
             "match, but the parent should choose the acceptable "
             f"{_join_names(attribute_labels)}."
         )
@@ -2936,7 +2937,7 @@ def build_text_summary(
         f"ITEM SUBTOTAL: {format_money(item_subtotal)}",
         f"TAX: {format_money(tax)}",
         f"FULFILLMENT FEES: {format_money(fees)}",
-        f"LANDED COST: {format_money(optimization.landed_cost)}",
+        f"TOTAL COST: {format_money(optimization.landed_cost)}",
         "",
     ])
     export_is_complete = (
@@ -3065,7 +3066,7 @@ def build_text_summary(
                         "  FULFILLMENT FEE: "
                         f"{format_money(order.fulfillment_fee)}"
                     ),
-                    f"  LANDED COST: {format_money(order.landed_cost)}",
+                    f"  TOTAL COST: {format_money(order.landed_cost)}",
                     "",
                 ]
             )
@@ -5199,7 +5200,7 @@ def _render_budget_step(st: Any) -> None:
                 )
     else:
         st.info(
-            "The plan will still minimize landed cost. Budget comparisons "
+            "The plan will still minimize total cost. Budget comparisons "
             "and budget approval questions will be skipped."
         )
     back, forward = _navigation_button_columns(st)
@@ -5271,13 +5272,13 @@ def _render_preferences_step(st: Any) -> None:
         on_change=commit_intake_widget_value,
         args=("shopping_preference_label",),
         help=(
-            "Lowest landed cost finds the cheapest full amount, including "
+            "Lowest total cost finds the cheapest full amount, including "
             "tax and pickup or delivery fees, and may use multiple stores. "
             "A second store must save more than a few dollars to justify the "
             "extra trip. Single store keeps everything at one store; if no "
             "store carries everything, you will see the best option and what "
             "is missing. Custom lets you choose stores, a maximum number of "
-            "stores, and a pickup distance. Landed cost always means the full "
+            "stores, and a pickup distance. Total cost always means the full "
             "amount including tax and fees, never just the item subtotal."
         ),
     )
@@ -11934,11 +11935,11 @@ def _budget_action_label(
         product_name = offer.title if offer is not None else item_name
         return (
             f"Use {product_name} for {item_name} — "
-            f"{_join_names(children)} (saves {saving} landed)"
+            f"{_join_names(children)} (saves {saving} from total)"
         )
     return (
         f"Do not buy {item_name} for {_join_names(children)} — "
-        f"I will source it myself (saves {saving} landed)"
+        f"I will source it myself (saves {saving} from total)"
     )
 
 
@@ -12069,7 +12070,7 @@ def _reprice_budget_strategies(
                 option,
                 cost_delta_cents=delta,
                 explanation=(
-                    "Resulting landed cost: "
+                    "Resulting total cost: "
                     f"{format_money(evaluation.landed_cost_cents)}. "
                     f"{status}"
                 ),
@@ -12541,7 +12542,7 @@ def _render_approval(st: Any) -> None:
                 )
                 st.write(
                     escape_streamlit_dollars(
-                        "Current selected-plan landed cost: "
+                        "Current selected-plan total cost: "
                         f"{format_money(budget_evaluation.landed_cost_cents)}; "
                         f"{current_status}; "
                         f"{budget_evaluation.unmet_item_count} required "
@@ -12609,10 +12610,10 @@ def _render_approval(st: Any) -> None:
                             child_labels,
                         )
                         label = re.sub(
-                            r"\(saves \$[\d,.]+ landed\)$",
+                            r"\(saves \$[\d,.]+ from total\)$",
                             (
                                 "(saves "
-                                f"{format_money(marginal_saving)} landed)"
+                                f"{format_money(marginal_saving)} from total)"
                             ),
                             label,
                         )
@@ -12649,10 +12650,10 @@ def _render_approval(st: Any) -> None:
                         child_labels,
                     )
                     label = re.sub(
-                        r"\(saves \$[\d,.]+ landed\)$",
+                        r"\(saves \$[\d,.]+ from total\)$",
                         (
                             "(saves "
-                            f"{format_money(marginal_saving)} landed)"
+                            f"{format_money(marginal_saving)} from total)"
                         ),
                         label,
                     )
@@ -12671,7 +12672,7 @@ def _render_approval(st: Any) -> None:
 
                 columns = st.columns(3)
                 columns[0].metric(
-                    "Landed cost",
+                    "Total cost",
                     format_streamlit_money(
                         budget_evaluation.landed_cost_cents
                     ),
@@ -12921,7 +12922,7 @@ def _render_cost_summary(
         format_streamlit_money(fees),
     )
     columns[3].metric(
-        "Landed cost",
+        "Total cost",
         format_streamlit_money(optimization.landed_cost),
     )
 
@@ -12931,7 +12932,7 @@ def _render_budget_status(
     optimization: OptimizationResult,
     budget_cents: int,
 ) -> None:
-    """Lead the summary with the effective landed-cost budget status."""
+    """Lead the summary with the effective total-cost budget status."""
 
     variance = budget_cents - optimization.landed_cost
     if variance >= 0:
@@ -12962,7 +12963,7 @@ def _render_store_breakdown(
                         (
                             f"#### {store_name} · "
                             f"{order.fulfillment_method.title()} · "
-                            "Landed cost "
+                            "Total cost "
                             f"{format_money(order.landed_cost)}"
                         )
                     )
@@ -12997,7 +12998,7 @@ def _render_store_breakdown(
                     format_streamlit_money(order.fulfillment_fee),
                 )
                 d.metric(
-                    "Landed cost",
+                    "Total cost",
                     format_streamlit_money(order.landed_cost),
                 )
 
@@ -13024,7 +13025,7 @@ def _render_per_child(
             "Item subtotal": format_streamlit_money(
                 item_costs.get(child_id, 0)
             ),
-            "Landed cost": format_streamlit_money(
+            "Total cost": format_streamlit_money(
                 landed_costs.get(child_id, 0)
             ),
         }
@@ -13221,7 +13222,7 @@ def _render_addons(
     if result.session.budget_total is None:
         st.success(
             "No set budget was selected, so the 90% threshold does not "
-            "apply. Each donation below shows its exact added landed cost."
+            "apply. Each donation below shows its exact added total cost."
         )
     else:
         st.success(
@@ -13295,12 +13296,12 @@ def _render_addons(
             - without.resulting_landed_cost_cents
         )
         marginal_text = (
-            f"adds {format_money(marginal)} landed"
+            f"adds {format_money(marginal)} to total"
             if marginal > 0
             else (
-                f"reduces landed cost by {format_money(abs(marginal))}"
+                f"reduces total cost by {format_money(abs(marginal))}"
                 if marginal < 0
-                else "no landed cost change"
+                else "no total cost change"
             )
         )
         st.checkbox(
@@ -13319,13 +13320,13 @@ def _render_addons(
     metric_columns = st.columns(2 if budget_cents is None else 3)
     left, middle = metric_columns[:2]
     left.metric(
-        "Resulting landed cost",
+        "Resulting total cost",
         format_streamlit_money(
             evaluation.resulting_landed_cost_cents
         ),
     )
     middle.metric(
-        "Added landed cost",
+        "Added total cost",
         format_streamlit_money(
             evaluation.incremental_landed_cost_cents
         ),
@@ -13837,7 +13838,7 @@ def _render_summary_headline(
     st.caption(copy.headline_heading)
     columns = st.columns(2 if budget_cents is None else 3)
     columns[0].metric(
-        "Landed cost",
+        "Total cost",
         format_streamlit_money(optimization.landed_cost),
     )
     if budget_cents is None:
@@ -14273,7 +14274,7 @@ def _render_summary(st: Any) -> None:
         st.success(
             f"{order_label} {confirmation['confirmation_id']} confirmed at "
             f"{confirmation['created_at'].strftime('%Y-%m-%d %H:%M UTC')}. "
-            "Landed cost: "
+            "Total cost: "
             f"{format_streamlit_money(confirmation['landed_cost'])}."
         )
 

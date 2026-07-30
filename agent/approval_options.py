@@ -25,7 +25,7 @@ from data.loader import Offer, Store
 
 @dataclass(frozen=True)
 class CatalogApprovalChoice:
-    """One stocked catalog choice with an exact landed-cost comparison."""
+    """One stocked catalog choice with an exact total-cost comparison."""
 
     sku: str
     store_id: str

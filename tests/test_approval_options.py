@@ -292,7 +292,7 @@ def test_no_exact_match_keeps_catalog_choices_and_self_source_last(
     assert presentation.options[1].explanation is not None
     assert presentation.options[1].explanation == (
         f"Adds {app.format_money(alternative_offer.pack_price - current_offer.pack_price)} "
-        "landed "
+        "to total "
         f"({app.format_money(alternative_offer.pack_price - current_offer.pack_price)} item)"
     )
     assert presentation.options[-1].label == (
@@ -479,7 +479,7 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
     assert "ITEMS YOU CHOSE TO SOURCE YOURSELF" in summary
     assert "Headphones | Grade 2 and Grade 5" in summary
     assert "UNFULFILLED BY PARENT CHOICE" in summary
-    assert "LANDED COST: $22.08" in summary
+    assert "TOTAL COST: $22.08" in summary
     assert "\\$" not in summary
     decision_log = DecisionLog("parent-self-source")
     decision_log.record_approval_response(
@@ -497,7 +497,7 @@ def test_radio_option_uses_escaped_label_and_attached_caption() -> None:
         alternative_id="binder-two",
         label="Choose Avery 2-Inch Binder — Value Depot",
         cost_delta_cents=300,
-        explanation="Adds $3.00 landed ($2.80 item, $0.20 tax)",
+        explanation="Adds $3.00 to total ($2.80 item, $0.20 tax)",
     )
 
     label = app.approval_option_label(option)
@@ -508,7 +508,7 @@ def test_radio_option_uses_escaped_label_and_attached_caption() -> None:
         "(adds \\$3.00)"
     )
     assert caption == (
-        "Adds \\$3.00 landed (\\$2.80 item, \\$0.20 tax)"
+        "Adds \\$3.00 to total (\\$2.80 item, \\$0.20 tax)"
     )
     assert "$" not in (label + caption).replace("\\$", "")
 
@@ -619,14 +619,14 @@ def test_budget_interrupt_has_ranked_item_choices_and_applies_selection() -> Non
     )[0]
 
     assert presentation.affected_children == ("Grade 2", "Grade 5")
-    assert "Minimum achievable landed cost: $10.00." in presentation.message
+    assert "Minimum achievable total cost: $10.00." in presentation.message
     assert "Shortfall: $1.50." in presentation.message
     assert (
-        "1. Headphones for Grade 2 — $5.00 marginal landed contribution."
+        "1. Headphones for Grade 2 — $5.00 marginal total-cost contribution."
         in presentation.message
     )
     assert (
-        "Red Ballpoint Pens from Value Depot, saving $2.00 landed"
+        "Red Ballpoint Pens from Value Depot, saving $2.00 from total"
         in presentation.message
     )
     assert sum(
@@ -729,7 +729,7 @@ def test_budget_interrupt_has_ranked_item_choices_and_applies_selection() -> Non
     summary_lines = summary.splitlines()
     assert summary_lines[1] == "BUDGET REMAINING: $3.50"
     assert "Headphones | Grade 2 | UNFULFILLED BY PARENT CHOICE" in summary
-    assert "LANDED COST: $5.00" in summary
+    assert "TOTAL COST: $5.00" in summary
 
 
 def test_raise_budget_choice_funds_cart_and_clears_shortfall() -> None:

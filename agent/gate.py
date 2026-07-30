@@ -300,7 +300,7 @@ def _budget_interrupt(
             f"{optimization.shortfall_cents} cents."
         ),
         recommendation=(
-            "Raise the budget to the minimum landed cost so every required "
+            "Raise the budget to the minimum total cost so every required "
             "item remains covered."
         ),
         alternatives=tuple(alternatives),

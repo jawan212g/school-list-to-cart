@@ -3543,3 +3543,80 @@ transition from Students to Budget, without changing later saved choices.
 - The AppTest lifecycle assertion is collected but skipped locally because
   Streamlit is intentionally unavailable on Windows ARM64; it will run in the
   deployed x86 environment.
+
+## 2026-07-29 - Parent-facing total-cost terminology
+
+### Objective
+
+Present the full amount including tax and fulfillment fees as "total cost"
+throughout the interface and current documentation, while retaining the
+existing internal `landed_cost` identifiers and every calculation unchanged.
+
+### Work completed
+
+- Replaced parent-facing "landed cost" wording in the setup, review, approval,
+  budget-planning, summary, per-store, per-student, donation, checkout, export,
+  warning, help, and decision-log copy.
+- Renamed the shopping preference to "Lowest total cost" and changed marginal
+  wording such as "adds ... landed" to "adds ... to total".
+- Updated `BRD.md`, `README.md`, `PROJECT.md`, and `RUNBOOK.md`. BR-03 now says
+  that any figure labelled "total cost" includes tax and fees, while an item
+  subtotal may appear only when explicitly labelled and is never the total
+  cost.
+- Kept all internal `landed_cost` fields, keys, variables, and calculation
+  paths unchanged. Added the requested explanatory comment in
+  `agent/rules.py`.
+- Updated only tests that assert display copy; numeric expectations and
+  internal field-name assertions were not changed.
+
+### Files changed
+
+- `app.py`
+- `agent/approval_options.py`
+- `agent/budget_plans.py`
+- `agent/gate.py`
+- `agent/pipeline.py`
+- `agent/rules.py`
+- `BRD.md`
+- `README.md`
+- `PROJECT.md`
+- `RUNBOOK.md`
+- `tests/test_app.py`
+- `tests/test_approval_options.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused display and pipeline tests:
+  `py -3.12-arm64 -m pytest -q tests/test_app.py
+  tests/test_approval_options.py tests/test_pipeline.py tests/test_gate.py -x`
+  -> 152 passed in 1.98 seconds.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 419 passed, 1 skipped in
+  3.05 seconds.
+- An AST scan found no parent-facing Python string containing "landed".
+- A repository-wide case-insensitive search found 236 matching lines in 17
+  files. They are internal identifiers and calculation-oriented developer
+  tests/docstrings, plus historical entries in this journal; current
+  specifications and user documentation contain none.
+
+### Maple Street regression run
+
+- Provider: OpenAI, model `gpt-5.6-sol`.
+- Both extractions completed without failure. The $85 run reused the exact
+  extractions from the $150 run.
+- The current live result was $109.83 with 3 interrupts at $150. At $85, the
+  unchanged required cart was $109.83 and the recommended plan was $69.24
+  with 4 interrupts.
+- These do not reproduce the historical $111.21 and $71.07 reference figures.
+  The rename changed no computed expression or internal numeric assertion; the
+  live difference is model-dependent extraction/matching drift already present
+  in the current pipeline, not a total-cost copy change. The historical figures
+  must not be replaced silently with the new live values.
+
+### Problems or limitations
+
+- The two model-dependent Maple Street references are not stable under a fresh
+  current-model run, so they cannot serve as deterministic regression tests
+  without freezing confirmed extractions and suitability decisions.
+- Streamlit is not installed locally on Windows ARM64, so no local Streamlit
+  run was attempted.

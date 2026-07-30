@@ -347,7 +347,7 @@ Create agent/aggregate.py:
 - Track which child each unit is for, so allocation back is possible (FR-16)
 
 Create agent/optimize.py. This module must contain NO model calls at all.
-- Package-size selection satisfying unit need at lowest landed cost, subject to
+- Package-size selection satisfying unit need at lowest total cost, subject to
   the overage ceiling BR-06 (FR-21)
 - Evaluate combinations of pack sizes, not just the single cheapest pack. Needing
   26 where packs come in 12 should consider two 12s plus a 6 (E-15)
@@ -355,7 +355,7 @@ Create agent/optimize.py. This module must contain NO model calls at all.
 - Single-stop mode with no complete store returns the best single store plus an
   explicit gap list and the minimum second trip (FR-22, E-24)
 - Trip penalty BR-07 applied in comparison only, never shown in the parent's total
-- Landed cost = item subtotal + tax + fulfillment fees, always (FR-24, BR-03)
+- Total cost = item subtotal + tax + fulfillment fees, always (FR-24, BR-03)
 - Respect pickup and delivery minimums (FR-25, E-28)
 - Per-child cost allocation proportional by units for shared packages (BR-09)
 
@@ -542,13 +542,13 @@ app.py; the agent modules stay pure.
 4. Approval: all interrupts on one screen, each with the recommendation,
    alternatives, and cost deltas. One click per decision.
 5. Summary: per-store breakdown with fulfillment method, per-child attribution,
-   item subtotal, tax, fees, landed cost, budget variance, every substitution with
+   item subtotal, tax, fees, total cost, budget variance, every substitution with
    its reason, and every approval with its outcome (FR-34). Simulated checkout
    button producing an order confirmation (FR-35). Text export (FR-36). An
    expandable panel showing the full decision log.
 
 Non-negotiable interface rules:
-- Any figure labeled "total" is landed cost. Item subtotal appears only when
+- Any figure labeled "total" is total cost. Item subtotal appears only when
   explicitly labeled as such (BR-03)
 - A persistent visible notice that the catalog is simulated, the stores are
   fictional, and checkout collects no payment information

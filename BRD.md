@@ -23,7 +23,7 @@ The team settled the following before build. Each is recorded with the reasoning
 | **D-1** | Build in Python with Streamlit, deployed from a public GitHub repository                       | Teammates test by opening a URL, with no installation and no local environment. It deploys straight from the repository, so the working-artifact link the final submission requires exists on day one. Session state handles the pause-and-approve flow natively. A React frontend would look better and cost roughly double the build time, which is not available.                                                         |
 | **D-2** | One model provider, with a single interface key held in hosted secrets by the repository owner | Testers reach the agent through the hosted URL and never handle a key. Keeps cost visible in one place and removes a setup step for four people. The key is never committed to the repository.                                                                                                                                                                                                                               |
 | **D-3** | Seeded catalog of four fictional stores and roughly 120 items                                  | Four stores is the minimum that produces genuine multi-store trade-offs; 120 items covers every optimization case without becoming a data-entry project. Stores are named fictionally rather than after real retailers so the prototype cannot be read as reporting real prices or real inventory.                                                                                                                           |
-| **D-4** | Flat 7.0% sales tax by default, editable by the user                                           | Landed cost is meaningless without tax. A flat editable rate is honest and takes minutes; modeling state rules and back-to-school tax holidays does not fit the build window and is stated as a known limitation.                                                                                                                                                                                                            |
+| **D-4** | Flat 7.0% sales tax by default, editable by the user                                           | Total cost is meaningless without tax. A flat editable rate is honest and takes minutes; modeling state rules and back-to-school tax holidays does not fit the build window and is stated as a known limitation.                                                                                                                                                                                                            |
 | **D-5** | n8n is out of the critical path                                                                | The workflow is a linear pipeline with one conditional branch, which is a function rather than an orchestration problem. n8n would add a network hop, a hosted dependency, and split state across two systems, producing three new failure modes in a five-minute live demonstration in exchange for no capability the application does not already have. Retained as an optional Phase 2 approval-notification integration. |
 | **D-6** | One member builds the first working version; the team reviews and tests against it             | A five-person merge queue on a one-day build costs more than it produces. Review, real-list testing, write-up, and deck are distributed after the prototype exists, as set out in Section 3.                                                                                                                                                                                                                                 |
 | **D-7** | Classroom mode ships as a quantity multiplier, not a separate interface                        | The data model already carries an entity type and a student count, so supporting classroom quantities is a field rather than a feature. A dedicated bulk-buyer interface remains Phase 2.                                                                                                                                                                                                                                    |
@@ -55,7 +55,8 @@ The prototype is the input to these, not a substitute for them. Owners to be con
 
 - Three shopping modes: budget, single-stop, and custom
 
-- Landed cost including tax, fulfillment fees, and the trip penalty
+- Total cost including tax and fulfillment fees, with the trip penalty applied
+  only when comparing plans
 
 - Batched approval gate covering all seven interrupt conditions
 
@@ -107,7 +108,7 @@ Carried forward from the Week 9 proposal and staged for the reasons given. Nothi
 | **Requirement** | One line from a supply list, normalized. For example: four glue sticks, any brand, required.                                                            |
 | **Unit need**   | Total individual units of an item across the whole session, after aggregation. Two children needing four glue sticks each produce a unit need of eight. |
 | **Offer**       | One purchasable product at one store: item number, brand, pack size, price, stock, category.                                                            |
-| **Landed cost** | What actually leaves the bank account: item subtotal plus tax plus fulfillment fees. Never the item subtotal alone.                                     |
+| **Total cost** | What actually leaves the bank account: item subtotal plus tax plus fulfillment fees. Never the item subtotal alone.                                     |
 | **Brand lock**  | The list names a specific brand as mandatory. Substitution always requires approval.                                                                    |
 | **Trip**        | One store visited or one delivery order placed. Trips are not free; see BR-07.                                                                          |
 | **Interrupt**   | A point where the agent stops and asks the parent. Minimize the count, but never suppress a required one.                                               |
@@ -147,10 +148,10 @@ Carried forward from the proposal and endorsed in the faculty feedback. It is al
 | **5. Organized-list review** | Parent edits, adds, deletes, marks owned, resolves uncertainty, and confirms the structured items. No required item proceeds without confirmation.                                |
 | **6. Aggregation**         | Confirmed requirements roll up across children into unit needs. Brand-locked needs remain separate from generic needs.                                                             |
 | **7. Matching**            | Model proposes candidate offers for each need; code filters by stock, radius, brand lock, and exclusions. Every match carries a confidence score.                                  |
-| **8. Optimization**        | Deterministic. Package-size selection, store assignment, landed cost, and trip penalty, against the objective set by the shopping mode.                                            |
+| **8. Optimization**        | Deterministic. Package-size selection, store assignment, total cost, and trip penalty, against the objective set by the shopping mode.                                            |
 | **9. Approval gate**       | If any interrupt condition is met, the agent stops and presents all of them on a single batched screen.                                                                            |
 | **10. Re-plan**            | Parent decisions are applied, the cart is re-optimized, and the gate is re-checked.                                                                                                |
-| **11. Simulated checkout** | Order summary with per-child attribution, per-store breakdown, landed cost, and the full decision log.                                                                             |
+| **11. Simulated checkout** | Order summary with per-child attribution, per-store breakdown, total cost, and the full decision log.                                                                             |
 
 ## 8. Data Model
 
@@ -180,7 +181,7 @@ Requirements are numbered FR-## and are individually testable. Business rules ca
 
 - **FR-03** Budget may be entered as a single combined figure or as per-child allocations. Under per-child budgets, shared purchases split proportionally by unit (BR-09).
 
-- **FR-04** Shopping mode is selected at intake and can be changed without re-uploading lists. Budget mode seeks the lowest landed cost across any number of stores within the radius, subject to the trip penalty. Single-stop mode seeks the cheapest single store carrying every required item. Custom mode lets the parent set a maximum store count, name specific stores, or set a radius.
+- **FR-04** Shopping mode is selected at intake and can be changed without re-uploading lists. Budget mode seeks the lowest total cost across any number of stores within the radius, subject to the trip penalty. Single-stop mode seeks the cheapest single store carrying every required item. Custom mode lets the parent set a maximum store count, name specific stores, or set a radius.
 
 - **FR-05** A child entry may be marked as a classroom group with a student count, which multiplies per-student requirements accordingly (D-7).
 
@@ -220,13 +221,13 @@ Requirements are numbered FR-## and are individually testable. Business rules ca
 
 ### 9.4 Optimization
 
-- **FR-21** Select package sizes that satisfy the unit need at the lowest landed cost, subject to the overage ceiling (BR-06). The cheapest per-unit option is not automatically correct: a 48-pack at ten cents per unit is worse than a 12-pack at fourteen cents per unit when the need is eight.
+- **FR-21** Select package sizes that satisfy the unit need at the lowest total cost, subject to the overage ceiling (BR-06). The cheapest per-unit option is not automatically correct: a 48-pack at ten cents per unit is worse than a 12-pack at fourteen cents per unit when the need is eight.
 
 - **FR-22** In single-stop mode, if no store carries every required item, do not fail. Return the best single store plus an explicit gap list, and offer the minimum second trip that closes it. Present this as a choice rather than as a silent mode change.
 
 - **FR-23** Apply the trip penalty (BR-07) so that marginal savings never justify an unreasonable number of stops.
 
-- **FR-24** Compute landed cost for every candidate cart. Item subtotal alone is never displayed as the total (BR-03).
+- **FR-24** Compute total cost for every candidate cart. Item subtotal alone is never displayed as the total (BR-03).
 
 - **FR-25** Respect pickup and delivery minimums. A store assignment falling below a minimum either absorbs the fee in the comparison or is dropped.
 
@@ -234,7 +235,7 @@ Requirements are numbered FR-## and are individually testable. Business rules ca
 
 The proposal named three interrupt conditions. Seven are specified here; the four additions are marked.
 
-1.  Landed cost exceeds budget.
+1.  Total cost exceeds budget.
 
 2.  Major substitution, as defined in BR-01.
 
@@ -266,7 +267,7 @@ The proposal named three interrupt conditions. Seven are specified here; the fou
 
 - **FR-33** Support manual stockout injection. This is a first-class feature rather than a test hook: it is the clearest evidence that the agent is reasoning rather than replaying a script, and it is the intended centerpiece of the live demonstration.
 
-- **FR-34** The final summary shows per-store breakdown with fulfillment method, per-child attribution, item subtotal, tax, fees, landed cost, budget variance, every substitution made and why, and every approval requested with its outcome.
+- **FR-34** The final summary shows per-store breakdown with fulfillment method, per-child attribution, item subtotal, tax, fees, total cost, budget variance, every substitution made and why, and every approval requested with its outcome.
 
 - **FR-35** Simulated checkout produces an order confirmation artifact. No payment data is collected at any point.
 
@@ -276,17 +277,17 @@ The proposal named three interrupt conditions. Seven are specified here; the fou
 
 - **BR-01 Substitution severity.** Minor, and auto-approved: a different brand where no brand was specified; a pack size within the overage ceiling; an equivalent product with the same attributes. Major, and requiring approval: any brand-lock break; a pack count differing from the requirement by more than twenty percent; a different product category; any change to a specified attribute; a non-returnable swap.
 
-- **BR-02 Tax.** Landed cost includes sales tax at the session rate, defaulting to 7.0% and editable (D-4). State-specific rules and back-to-school tax holidays are not modeled, and the interface says so rather than being silently wrong.
+- **BR-02 Tax.** Total cost includes sales tax at the session rate, defaulting to 7.0% and editable (D-4). State-specific rules and back-to-school tax holidays are not modeled, and the interface says so rather than being silently wrong.
 
-- **BR-03 No naked subtotals.** Any figure labeled "total" anywhere in the interface is landed cost. Item subtotal may appear only when explicitly labeled as such.
+- **BR-03 No naked subtotals.** Any figure labeled "total cost" includes tax and fulfillment fees. An item subtotal may appear only when explicitly labeled as such and must never be presented as the total cost.
 
 - **BR-04 Budget shortfall.** When the cheapest valid cart exceeds the budget, the agent reports the minimum achievable cost, the shortfall, the available cheaper substitutions, and the specific items driving the gap. It then requests approval to raise the budget or to drop a required item. It never drops one itself.
 
-- **BR-05 Optional items.** Excluded from the budgeted cart. Offered as an add-on only when landed cost is at or below ninety percent of budget, and presented with the resulting new total.
+- **BR-05 Optional items.** Excluded from the budgeted cart. Offered as an add-on only when total cost is at or below ninety percent of budget, and presented with the resulting new total.
 
 - **BR-06 Overage ceiling.** Purchased units may exceed the unit need by at most fifty percent, or six units, whichever is greater, unless the larger pack is the only option available, in which case it proceeds with a note.
 
-- **BR-07 Trip penalty.** Each store beyond the first carries a six-dollar implicit cost in optimization, so a second store must save more than six dollars in landed cost to be recommended. The penalty is a comparison device and never appears in the total shown to the parent.
+- **BR-07 Trip penalty.** Each store beyond the first carries a six-dollar implicit cost in optimization, so a second store must save more than six dollars in total cost to be recommended. The penalty is a comparison device and never appears in the total shown to the parent.
 
 - **BR-08 Non-returnable threshold.** Non-returnable items above fifteen dollars require approval regardless of substitution severity.
 
@@ -335,12 +336,12 @@ These are the failures that will actually occur. Each carries a required behavio
 
 | **\#**   | **Case**                                        | **Required behavior**                                                                                                                          | **Status**    |
 |----------|-------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|---------------|
-| **E-18** | Cart of \$137 against a \$150 budget            | Recommend it. Confirm \$137 is landed cost rather than subtotal.                                                                               | **Today**     |
+| **E-18** | Cart of \$137 against a \$150 budget            | Recommend it. Confirm \$137 is total cost rather than subtotal.                                                                               | **Today**     |
 | **E-19** | Cart of \$158 against a \$150 budget            | Show cheaper alternatives first, then request approval for the overage (BR-04).                                                                | **Today**     |
 | **E-20** | Cheapest possible cart is \$135 against \$100   | Report the minimum, the shortfall, available substitutions, and the driving items. Request approval. Never remove items automatically (FR-29). | **Today**     |
 | **E-21** | Budget met on items, breached by fees and tax   | Must be caught before presenting. This is the failure BR-03 exists to prevent.                                                                 | **Today**     |
 | **E-22** | Per-child budgets, one child over and one under | Report per child and offer to rebalance. Never rebalance silently.                                                                             | **This week** |
-| **E-23** | Delivery fee waived above a spending threshold  | Consider whether a small addition crosses the threshold and lowers landed cost; surface as a suggestion, never add automatically.              | **This week** |
+| **E-23** | Delivery fee waived above a spending threshold  | Consider whether a small addition crosses the threshold and lowers total cost; surface as a suggestion, never add automatically.              | **This week** |
 
 ### 10.4 Multi-store and fulfillment
 
@@ -417,10 +418,10 @@ Targets are set today; measured results follow from the real-list validation in 
 | **Extraction accuracy**    | Item-level precision and recall against hand-labeled real lists    | At least 90% recall on required items                      |
 | **Quantity accuracy**      | Correct quantity and unit extracted                                | At least 85%                                               |
 | **Match acceptance**       | Proposed matches a human rates as acceptable                       | At least 85%                                               |
-| **Landed cost difference** | Agent cart against manual baseline cart, same lists                | At or below baseline                                       |
+| **Total cost difference** | Agent cart against manual baseline cart, same lists                | At or below baseline                                       |
 | **Time to cart**           | Session start to final summary                                     | Under 3 minutes, against a 45 to 60 minute manual baseline |
 | **Interrupt count**        | Approval requests per session                                      | Median of 3 or fewer (BR-10)                               |
-| **Budget adherence**       | Sessions where landed cost is within budget or explicitly approved | 100%. A correctness requirement rather than a target       |
+| **Budget adherence**       | Sessions where total cost is within budget or explicitly approved | 100%. A correctness requirement rather than a target       |
 | **Re-plan success**        | Correct cart produced after stockout injection                     | 100% on tested scenarios                                   |
 
 *The manual baseline must be timed by a team member working an actual list. One person, one list, a stopwatch. That single data point does more for the problem-framing dimension of the grade than another paragraph of description.*
@@ -466,7 +467,7 @@ Treated as a test tier. Run the full five-minute flow end to end at least three 
 | **agent/normalize** | Canonical names, unit conversion, quantity ranges                           |
 | **agent/aggregate** | Cross-child roll-up into unit needs                                         |
 | **agent/match**     | Requirement to candidate offers                                             |
-| **agent/optimize**  | Deterministic packaging, store assignment, and landed cost. No model calls. |
+| **agent/optimize**  | Deterministic packaging, store assignment, and total cost. No model calls. |
 | **agent/gate**      | The seven interrupt conditions                                              |
 | **agent/decisions** | Audit log                                                                   |
 | **data**            | Seeded catalog and store definitions                                        |
@@ -498,7 +499,7 @@ The optimizer is the component most likely to contain subtle errors, and it is t
 
 - A teammate can open a URL, paste or upload two supply lists, set a budget, choose a mode, and reach a final cart.
 
-- Every figure labeled as a total is landed cost.
+- Every figure labeled as a total is total cost.
 
 - Injecting a stockout produces a correct revised cart without losing prior approvals.
 

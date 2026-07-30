@@ -30,7 +30,8 @@ BASIS_POINTS_DENOMINATOR = 10_000  # BR-02: integer tax-rate scale.
 TAX_ROUNDING_METHOD = "half_up_to_nearest_cent"  # BR-02: fractional cents.
 TAX_ROUNDING_OFFSET = BASIS_POINTS_DENOMINATOR // 2  # BR-02: half-up offset.
 
-TOTAL_INCLUDES_TAX_AND_FEES = True  # BR-03: totals are always landed cost.
+TOTAL_INCLUDES_TAX_AND_FEES = True  # BR-03: total cost includes tax and fees.
+# Internal ``landed_cost`` identifiers are presented to users as "total cost".
 
 REQUIRED_ITEM_AUTO_DROP_ALLOWED = False  # BR-04: required items stay in the cart.
 

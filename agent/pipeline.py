@@ -378,7 +378,7 @@ def _record_cart_decisions(
                 (
                     f"Assigned {len(order.lines)} cart line(s) to "
                     f"{order.store_id} by {order.fulfillment_method}; "
-                    f"landed cost is {order.landed_cost} cents."
+                    f"total cost is {order.landed_cost} cents."
                 ),
                 actor="agent",
                 affected_lines=tuple(
@@ -388,17 +388,17 @@ def _record_cart_decisions(
 
     if optimization.budget_cents is None:
         rationale = (
-            f"No budget ceiling was set; minimum landed cost is "
+            f"No budget ceiling was set; minimum total cost is "
             f"{optimization.landed_cost} cents."
         )
     elif optimization.within_budget:
         rationale = (
             f"The cart is within budget at "
-            f"{optimization.landed_cost} cents landed."
+            f"a total cost of {optimization.landed_cost} cents."
         )
     else:
         rationale = (
-            f"The minimum landed cost exceeds budget by "
+            f"The minimum total cost exceeds budget by "
             f"{optimization.shortfall_cents} cents; no required item was "
             "removed."
         )

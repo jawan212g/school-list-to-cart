@@ -475,7 +475,7 @@ def test_backward_intake_navigation_preserves_all_section_values() -> None:
 
     state.update(
         {
-            "shopping_preference_label": "Lowest landed cost",
+            "shopping_preference_label": "Lowest total cost",
             "store_radius_miles": 7.5,
             "fulfillment_label": "Best available",
             "sales_tax_state": "Indiana",
@@ -507,7 +507,7 @@ def test_backward_intake_navigation_preserves_all_section_values() -> None:
     assert state["student_name_0"] == "Jesse"
     assert state["student_grade_0"] == "Grade 5"
     assert state["budget_0"] == "85.00"
-    assert state["shopping_preference_label"] == "Lowest landed cost"
+    assert state["shopping_preference_label"] == "Lowest total cost"
     assert state["store_radius_miles"] == 7.5
     assert state["fulfillment_label"] == "Best available"
     restored = app._intake_students_from_state(state, 1)
@@ -532,7 +532,7 @@ def test_banner_navigation_preserves_every_completed_stage_value() -> None:
         "child_grade_0": "Grade 2",
         "student_grade_0": "Grade 2",
         "combined_budget_text": "150.00",
-        "shopping_preference_label": "Lowest landed cost",
+        "shopping_preference_label": "Lowest total cost",
         "store_radius_miles": 10.0,
         "fulfillment_label": "Best available",
         "list_inputs": list_inputs,
@@ -633,7 +633,7 @@ def test_preferences_renderer_builds_intake_from_durable_values() -> None:
             "budget_mode_label": "One combined budget",
             "previous_budget_mode_label": "One combined budget",
             "combined_budget_text": "85.50",
-            "shopping_preference_label": "Lowest landed cost",
+            "shopping_preference_label": "Lowest total cost",
             "store_radius_miles": 10.0,
             "fulfillment_label": "Best available",
             "sales_tax_state": app.DEFAULT_TAX_STATE_OPTION,
@@ -2159,7 +2159,7 @@ def test_no_budget_summary_shows_cost_without_budget_comparison() -> None:
 
     assert column_counts == [2]
     assert ("caption", "No budget comparison selected.") in events
-    assert any(kind == "metric:Landed cost" for kind, _ in events)
+    assert any(kind == "metric:Total cost" for kind, _ in events)
     assert not any(
         kind in {"metric:Budget remaining", "metric:Budget shortfall"}
         for kind, _ in events
