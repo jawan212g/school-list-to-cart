@@ -1229,8 +1229,8 @@ def test_budget_step_renders_one_field_for_every_intake_entry() -> None:
     assert "Maya budget" in rendered_fields[0][0]
     assert "Ms. Rivera budget" in rendered_fields[1][0]
     assert tuple(help_text for _, _, help_text in rendered_fields) == (
-        app.PER_ENTRY_BUDGET_HELP,
-        app.PER_ENTRY_BUDGET_HELP,
+        app.escape_streamlit_dollars(app.PER_ENTRY_BUDGET_HELP),
+        None,
     )
     assert app.budget_entry_fields(
         app._intake_students_from_state(
@@ -1370,12 +1370,12 @@ def test_budget_screen_scales_untouched_starting_values_by_student_count() -> No
     assert BudgetStreamlit.session_state["budget_0"] == "75.00"
     assert BudgetStreamlit.session_state["budget_1"] == "750.00"
     assert rendered_help == [
-        app.COMBINED_BUDGET_HELP,
-        app.COMBINED_BUDGET_HELP,
-        app.COMBINED_BUDGET_HELP,
-        app.COMBINED_BUDGET_HELP,
-        app.PER_ENTRY_BUDGET_HELP,
-        app.PER_ENTRY_BUDGET_HELP,
+        app.escape_streamlit_dollars(app.COMBINED_BUDGET_HELP),
+        app.escape_streamlit_dollars(app.COMBINED_BUDGET_HELP),
+        app.escape_streamlit_dollars(app.COMBINED_BUDGET_HELP),
+        app.escape_streamlit_dollars(app.COMBINED_BUDGET_HELP),
+        app.escape_streamlit_dollars(app.PER_ENTRY_BUDGET_HELP),
+        None,
     ]
 
 
@@ -1825,11 +1825,11 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert "budget_validation_attempted" in budget_source
     assert "disabled=" not in budget_source
     assert app.COMBINED_BUDGET_HELP == (
-        "Enter the total you want to spend, for example 75 or 85.50."
+        "Enter the total you want to spend, for example 75 or $85.50."
     )
     assert app.PER_ENTRY_BUDGET_HELP == (
         "Enter the amount you want to spend for this student or classroom, "
-        "for example 75 or 85.50."
+        "for example 75 or $85.50."
     )
     assert "COMBINED_BUDGET_HELP" in budget_source
     assert "PER_ENTRY_BUDGET_HELP" in budget_source

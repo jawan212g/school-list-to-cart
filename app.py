@@ -187,11 +187,11 @@ DEFAULT_BUDGET_TEXT = (
     f"{STARTING_BUDGET_CENTS_PER_STUDENT % CENTS_PER_DOLLAR:02d}"
 )
 COMBINED_BUDGET_HELP = (
-    "Enter the total you want to spend, for example 75 or 85.50."
+    "Enter the total you want to spend, for example 75 or $85.50."
 )
 PER_ENTRY_BUDGET_HELP = (
     "Enter the amount you want to spend for this student or classroom, "
-    "for example 75 or 85.50."
+    "for example 75 or $85.50."
 )
 DEFAULT_RADIUS_MILES = 10.0
 NO_SET_BUDGET_LABEL = "No set budget"
@@ -5108,7 +5108,7 @@ def _render_budget_amount_input(
     label: str,
     widget_key: str,
     state_key: str,
-    help_text: str,
+    help_text: str | None,
 ) -> str:
     """Render one FR-03 amount field with the shared budget help popover."""
 
@@ -5118,7 +5118,11 @@ def _render_budget_amount_input(
             key=widget_key,
             on_change=commit_intake_widget_value,
             args=(state_key,),
-            help=help_text,
+            help=(
+                escape_streamlit_dollars(help_text)
+                if help_text is not None
+                else None
+            ),
         )
     )
 
@@ -5204,7 +5208,7 @@ def _render_budget_step(st: Any) -> None:
                 )
             )
     elif budget_mode_label == "A budget for each student or classroom":
-        for _, _, label, budget_key in budget_entry_fields(students):
+        for entry_index, _, label, budget_key in budget_entry_fields(students):
             budget_widget_key = mount_intake_widget_value(
                 st.session_state,
                 budget_key,
@@ -5217,7 +5221,7 @@ def _render_budget_step(st: Any) -> None:
                 ),
                 budget_widget_key,
                 budget_key,
-                PER_ENTRY_BUDGET_HELP,
+                PER_ENTRY_BUDGET_HELP if entry_index == 0 else None,
             )
             st.session_state[budget_key] = budget_text
             if validation_attempted and budget_key in budget_errors:

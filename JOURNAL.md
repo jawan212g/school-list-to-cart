@@ -3677,3 +3677,59 @@ treatment as the combined-budget input, with copy scoped to that entry.
 
 - Confirm the two popovers appear side by side as intended in the deployed
   Streamlit application.
+
+## 2026-07-29 - Single per-entry budget help icon
+
+### Objective
+
+Keep the per-entry budget guidance available without repeating the same help
+icon beside every student or classroom amount, and make the dollar-sign example
+match accepted input.
+
+### Work completed
+
+- Kept the combined-budget help icon unchanged.
+- Passed per-entry help text only to the first rendered student or classroom
+  amount; every later amount receives no help value and therefore no icon.
+- Changed both paired help sentences from `85.50` to `$85.50`.
+- Escaped the dollar sign only at the Streamlit display boundary so the parent
+  sees a literal dollar sign rather than Markdown math formatting.
+- Updated production Budget-screen tests to assert one per-entry help value
+  followed by `None` for later inputs.
+
+### Decisions made
+
+- No parsing change or new business rule was needed. `money_to_cents` already
+  accepts a single leading dollar sign and correctly grouped thousands
+  separators.
+- Budget calculations, allocation, rounding, validation, and thresholds remain
+  unchanged.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Direct production-parser verification:
+  `$85.50 -> 8550`, `85.50 -> 8550`, and `$1,085.50 -> 108550`.
+- Focused tests: 4 passed, 108 deselected in 1.44 seconds.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 419 passed, 1 skipped in
+  3.18 seconds.
+
+### Problems or limitations
+
+- Streamlit is not installed locally on Windows ARM64, so icon placement was
+  verified through the production renderer's exact `help` values rather than a
+  local visual run.
+
+### Remaining work
+
+- None for this scoped follow-up.
+
+### Recommended next step
+
+- Confirm in the deployed app that only the first per-entry amount has a help
+  icon and that both popovers display `$85.50` literally.
