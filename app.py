@@ -207,8 +207,8 @@ PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY = (
     "personalize_parent_edited_group_ids"
 )
 PERSONALIZE_ORIGINAL_ITEMS_KEY = "personalize_original_review_items"
-PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY = (
-    "personalize_review_source_fingerprint"
+PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY = (
+    "personalize_review_source_fingerprints"
 )
 WORK_EPISODE_COUNTER_KEY = "working_progress_episode_counter"
 WORK_EPISODE_ACTIVE_KEY = "working_progress_active_episode"
@@ -3238,7 +3238,7 @@ def _initialize_state(st: Any) -> None:
         "last_added_review_item": None,
         "requirement_merge_validation_errors": (),
         "review_items": (),
-        PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY: None,
+        PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY: {},
         "organized_list_confirmed": False,
         "allow_unresolved_items": False,
         "list_identity_confirmed": False,
@@ -7461,30 +7461,30 @@ def _initialize_personalize_original_items(
     return originals
 
 
-def _extraction_envelopes_fingerprint(
+def _extraction_envelope_fingerprints(
     extractions: Mapping[str, ExtractionEnvelope],
-) -> str:
-    """Fingerprint the finalized extraction envelopes that produce review rows."""
+) -> Mapping[str, str]:
+    """Fingerprint each student's finalized source envelope independently."""
 
-    payload = tuple(
-        (
-            child_id,
+    fingerprints: dict[str, str] = {}
+    for child_id in sorted(extractions):
+        serialized = json.dumps(
             extractions[child_id].model_dump(mode="json"),
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
         )
-        for child_id in sorted(extractions)
-    )
-    serialized = json.dumps(
-        payload,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        fingerprints[child_id] = hashlib.sha256(
+            serialized.encode("utf-8")
+        ).hexdigest()
+    return fingerprints
 
 
 def _clear_source_review_widget_state(
     state: MutableMapping[str, Any],
     source_items: Sequence[SupplyItemReview],
+    *,
+    group_ids: Iterable[str] = (),
 ) -> None:
     """Discard mounted widget values tied to superseded source review rows."""
 
@@ -7497,9 +7497,7 @@ def _clear_source_review_widget_state(
             f"optional:{item.review_id}",
         )
     }
-    prefixes.update(
-        group.group_id for group in review_flag_groups(source_items)
-    )
+    prefixes.update(group_ids)
     for key in tuple(state):
         if not isinstance(key, str):
             continue
@@ -7540,22 +7538,171 @@ def _refresh_personalize_review_cache(
     state: MutableMapping[str, Any],
     extractions: Mapping[str, ExtractionEnvelope],
 ) -> bool:
-    """Rebuild BR-52 source rows whenever their finalized envelopes change."""
+    """Refresh only BR-52 rows affected by changed student envelopes."""
 
-    fingerprint = _extraction_envelopes_fingerprint(extractions)
+    fingerprints = dict(_extraction_envelope_fingerprints(extractions))
+    stored_fingerprints = state.get(
+        PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY,
+        {},
+    )
+    prior_fingerprints = (
+        {
+            str(child_id): str(fingerprint)
+            for child_id, fingerprint in stored_fingerprints.items()
+        }
+        if isinstance(stored_fingerprints, Mapping)
+        else {}
+    )
     if (
-        state.get(PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY) == fingerprint
+        prior_fingerprints == fingerprints
         and "review_items" in state
     ):
         return False
 
     prior_source_items = tuple(state.get("review_items", ()))
-    _clear_source_review_widget_state(state, prior_source_items)
-    state["review_items"] = organize_extractions(dict(extractions))
-    state[PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY] = fingerprint
-    state[PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] = frozenset()
-    state[PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] = frozenset()
-    state[PERSONALIZE_ORIGINAL_ITEMS_KEY] = {}
+    parent_items = tuple(state.get("parent_added_review_items", ()))
+    fresh_source_items = organize_extractions(dict(extractions))
+    changed_child_ids = {
+        child_id
+        for child_id in set(prior_fingerprints) | set(fingerprints)
+        if prior_fingerprints.get(child_id) != fingerprints.get(child_id)
+    }
+    if "review_items" not in state:
+        changed_child_ids.update(fingerprints)
+
+    prior_source_by_id = {
+        item.review_id: item for item in prior_source_items
+    }
+    prior_all_items = (*prior_source_items, *parent_items)
+    fresh_all_items = (*fresh_source_items, *parent_items)
+    prior_all_by_id = {
+        item.review_id: item for item in prior_all_items
+    }
+    fresh_all_by_id = {
+        item.review_id: item for item in fresh_all_items
+    }
+    prior_groups = review_flag_groups(prior_all_items)
+    fresh_groups = review_flag_groups(fresh_all_items)
+    affected_prior_groups = tuple(
+        group
+        for group in prior_groups
+        if any(
+            prior_all_by_id[row_id].child_id in changed_child_ids
+            for row_id in group.row_ids
+            if row_id in prior_all_by_id
+        )
+    )
+    affected_fresh_groups = tuple(
+        group
+        for group in fresh_groups
+        if any(
+            fresh_all_by_id[row_id].child_id in changed_child_ids
+            for row_id in group.row_ids
+            if row_id in fresh_all_by_id
+        )
+    )
+    affected_prior_row_ids = {
+        row_id
+        for group in affected_prior_groups
+        for row_id in group.row_ids
+    }
+    affected_fresh_row_ids = {
+        row_id
+        for group in affected_fresh_groups
+        for row_id in group.row_ids
+    }
+    refreshed_source_items = tuple(
+        (
+            fresh_item
+            if (
+                fresh_item.child_id in changed_child_ids
+                or fresh_item.review_id in affected_prior_row_ids
+                or fresh_item.review_id in affected_fresh_row_ids
+            )
+            else prior_source_by_id.get(fresh_item.review_id, fresh_item)
+        )
+        for fresh_item in fresh_source_items
+    )
+    refreshed_ids = {
+        item.review_id for item in refreshed_source_items
+    }
+    prior_rows_to_clear = tuple(
+        item
+        for item in prior_source_items
+        if (
+            item.child_id in changed_child_ids
+            or item.review_id in affected_prior_row_ids
+            or item.review_id not in refreshed_ids
+        )
+    )
+    _clear_source_review_widget_state(
+        state,
+        prior_rows_to_clear,
+        group_ids=(
+            group.group_id for group in affected_prior_groups
+        ),
+    )
+
+    def group_identity(
+        group: ReviewFlagGroup,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        return group.row_ids, group.messages
+
+    fresh_group_by_identity = {
+        group_identity(group): group for group in fresh_groups
+    }
+    affected_prior_group_ids = {
+        group.group_id for group in affected_prior_groups
+    }
+
+    def remap_group_ids(state_key: str) -> frozenset[str]:
+        prior_selected = frozenset(state.get(state_key, ()))
+        remapped: set[str] = set()
+        for prior_group in prior_groups:
+            if (
+                prior_group.group_id not in prior_selected
+                or prior_group.group_id in affected_prior_group_ids
+            ):
+                continue
+            fresh_group = fresh_group_by_identity.get(
+                group_identity(prior_group)
+            )
+            if fresh_group is not None:
+                remapped.add(fresh_group.group_id)
+        return frozenset(remapped)
+
+    prior_originals = dict(
+        state.get(PERSONALIZE_ORIGINAL_ITEMS_KEY, {})
+    )
+    rebuilt_row_ids = {
+        item.review_id
+        for item in refreshed_source_items
+        if (
+            item.child_id in changed_child_ids
+            or item.review_id in affected_prior_row_ids
+            or item.review_id in affected_fresh_row_ids
+        )
+    }
+    current_items = (*refreshed_source_items, *parent_items)
+    state[PERSONALIZE_ORIGINAL_ITEMS_KEY] = {
+        item.review_id: (
+            prior_originals[item.review_id]
+            if (
+                item.review_id not in rebuilt_row_ids
+                and item.review_id in prior_originals
+            )
+            else item.model_copy(deep=True)
+        )
+        for item in current_items
+    }
+    state["review_items"] = refreshed_source_items
+    state[PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY] = fingerprints
+    state[PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] = remap_group_ids(
+        PERSONALIZE_CONFIRMED_GROUP_IDS_KEY
+    )
+    state[PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] = remap_group_ids(
+        PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY
+    )
     return True
 
 
@@ -12336,8 +12483,8 @@ def _render_review(st: Any) -> None:
     st.session_state["review_items"] = reviewed
     st.session_state["parent_added_review_items"] = ()
     st.session_state["extracted_lists"] = confirmed
-    st.session_state[PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY] = (
-        _extraction_envelopes_fingerprint(confirmed)
+    st.session_state[PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY] = (
+        _extraction_envelope_fingerprints(confirmed)
     )
     st.session_state["organized_list_confirmed"] = True
     st.session_state["allow_unresolved_items"] = False

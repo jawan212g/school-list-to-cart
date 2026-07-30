@@ -66,8 +66,8 @@ def _mark_personalize_review_cache_current(
 
     extractions = state["extracted_lists"]
     assert isinstance(extractions, dict)
-    state[app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY] = (
-        app._extraction_envelopes_fingerprint(extractions)
+    state[app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY] = (
+        app._extraction_envelope_fingerprints(extractions)
     )
 
 
@@ -6254,8 +6254,8 @@ def test_grade_change_writer_refreshes_stale_personalize_rows() -> None:
         },
         "intake_previous_grade_0": "Grade 2",
         "review_items": organize_extractions({"child-1": earlier}),
-        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY: (
-            app._extraction_envelopes_fingerprint({"child-1": earlier})
+        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY: (
+            app._extraction_envelope_fingerprints({"child-1": earlier})
         ),
     }
 
@@ -6310,8 +6310,8 @@ def test_automatic_section_writer_refreshes_stale_personalize_rows() -> None:
     state: dict[str, object] = {
         "review_items": organize_extractions({"child-1": earlier}),
         "parent_added_review_items": (),
-        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY: (
-            app._extraction_envelopes_fingerprint({"child-1": earlier})
+        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY: (
+            app._extraction_envelope_fingerprints({"child-1": earlier})
         ),
     }
 
@@ -6364,8 +6364,8 @@ def test_source_refresh_preserves_parent_added_item() -> None:
     state: dict[str, object] = {
         "review_items": organize_extractions({"child-1": earlier}),
         "parent_added_review_items": (parent_item,),
-        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY: (
-            app._extraction_envelopes_fingerprint({"child-1": earlier})
+        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY: (
+            app._extraction_envelope_fingerprints({"child-1": earlier})
         ),
     }
 
@@ -6378,6 +6378,233 @@ def test_source_refresh_preserves_parent_added_item() -> None:
     assert source_rows[0].item_name == "folders"
     assert source_rows[0].required_quantity == 3
     assert state["parent_added_review_items"] == (parent_item,)
+
+
+def test_student_refresh_preserves_another_students_parent_edits() -> None:
+    """A changed list cannot erase an unaffected student's review choices."""
+
+    earlier = {
+        "child-1": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="pencils",
+                    child_id="child-1",
+                    raw_text="12 pencils",
+                    canonical_item="pencils",
+                    quantity=12,
+                    extraction_confidence=1.0,
+                ),
+            )
+        ),
+        "child-2": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="folders",
+                    child_id="child-2",
+                    raw_text="2 folders",
+                    canonical_item="folders",
+                    quantity=2,
+                    extraction_confidence=1.0,
+                ),
+            )
+        ),
+    }
+    updated = {
+        **earlier,
+        "child-2": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="folders-new",
+                    child_id="child-2",
+                    raw_text="4 folders",
+                    canonical_item="folders",
+                    quantity=4,
+                    extraction_confidence=1.0,
+                ),
+            )
+        ),
+    }
+    initial_rows = organize_extractions(earlier)
+    pencils = next(
+        row for row in initial_rows if row.child_id == "child-1"
+    )
+    edited_pencils = pencils.model_copy(
+        update={
+            "required_quantity": 8,
+            "already_owned": True,
+        }
+    )
+    quantity_key = (
+        f"{app.personalize_settled_row_key_prefix(pencils)}:quantity"
+    )
+    owned_key = f"{app.personalize_settled_row_key_prefix(pencils)}:owned"
+    state: dict[str, object] = {
+        "review_items": tuple(
+            edited_pencils if row.review_id == pencils.review_id else row
+            for row in initial_rows
+        ),
+        "parent_added_review_items": (),
+        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY: (
+            app._extraction_envelope_fingerprints(earlier)
+        ),
+        quantity_key: 8,
+        owned_key: True,
+    }
+
+    assert app._refresh_personalize_review_cache(state, updated)
+
+    refreshed_pencils = next(
+        row
+        for row in state["review_items"]  # type: ignore[union-attr]
+        if row.child_id == "child-1"
+    )
+    refreshed_folders = next(
+        row
+        for row in state["review_items"]  # type: ignore[union-attr]
+        if row.child_id == "child-2"
+    )
+    assert refreshed_pencils.required_quantity == 8
+    assert refreshed_pencils.already_owned is True
+    assert state[quantity_key] == 8
+    assert state[owned_key] is True
+    assert refreshed_folders.required_quantity == 4
+
+
+def test_changed_shared_group_is_reconsidered_without_clearing_others() -> None:
+    """Only a shared decision touched by a changed student is reset."""
+
+    earlier = {
+        "child-1": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="paper-a",
+                    child_id="child-1",
+                    raw_text="1 pack notebook paper",
+                    canonical_item="notebook_paper",
+                    quantity=1,
+                    unit_type="pack",
+                    extraction_confidence=1.0,
+                ),
+                Requirement(
+                    req_id="glue-a",
+                    child_id="child-1",
+                    raw_text="1 pack glue sticks",
+                    canonical_item="glue_sticks",
+                    quantity=1,
+                    unit_type="pack",
+                    extraction_confidence=1.0,
+                ),
+            )
+        ),
+        "child-2": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="paper-b",
+                    child_id="child-2",
+                    raw_text="1 pack notebook paper",
+                    canonical_item="notebook_paper",
+                    quantity=1,
+                    unit_type="pack",
+                    extraction_confidence=1.0,
+                ),
+            )
+        ),
+    }
+    initial_rows = organize_extractions(earlier)
+    initial_groups = review_flag_groups(initial_rows)
+    shared_group = next(
+        group for group in initial_groups if len(group.child_ids) == 2
+    )
+    unrelated_group = next(
+        group for group in initial_groups if len(group.child_ids) == 1
+    )
+    edited_rows = tuple(
+        (
+            row.model_copy(update={"required_quantity": 7})
+            if row.review_id in unrelated_group.row_ids
+            else row.model_copy(update={"required_quantity": 9})
+            if row.review_id in shared_group.row_ids
+            else row
+        )
+        for row in initial_rows
+    )
+    state: dict[str, object] = {
+        "review_items": edited_rows,
+        "parent_added_review_items": (),
+        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY: (
+            app._extraction_envelope_fingerprints(earlier)
+        ),
+        app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY: frozenset(
+            group.group_id for group in initial_groups
+        ),
+        app.PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY: frozenset(
+            group.group_id for group in initial_groups
+        ),
+    }
+    updated = {
+        **earlier,
+        "child-2": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="paper-b-new",
+                    child_id="child-2",
+                    raw_text="2 packs notebook paper",
+                    canonical_item="notebook_paper",
+                    quantity=2,
+                    unit_type="pack",
+                    extraction_confidence=1.0,
+                ),
+            )
+        ),
+    }
+
+    assert app._refresh_personalize_review_cache(state, updated)
+
+    refreshed_rows = tuple(state["review_items"])
+    refreshed_groups = review_flag_groups(refreshed_rows)
+    refreshed_unrelated = next(
+        group
+        for group in refreshed_groups
+        if any(
+            row.item_name == "glue_sticks"
+            for row in refreshed_rows
+            if row.review_id in group.row_ids
+        )
+    )
+    confirmed = frozenset(
+        state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY]
+    )
+    parent_edited = frozenset(
+        state[app.PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY]
+    )
+    assert refreshed_unrelated.group_id in confirmed
+    assert refreshed_unrelated.group_id in parent_edited
+    assert next(
+        row
+        for row in refreshed_rows
+        if row.review_id == "child-1:glue-a"
+    ).required_quantity == 7
+    assert next(
+        row
+        for row in refreshed_rows
+        if row.review_id == "child-1:paper-a"
+    ).required_quantity == 1
+    assert next(
+        row
+        for row in refreshed_rows
+        if row.review_id == "child-2:paper-b-new"
+    ).required_quantity == 2
+    reconsidered_group_ids = {
+        group.group_id
+        for group in refreshed_groups
+        if any(
+            row.item_name == "notebook_paper"
+            for row in refreshed_rows
+            if row.review_id in group.row_ids
+        )
+    }
+    assert reconsidered_group_ids.isdisjoint(confirmed)
+    assert reconsidered_group_ids.isdisjoint(parent_edited)
 
 
 def test_custom_quantity_choice_highlights_until_parent_enters_value() -> None:

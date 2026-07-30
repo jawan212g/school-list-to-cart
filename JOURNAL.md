@@ -4410,3 +4410,34 @@ behavior was changed.
 The behavioral test is intentionally unchanged: it opens row A, edits it, opens
 row B, edits it, and requires both rows to stay open with independent values.
 ARM64 cannot execute this AppTest; the x86 workflow is the verification path.
+
+## 2026-07-30 — Personalize fingerprints scoped per student
+
+### Finding
+
+The first source-aware cache used one fingerprint for every finalized extraction
+envelope in the session. A change to one student's envelope rebuilt every
+source-derived row, which could silently erase quantity, ownership, or other
+Personalize edits already made for an unaffected student.
+
+### Resolution
+
+- Store one finalized-envelope fingerprint per student.
+- Reuse the existing source-derived row object and widget state for every
+  unchanged student.
+- Rebuild rows only for changed students and for members of a deduplicated
+  cross-student decision touched by that change.
+- Reconsider the affected shared decision while retaining unrelated confirmed
+  and parent-edited groups.
+- Keep parent-added items outside source refreshes.
+
+The screen still calls the same cache-refresh function; no parallel invalidation
+path was added. Parent-facing notification copy for a choice invalidated by its
+own changed source remains intentionally unimplemented pending approval.
+
+### Regression coverage
+
+- A quantity and ownership edit for student A survives a replacement extraction
+  for student B, including the mounted row widget values.
+- A shared ambiguity involving A and B is reconsidered when B changes, while an
+  unrelated edited ambiguity for A remains accepted and unchanged.
