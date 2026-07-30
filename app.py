@@ -7857,6 +7857,23 @@ def _resolve_detail_widget_values(
     package_state = state.get(f"{key_prefix}:package-state")
     if package_state in {"specified", "assumed", "any", "unspecified"}:
         updates["package_quantity_state"] = package_state
+    optional_value = state.get(f"{key_prefix}:optional")
+    if isinstance(optional_value, bool):
+        updates["optional"] = optional_value
+    owned_value = state.get(f"{key_prefix}:owned")
+    if isinstance(owned_value, bool):
+        updates["already_owned"] = owned_value
+    delete_value = state.get(f"{key_prefix}:delete")
+    if isinstance(delete_value, bool):
+        updates["review_status"] = (
+            "deleted"
+            if delete_value
+            else (
+                "pending"
+                if item.review_status == "deleted"
+                else item.review_status
+            )
+        )
     return item.model_copy(update=updates) if updates else item
 
 

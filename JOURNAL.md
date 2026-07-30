@@ -4557,7 +4557,11 @@ item moves into the cart on the same interaction.
 
 The follow-up fixture also said `1 box of tissues` while constructing a
 Requirement with unit `each`. It was corrected to the production extraction
-shape (`box`) rather than weakening the expected cart transition.
+shape (`box`) rather than weakening the expected cart transition. That exposed
+the remaining production cause: the pre-section widget resolver consumed item
+and quantity edits but not optional, already-owned, or do-not-buy status. Those
+three mounted values are now resolved through the same function before BR-52
+builds any section.
 
 ### Deferred decision
 
