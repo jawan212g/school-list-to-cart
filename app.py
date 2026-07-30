@@ -9477,6 +9477,7 @@ def _render_primary_review_decisions(
     item: SupplyItemReview,
     *,
     key_prefix: str,
+    button_scope: str,
     members: Sequence[SupplyItemReview],
 ) -> tuple[SupplyItemReview, frozenset[str]]:
     """Render A-18's two explicit ways to resolve an AI recommendation."""
@@ -9487,7 +9488,7 @@ def _render_primary_review_decisions(
     accept_column, edit_column, owned_column = st.columns(3)
     accept_column.button(
         "Use this recommendation",
-        key=f"personalize-action:accept:{key_prefix}",
+        key=f"personalize-action:accept:{button_scope}",
         type="primary",
         on_click=_approve_personalize_groups,
         args=(st.session_state, (key_prefix,)),
@@ -9495,7 +9496,7 @@ def _render_primary_review_decisions(
     )
     edit_column.button(
         "Change item or quantity",
-        key=f"personalize-action:edit:{key_prefix}",
+        key=f"personalize-action:edit:{button_scope}",
         on_click=_set_personalize_decision_action,
         args=(
             st.session_state,
@@ -9506,7 +9507,7 @@ def _render_primary_review_decisions(
     )
     owned_column.button(
         "We already own this",
-        key=f"personalize-action:owned:{key_prefix}",
+        key=f"personalize-action:owned:{button_scope}",
         on_click=_mark_personalize_group_owned,
         args=(st.session_state, key_prefix, tuple(members)),
         use_container_width=True,
@@ -9544,7 +9545,7 @@ def _render_primary_review_decisions(
         )
         st.button(
             "Send selection to cart",
-            key=f"personalize-action:send-selection:{key_prefix}",
+            key=f"personalize-action:send-selection:{button_scope}",
             type="primary",
             on_click=_commit_personalize_decision,
             args=(
@@ -9577,6 +9578,7 @@ def _render_compact_review_row(
     offers: Sequence[Offer],
     flag_messages: Sequence[str] = (),
     original_items: Mapping[str, SupplyItemReview] | None = None,
+    view_revision: int = 0,
 ) -> tuple[dict[str, SupplyItemReview], bool]:
     """Render one parent-first item card in the required verification order."""
 
@@ -9697,6 +9699,7 @@ def _render_compact_review_row(
                     st,
                     representative,
                     key_prefix=key_prefix,
+                    button_scope=f"{view_revision}:{key_prefix}",
                     members=members,
                 )
             )
@@ -12212,6 +12215,7 @@ def _render_review(st: Any) -> None:
                         "Use all recommendations here",
                         key=(
                             "personalize-action:approve-section:"
+                            f"{st.session_state[PERSONALIZE_VIEW_REVISION_KEY]}:"
                             f"{child_id}"
                         ),
                         on_click=_approve_personalize_groups,
@@ -12279,6 +12283,9 @@ def _render_review(st: Any) -> None:
                     offers=review_offers,
                     flag_messages=group.messages,
                     original_items=original_items,
+                    view_revision=int(
+                        st.session_state[PERSONALIZE_VIEW_REVISION_KEY]
+                    ),
                 )
                 edited_by_id.update(edited)
                 if confirmed and group.group_id not in confirmed_flag_group_ids:
