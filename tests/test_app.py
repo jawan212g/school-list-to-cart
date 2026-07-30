@@ -5977,6 +5977,220 @@ def test_merge_exclusion_reaches_personalize_cart(
     assert sections[0].cart_item_ids == ()
 
 
+def _submit_merge_choices_to_personalize(
+    monkeypatch: pytest.MonkeyPatch,
+    envelope: ExtractionEnvelope,
+    *,
+    selected_quantity: int,
+    configure_state: object | None = None,
+) -> tuple[
+    dict[str, object],
+    tuple[SupplyItemReview, ...],
+]:
+    """Drive the production duplicate screen into Personalize rows."""
+
+    _, merge_result = consolidate_extractions({"child-1": envelope})
+    decision = item_decisions(merge_result)[0]
+
+    class RerunRequested(Exception):
+        pass
+
+    class MergeRecorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {
+                "requirement_merge_result": merge_result,
+                "unmerged_extracted_lists": {"child-1": envelope},
+                "intake": {
+                    "children": (
+                        {
+                            "child_id": "child-1",
+                            "label": "Jawan",
+                            "grade": "Grade 5",
+                        },
+                    )
+                },
+                "list_inputs": (),
+                "review_items": organize_extractions({"child-1": envelope}),
+                "parent_added_review_items": (),
+            }
+            if callable(configure_state):
+                configure_state(self.session_state, decision)
+
+        def __enter__(self) -> "MergeRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def container(self, **kwargs: object) -> "MergeRecorder":
+            del kwargs
+            return self
+
+        def expander(self, *args: object, **kwargs: object) -> "MergeRecorder":
+            del args, kwargs
+            return self
+
+        def columns(self, spec: object) -> tuple["MergeRecorder", ...]:
+            count = spec if isinstance(spec, int) else len(spec)
+            return tuple(self for _ in range(count))
+
+        def header(self, value: object) -> None:
+            del value
+
+        def subheader(self, value: object) -> None:
+            del value
+
+        def write(self, value: object) -> None:
+            del value
+
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del value, kwargs
+
+        def caption(self, value: object) -> None:
+            del value
+
+        def radio(
+            self,
+            label: str,
+            options: tuple[str, ...],
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            return str(self.session_state.get(key, options[0]))
+
+        def checkbox(
+            self,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> bool:
+            del label, kwargs
+            return bool(self.session_state.get(key, False))
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del kwargs
+            return label == "Continue with these choices"
+
+        def warning(self, value: object) -> None:
+            del value
+
+        def error(self, value: object) -> None:
+            raise AssertionError(value)
+
+        def rerun(self) -> None:
+            raise RerunRequested
+
+    monkeypatch.setattr(
+        app,
+        "_render_merge_source_rows",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_merge_quantity_controls",
+        lambda *args, **kwargs: ("custom", selected_quantity),
+    )
+    recorder = MergeRecorder()
+    with pytest.raises(RerunRequested):
+        app._render_requirement_merge(recorder)
+
+    merged = dict(recorder.session_state["extracted_lists"])
+    personalize_rows = organize_extractions(merged)
+    return recorder.session_state, personalize_rows
+
+
+def test_merge_quantity_choice_reaches_personalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chosen duplicate quantity replaces stale Personalize quantity."""
+
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="pencils-grade",
+                child_id="child-1",
+                raw_text="12 pencils",
+                canonical_item="pencils",
+                quantity=12,
+                source_section="5th",
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="pencils-capable",
+                child_id="child-1",
+                raw_text="24 pencils",
+                canonical_item="pencils",
+                quantity=24,
+                source_section="Highly Capable Class",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    state, personalize_rows = _submit_merge_choices_to_personalize(
+        monkeypatch,
+        envelope,
+        selected_quantity=17,
+    )
+
+    assert state["review_items"] == ()
+    assert len(personalize_rows) == 1
+    assert personalize_rows[0].required_quantity == 17
+
+
+def test_merge_product_identity_choice_reaches_personalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-product answer replaces stale separate Personalize rows."""
+
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="folders-grade",
+                child_id="child-1",
+                raw_text="2 cardboard folders",
+                canonical_item="folders",
+                quantity=2,
+                attributes={"material": "cardboard"},
+                source_section="5th",
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="folders-capable",
+                child_id="child-1",
+                raw_text="3 plastic folders",
+                canonical_item="folders",
+                quantity=3,
+                attributes={"material": "plastic"},
+                source_section="Highly Capable Class",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    def choose_same(state: dict[str, object], decision: object) -> None:
+        identity_key = f"{decision.decision_id}:same-or-different"
+        state[identity_key] = "The same product"
+        state[f"{identity_key}:facts"] = (
+            resolve_item_decision_state(decision).state_fingerprint
+        )
+
+    state, personalize_rows = _submit_merge_choices_to_personalize(
+        monkeypatch,
+        envelope,
+        selected_quantity=4,
+        configure_state=choose_same,
+    )
+
+    assert state["review_items"] == ()
+    assert len(personalize_rows) == 1
+    assert personalize_rows[0].required_quantity == 4
+    assert personalize_rows[0].material == "cardboard"
+
+
 def test_custom_quantity_choice_highlights_until_parent_enters_value() -> None:
     """FR-12: the custom quantity field has explicit pending state."""
 

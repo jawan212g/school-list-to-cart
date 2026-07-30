@@ -4211,3 +4211,59 @@ results were confirmed to be guarded by the state they describe.
 - Run the x86 workflow before treating the change as complete.
 - The same/different control remains unchanged. Identical source descriptions
   may justify de-emphasizing it in a later, separately approved UI pass.
+
+## 2026-07-30 — Stale derived review state masked parent decisions
+
+### Objective
+
+Trace and prevent duplicate-resolution choices from being hidden by an older
+Personalize result, then cover every affected choice path.
+
+### Distinct defect class
+
+This was not another defined-but-unconsumed mechanism. The duplicate-resolution
+screen correctly stored quantity, same/different-product, and exclusion choices;
+the deterministic merge correctly consumed all three; and the resulting
+extraction envelopes were correct. Personalize then served a stale cached copy
+of `review_items` derived from an earlier merge result.
+
+The defect was live in the deployed app while 419 local tests passed. It was
+found by manual click-through when an item explicitly excluded during duplicate
+resolution reappeared in Personalize, not by the automated suite.
+
+This class should be tracked separately from BR-34, BR-32's descriptor list,
+`brand_hint`, and Parent note. Those mechanisms had no downstream consumer.
+Here, the consumers were correct and a stale derived view masked their output.
+
+### Work completed
+
+- Cleared source-derived Personalize state after fresh extraction, section
+  changes, and duplicate-resolution submission.
+- Added production-screen regressions proving that exclusion, a selected
+  quantity, and a same/different-product answer reach newly built Personalize
+  rows rather than being masked by stale rows.
+
+### Design finding and remaining work
+
+The current invalidation points fix the deployed defect but remain enumerated.
+A stronger follow-up is to store a deterministic fingerprint of the finalized
+`extracted_lists` envelopes beside `review_items` and rebuild source-derived
+rows whenever that fingerprint differs. This would make staleness detection
+follow the actual consumed source rather than relying on every future writer to
+remember an invalidation call. Parent-added rows should remain separate from
+that source-derived cache.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused production duplicate-resolution regressions: 3 passed.
+
+### Recommended next step
+
+Review and separately approve replacing enumerated Personalize cache resets
+with source-fingerprint validation.
