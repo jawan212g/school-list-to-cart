@@ -220,6 +220,9 @@ PERSONALIZE_SOURCE_CHANGE_NOTICES_KEY = (
 WORK_EPISODE_COUNTER_KEY = "working_progress_episode_counter"
 WORK_EPISODE_ACTIVE_KEY = "working_progress_active_episode"
 WORK_SCROLL_COMPLETED_KEY = "working_scroll_completed_episode"
+NEXT_TASK_SCROLL_COUNTER_KEY = "next_task_scroll_counter"
+NEXT_TASK_SCROLL_PENDING_KEY = "next_task_scroll_pending"
+NEXT_TASK_SCROLL_COMPLETED_KEY = "next_task_scroll_completed"
 DEFAULT_TAX_STATE_OPTION = "Choose a state — use the 7.0% default"
 DEVELOPMENT_DEBUG_ENV = "SCHOOL_CART_DEBUG"
 DEBUG_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -730,18 +733,10 @@ def _active_work_episode(state: MutableMapping[str, Any]) -> int:
     return next_episode
 
 
-def _render_work_progress(st: Any, message: str) -> None:
-    """Announce progress and scroll once when a work episode begins."""
+def _page_top_scroll_script() -> str:
+    """Return the shared, non-blocking page-top browser enhancement."""
 
-    episode = _active_work_episode(st.session_state)
-    should_scroll = (
-        st.session_state.get(WORK_SCROLL_COMPLETED_KEY) != episode
-    )
-    if should_scroll:
-        # Mark before rendering so an immediate rerun cannot repeat the scroll.
-        st.session_state[WORK_SCROLL_COMPLETED_KEY] = episode
-    scroll_script = (
-        """
+    return """
         <script>
         (() => {
           try {
@@ -756,7 +751,7 @@ def _render_work_progress(st: Any, message: str) -> None:
                   behavior: reduceMotion ? "auto" : "smooth"
                 });
               } catch (_error) {
-                // Scrolling is an enhancement; progress remains visible.
+                // Scrolling is an enhancement; navigation remains available.
               }
             });
           } catch (_error) {
@@ -764,10 +759,44 @@ def _render_work_progress(st: Any, message: str) -> None:
           }
         })();
         </script>
-        """
-        if should_scroll
-        else ""
+    """
+
+
+def _request_next_task_scroll(state: MutableMapping[str, Any]) -> None:
+    """Queue one page-top scroll after a successful forward transition."""
+
+    episode = int(state.get(NEXT_TASK_SCROLL_COUNTER_KEY, 0)) + 1
+    state[NEXT_TASK_SCROLL_COUNTER_KEY] = episode
+    state[NEXT_TASK_SCROLL_PENDING_KEY] = episode
+
+
+def _render_requested_next_task_scroll(st: Any) -> None:
+    """Consume one successful-transition scroll request on the next render."""
+
+    episode = st.session_state.pop(NEXT_TASK_SCROLL_PENDING_KEY, None)
+    if not isinstance(episode, int):
+        return
+    if st.session_state.get(NEXT_TASK_SCROLL_COMPLETED_KEY) == episode:
+        return
+    # Mark before rendering so an immediate rerun cannot repeat the scroll.
+    st.session_state[NEXT_TASK_SCROLL_COMPLETED_KEY] = episode
+    st.html(
+        _page_top_scroll_script(),
+        unsafe_allow_javascript=True,
     )
+
+
+def _render_work_progress(st: Any, message: str) -> None:
+    """Announce progress and scroll once when a work episode begins."""
+
+    episode = _active_work_episode(st.session_state)
+    should_scroll = (
+        st.session_state.get(WORK_SCROLL_COMPLETED_KEY) != episode
+    )
+    if should_scroll:
+        # Mark before rendering so an immediate rerun cannot repeat the scroll.
+        st.session_state[WORK_SCROLL_COMPLETED_KEY] = episode
+    scroll_script = _page_top_scroll_script() if should_scroll else ""
     st.html(
         (
             '<div role="status" aria-live="polite" aria-atomic="true" '
@@ -4780,6 +4809,7 @@ def _continue_from_students(
         state[
             NAVIGATION_STATE_PREFIX + "budget_mode_label"
         ] = initial_budget_mode
+    _request_next_task_scroll(state)
     navigate_intake_step(state, target_step)
 
 
@@ -4820,6 +4850,7 @@ def _continue_from_budget(
         state["pending_intake_notices"] = notices
     else:
         state.pop("pending_intake_notices", None)
+    _request_next_task_scroll(state)
     navigate_intake_step(state, target_step)
 
 
@@ -4914,6 +4945,7 @@ def _continue_from_preferences(
     state["ui_error_active"] = False
     _limit_reached_stage(state, 3)
     state["progress_substep"] = "adding the lists"
+    _request_next_task_scroll(state)
     state["screen"] = target_screen
 
 
@@ -10712,12 +10744,14 @@ def _render_sections(st: Any) -> None:
                 matching_child_id,
             )
             st.session_state["list_focus_child_id"] = matching_child_id
+            _request_next_task_scroll(st.session_state)
             navigate_back_to_screen(st.session_state, "lists")
             st.rerun()
         if any(
             action.startswith(SECTION_PROCEED_STUDENTS_ACTION_PREFIX)
             for action in blocked_actions.values()
         ):
+            _request_next_task_scroll(st.session_state)
             navigate_intake_step(st.session_state, 1)
             navigate_back_to_screen(st.session_state, "intake")
             st.rerun()
@@ -13201,6 +13235,7 @@ def _legacy_render_approval(st: Any) -> None:
             tuple(st.session_state["parent_decisions"])
             + response_log.entries
         )
+        _request_next_task_scroll(st.session_state)
         st.session_state["screen"] = "summary"
         st.rerun()
 
@@ -14162,6 +14197,7 @@ def _render_approval(st: Any) -> None:
         tuple(st.session_state["parent_decisions"]) + response_log.entries
     )
     st.session_state["progress_substep"] = "showing the final shopping plan"
+    _request_next_task_scroll(st.session_state)
     st.session_state["screen"] = "summary"
     st.rerun()
 
@@ -16127,6 +16163,7 @@ def main() -> None:
     preserve_navigation_state(st.session_state)
     _initialize_state(st)
     _apply_custom_css(st)
+    _render_requested_next_task_scroll(st)
     screen = st.session_state["screen"]
     _sync_work_episode_for_screen(st.session_state, screen)
     _render_app_title(st)

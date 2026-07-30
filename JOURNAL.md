@@ -4642,3 +4642,47 @@ workflow passed in run 30584416544 with the production Streamlit callback.
 
 No model call, matching behavior, price, optimizer calculation, or business
 threshold changed.
+
+## 2026-07-30 — Successful forward actions return the next task to the top
+
+### Objective
+
+When a parent successfully uses the bottom-right primary action, begin the
+next task at the top of the page, including transitions between Setup sections.
+
+### Work completed
+
+- Added a session-scoped, numbered scroll request for successful forward
+  transitions that do not enter the Working screen.
+- Students-to-Budget, Budget-to-Shopping-preferences, and
+  Shopping-preferences-to-Lists now queue one request only after validation
+  succeeds.
+- Approval-to-Summary uses the same request.
+- Section-resolution choices that deliberately return to Lists or Students
+  also use it.
+- Existing Lists, section extraction, duplicate resolution, and Personalize
+  actions retain the one-time Working-screen scroll rather than triggering a
+  second scroll.
+- Consolidated both paths on the same native Streamlit 1.60 `st.html`
+  enhancement, with reduced-motion handling and failure isolation.
+
+### State and clearing
+
+`next_task_scroll_counter` identifies each successful transition,
+`next_task_scroll_pending` holds the one request awaiting the next render, and
+`next_task_scroll_completed` records the consumed episode. The pending key is
+removed on that next render, so ordinary reruns cannot pin the page to the top.
+
+### Testing and limitations
+
+The ARM64 suite passed with 432 tests and one Streamlit test skipped. The x86
+AppTest follows the production Setup controls and proves that invalid
+transitions create no request, successful transitions consume exactly one, and
+Back navigation creates none. AppTest cannot observe browser scroll position
+or execute that assertion; the real movement still requires deployed-browser
+verification.
+
+### Architecture
+
+No extraction, matching, pricing, optimizer, gate, or business-threshold
+behavior changed.

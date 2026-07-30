@@ -682,12 +682,20 @@ def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> 
     """Setup: real widgets render immediately through every callback transition."""
 
     test_app = _run_app()
+    assert (
+        test_app.session_state.get(app.NEXT_TASK_SCROLL_COMPLETED_KEY)
+        is None
+    )
     assert any(
         button.label == "Continue to budget"
         for button in test_app.button
     )
     _click_label(test_app, "Continue to budget")
     assert test_app.session_state["intake_step"] == 1
+    assert (
+        test_app.session_state.get(app.NEXT_TASK_SCROLL_COMPLETED_KEY)
+        is None
+    )
     assert any(
         "Choose Student or Classroom" in str(error.value)
         for error in test_app.error
@@ -698,6 +706,11 @@ def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> 
     _set_widget(test_app, "selectbox", "student_grade_0", "Grade 2")
     _click_label(test_app, "Continue to budget")
     assert test_app.session_state["intake_step"] == 2
+    assert test_app.session_state[app.NEXT_TASK_SCROLL_COMPLETED_KEY] == 1
+    assert (
+        test_app.session_state.get(app.NEXT_TASK_SCROLL_PENDING_KEY)
+        is None
+    )
     assert {
         button.label for button in test_app.button
     }.issuperset(
@@ -712,6 +725,7 @@ def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> 
     )
     _click_label(test_app, "Continue to shopping preferences")
     assert test_app.session_state["intake_step"] == 2
+    assert test_app.session_state[app.NEXT_TASK_SCROLL_COMPLETED_KEY] == 1
     assert any(
         "greater than zero" in str(error.value)
         for error in test_app.error
@@ -724,12 +738,14 @@ def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> 
     )
     _click_label(test_app, "Continue to shopping preferences")
     assert test_app.session_state["intake_step"] == 3
+    assert test_app.session_state[app.NEXT_TASK_SCROLL_COMPLETED_KEY] == 2
     assert {
         button.label for button in test_app.button
     }.issuperset({"Back to budget", "Continue to the lists"})
 
     _click_label(test_app, "Back to budget")
     assert test_app.session_state["intake_step"] == 2
+    assert test_app.session_state[app.NEXT_TASK_SCROLL_COMPLETED_KEY] == 2
     assert {
         button.label for button in test_app.button
     }.issuperset(
@@ -737,13 +753,16 @@ def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> 
     )
     _click_label(test_app, "Back to students")
     assert test_app.session_state["intake_step"] == 1
+    assert test_app.session_state[app.NEXT_TASK_SCROLL_COMPLETED_KEY] == 2
     assert any(
         button.label == "Continue to budget"
         for button in test_app.button
     )
 
     _click_label(test_app, "Continue to budget")
+    assert test_app.session_state[app.NEXT_TASK_SCROLL_COMPLETED_KEY] == 3
     _click_label(test_app, "Continue to shopping preferences")
+    assert test_app.session_state[app.NEXT_TASK_SCROLL_COMPLETED_KEY] == 4
     _set_widget(
         test_app,
         "text_input",
@@ -753,6 +772,7 @@ def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> 
     _click_label(test_app, "Continue to the lists")
     assert test_app.session_state["screen"] == "intake"
     assert test_app.session_state["intake_step"] == 3
+    assert test_app.session_state[app.NEXT_TASK_SCROLL_COMPLETED_KEY] == 4
     assert any(
         "Enter a tax rate" in str(error.value)
         for error in test_app.error
@@ -760,6 +780,11 @@ def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> 
     _set_widget(test_app, "text_input", "tax_rate_text", "7.0")
     _click_label(test_app, "Continue to the lists")
     assert test_app.session_state["screen"] == "lists"
+    assert test_app.session_state[app.NEXT_TASK_SCROLL_COMPLETED_KEY] == 5
+    assert (
+        test_app.session_state.get(app.NEXT_TASK_SCROLL_PENDING_KEY)
+        is None
+    )
 
 
 def test_section_statement_and_submitted_scope_use_same_live_state() -> None:
