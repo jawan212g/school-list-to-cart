@@ -266,6 +266,61 @@ app._render_review(st)
     return test_app
 
 
+def _run_personalize_decision_screen() -> AppTest:
+    """Mount the production Personalize screen with one flagged source item."""
+
+    test_app = AppTest.from_string(
+        """
+import streamlit as st
+import app
+from agent.review import organize_extractions
+from agent.schema import ExtractionEnvelope, Requirement
+
+st.session_state.setdefault(
+    "intake",
+    {
+        "children": (
+            {
+                "child_id": "child-1",
+                "label": "Jawan",
+                "grade": "Grade 5",
+            },
+        )
+    },
+)
+st.session_state.setdefault(
+    "extracted_lists",
+    {
+        "child-1": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="composition",
+                    child_id="child-1",
+                    raw_text="1 composition notebook",
+                    canonical_item="composition_notebooks",
+                    quantity=1,
+                    extraction_confidence=0.6,
+                ),
+            )
+        )
+    },
+)
+st.session_state.setdefault(
+    "review_items",
+    organize_extractions(dict(st.session_state["extracted_lists"])),
+)
+st.session_state.setdefault("parent_added_review_items", ())
+st.session_state.setdefault("extraction_errors", {})
+st.session_state.setdefault("list_inputs", ())
+st.session_state.setdefault(app.PERSONALIZE_SELECTED_VIEW_KEY, "summary")
+app._render_review(st)
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
 def _widget(
     test_app: AppTest,
     widget_type: str,
@@ -839,3 +894,38 @@ def test_personalize_item_expanders_and_controls_keep_independent_state() -> Non
     assert erasers_expander.proto.expanded is True
     assert test_app.number_input(key=pencils_quantity.key).value == 24
     assert test_app.number_input(key=erasers_quantity.key).value == 5
+
+
+def test_personalize_edit_survives_summary_round_trip_without_button_crash() -> None:
+    """A flagged student view can be edited, left, and reopened safely."""
+
+    test_app = _run_personalize_decision_screen()
+    _click_label(test_app, "Open Jawan")
+    assert (
+        test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY]
+        == "child-1"
+    )
+
+    _click_label(test_app, "Change item or quantity")
+    assert (
+        test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY]
+        == "child-1"
+    )
+
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    navigation.set_value("summary").run()
+    _assert_no_exception(test_app)
+    assert (
+        test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY]
+        == "summary"
+    )
+
+    _click_label(test_app, "Open Jawan")
+    assert (
+        test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY]
+        == "child-1"
+    )
