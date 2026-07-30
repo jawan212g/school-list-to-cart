@@ -107,7 +107,8 @@ st.session_state.setdefault("structure_errors", {})
 st.session_state.setdefault("screen", "sections")
 st.session_state.setdefault("organized_list_confirmed", False)
 st.session_state.setdefault("extraction_cache_ready", False)
-app._render_sections(st)
+if st.session_state.get("screen") == "sections":
+    app._render_sections(st)
 """,
         default_timeout=15,
     )
