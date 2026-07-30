@@ -4635,7 +4635,8 @@ The first x86 fixture used `1 box of crayons` without a package count. Productio
 correctly retained its separate missing-pack-count review after the parent chose
 to buy the item; the purchase choice must not confirm an extraction assumption.
 The fixture was changed to the production-valid explicit quantity `24 crayons`
-so the lifecycle test isolates the school-provided override.
+so the lifecycle test isolates the school-provided override. The corrected x86
+workflow passed in run 30584416544 with the production Streamlit callback.
 
 ### Architecture
 
