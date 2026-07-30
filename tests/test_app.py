@@ -1563,6 +1563,43 @@ def test_budget_screen_renders_entry_aware_mode_labels() -> None:
     ]
 
 
+def test_first_budget_visit_selects_per_entry_then_preserves_parent_mode() -> None:
+    """FR-03: only the first multi-entry Budget visit changes selection."""
+
+    state: dict[str, object] = {
+        "child_count": 2,
+        "entity_type_0": "Student",
+        "student_name_0": "Kevin",
+        "student_grade_0": "Grade 2",
+        "entity_type_1": "Student",
+        "student_name_1": "Maya",
+        "student_grade_1": "Grade 5",
+        "intake_step": 1,
+        "max_intake_step_reached": 1,
+        "budget_mode_label": "One combined budget",
+    }
+
+    app._continue_from_students(state, 2)
+
+    assert state["budget_mode_label"] == (
+        "A budget for each student or classroom"
+    )
+    assert state["intake_step"] == 2
+    assert state["max_intake_step_reached"] == 2
+
+    state["intake_step"] = 1
+    state["budget_mode_label"] = "One combined budget"
+    state[
+        app.NAVIGATION_STATE_PREFIX + "budget_mode_label"
+    ] = "One combined budget"
+    app._continue_from_students(state, 2)
+
+    assert state["budget_mode_label"] == "One combined budget"
+    assert state[
+        app.NAVIGATION_STATE_PREFIX + "budget_mode_label"
+    ] == "One combined budget"
+
+
 def test_budget_screen_maps_entry_count_changes_without_losing_amount() -> None:
     """FR-03: one/many option changes retain the parent's durable amount."""
 

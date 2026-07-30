@@ -3501,3 +3501,45 @@ choice without changing budget behavior.
 - Streamlit is not installed on this Windows ARM64 environment, so the radio
   order was verified through the production screen renderer rather than a local
   visual run.
+
+## 2026-07-29 - First Budget visit selection
+
+### Objective
+
+Select the per-student or per-classroom budget mode on the first multi-entry
+transition from Students to Budget, without changing later saved choices.
+
+### Work completed
+
+- Applied the initial per-entry selection in the production
+  Students-to-Budget callback only when Budget has never been reached and the
+  session contains more than one entry.
+- Preserved the parent's selected budget mode on every later backward,
+  forward, or banner-navigation visit.
+- Added callback-level and deployed-runtime lifecycle coverage for the initial
+  selection and later preservation.
+
+### Decisions made
+
+- The global budget-mode default remains unchanged. The UX preference is
+  intentionally scoped to the first successful multi-entry transition only.
+- A one-entry session continues using its entry-specific budget label because
+  combined and per-entry modes are equivalent there.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `tests/test_streamlit_lifecycle.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused tests: `py -3.12-arm64 -m pytest -q tests/test_app.py -k
+  "budget_screen or first_budget_visit"` -> 6 passed, 106 deselected.
+
+### Problems or limitations
+
+- The AppTest lifecycle assertion is collected but skipped locally because
+  Streamlit is intentionally unavailable on Windows ARM64; it will run in the
+  deployed x86 environment.

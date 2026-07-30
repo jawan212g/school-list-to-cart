@@ -4634,6 +4634,16 @@ def _continue_from_students(
     state["ui_error_active"] = bool(errors)
     if errors:
         return
+    if (
+        target_step == 2
+        and entry_count > 1
+        and int(state.get("max_intake_step_reached", 1)) < 2
+    ):
+        initial_budget_mode = "A budget for each student or classroom"
+        state["budget_mode_label"] = initial_budget_mode
+        state[
+            NAVIGATION_STATE_PREFIX + "budget_mode_label"
+        ] = initial_budget_mode
     navigate_intake_step(state, target_step)
 
 

@@ -202,16 +202,9 @@ def test_budget_modes_survive_real_widget_unmount_and_remount() -> None:
     test_app = _complete_students(_run_app(), ("Maya", "Noah"))
     assert _widget(
         test_app,
-        "text_input",
-        "combined_budget_text",
-    ).value == "150.00"
-
-    _set_widget(
-        test_app,
         "radio",
         "budget_mode_label",
-        "A budget for each student or classroom",
-    )
+    ).value == "A budget for each student or classroom"
     assert _widget(test_app, "text_input", "budget_0").value == "75.00"
     assert _widget(test_app, "text_input", "budget_1").value == "75.00"
 
@@ -226,6 +219,14 @@ def test_budget_modes_survive_real_widget_unmount_and_remount() -> None:
         "text_input",
         "combined_budget_text",
     ).value == "150.00"
+
+    _click_label(test_app, "Back to students")
+    _click_label(test_app, "Continue to budget")
+    assert _widget(
+        test_app,
+        "radio",
+        "budget_mode_label",
+    ).value == "One combined budget"
 
 
 def test_classroom_budget_default_tracks_count_until_parent_edits() -> None:
@@ -328,6 +329,12 @@ def test_preferences_explain_discarded_entered_combined_budget() -> None:
     """FR-03: the reverse mode change explains only the amount affected."""
 
     test_app = _complete_students(_run_app(), ("Maya",))
+    _set_widget(
+        test_app,
+        "radio",
+        "budget_mode_label",
+        "One combined budget",
+    )
     _set_widget(
         test_app,
         "text_input",
