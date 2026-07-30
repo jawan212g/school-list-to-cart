@@ -8637,13 +8637,16 @@ def _render_personalize_summary(
                 gap="medium",
                 vertical_alignment="center",
             )
-            name_source_column.markdown(
-                escape_streamlit_dollars(f"**{section.child_label}**")
-            )
-            _render_personalize_summary_source_control(
-                name_source_column,
-                section.child_id,
-            )
+            with name_source_column:
+                st.markdown(
+                    escape_streamlit_dollars(
+                        f"**{section.child_label}**"
+                    )
+                )
+                _render_personalize_summary_source_control(
+                    st,
+                    section.child_id,
+                )
             open_column.button(
                 f"Open {section.child_label}",
                 key=(
