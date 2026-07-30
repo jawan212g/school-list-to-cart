@@ -8517,75 +8517,67 @@ def _personalize_source_pages(
     )
 
 
-def _render_personalize_session_sources(
+def _render_personalize_summary_source_control(
     st: Any,
-    labels_by_child: Mapping[str, str],
+    child_id: str,
 ) -> None:
-    """Render one source card per student with every page actually read."""
+    """Render every page read for one student inside that student's box."""
 
-    sources = tuple(st.session_state.get("list_inputs", ()))
+    sources = tuple(
+        source
+        for source in st.session_state.get("list_inputs", ())
+        if source.child_id == child_id
+    )
     if not sources:
         return
-    st.markdown("**Sources used**")
-    for child_id, child_label in labels_by_child.items():
-        child_sources = tuple(
-            source for source in sources if source.child_id == child_id
-        )
-        if not child_sources:
-            continue
-        page_entries = tuple(
-            (source, page_number, source_line)
-            for source in child_sources
-            for page_number, source_line in _personalize_source_pages(
-                st.session_state,
-                child_id,
-                source,
-                use_document_selection=len(child_sources) == 1,
-            )
-        )
-        section_labels = _personalize_section_labels(
+    page_entries = tuple(
+        (source, page_number, source_line)
+        for source in sources
+        for page_number, source_line in _personalize_source_pages(
             st.session_state,
             child_id,
+            source,
+            use_document_selection=len(sources) == 1,
         )
-        with st.container(
-            border=True,
-            key=f"personalize-summary-source-card:{child_id}",
-        ):
-            st.markdown(escape_streamlit_dollars(f"**{child_label}**"))
-            if section_labels:
-                st.caption(
-                    escape_streamlit_dollars(
-                        (
-                            "Section read: "
-                            if len(section_labels) == 1
-                            else "Sections read: "
-                        )
-                        + _join_names(section_labels)
-                    )
+    )
+    section_labels = _personalize_section_labels(
+        st.session_state,
+        child_id,
+    )
+    if section_labels:
+        st.caption(
+            escape_streamlit_dollars(
+                (
+                    "Section read: "
+                    if len(section_labels) == 1
+                    else "Sections read: "
                 )
-            with st.popover(
-                "Open source pages",
-                use_container_width=True,
-            ):
-                for index, (
-                    source,
-                    page_number,
-                    source_line,
-                ) in enumerate(page_entries):
-                    if index:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                    reference = build_source_reference(
-                        source,
-                        page_number=page_number,
-                        source_line=source_line,
-                    )
-                    st.markdown(
-                        escape_streamlit_dollars(
-                            f"**{reference.document_name} · "
-                            f"page {reference.page_number}**"
-                        )
-                    )
-                    _render_source_reference_content(st, reference)
+                + _join_names(section_labels)
+            )
+        )
+    with st.popover(
+        "Open source pages",
+        use_container_width=True,
+    ):
+        for index, (
+            source,
+            page_number,
+            source_line,
+        ) in enumerate(page_entries):
+            if index:
+                st.markdown("<br>", unsafe_allow_html=True)
+            reference = build_source_reference(
+                source,
+                page_number=page_number,
+                source_line=source_line,
+            )
+            st.markdown(
+                escape_streamlit_dollars(
+                    f"**{reference.document_name} · "
+                    f"page {reference.page_number}**"
+                )
+            )
+            _render_source_reference_content(st, reference)
 
 
 def _render_personalize_summary(
@@ -8627,8 +8619,6 @@ def _render_personalize_summary(
         section.child_id: section.child_label for section in sections
     }
     labels_by_child.update(child_labels or {})
-    _render_personalize_session_sources(st, labels_by_child)
-
     originals = original_items or {}
     edited_by_id: dict[str, SupplyItemReview] = {}
     rendered_group_ids: set[str] = set()
@@ -8642,21 +8632,17 @@ def _render_personalize_summary(
             border=True,
             key=f"personalize-summary-student:{section.child_id}",
         ):
-            name_column, count_column, open_column = st.columns(
-                [1.2, 3.8, 1.2],
+            name_source_column, open_column = st.columns(
+                [4.8, 1.2],
                 gap="medium",
                 vertical_alignment="center",
             )
-            name_column.markdown(
+            name_source_column.markdown(
                 escape_streamlit_dollars(f"**{section.child_label}**")
             )
-            count_column.write(
-                (
-                    f"{len(section_groups)} "
-                    f"{'needs' if len(section_groups) == 1 else 'need'} a "
-                    f"decision · {len(section.optional_item_ids)} optional · "
-                    f"{len(section.settled_item_ids)} in cart"
-                )
+            _render_personalize_summary_source_control(
+                name_source_column,
+                section.child_id,
             )
             open_column.button(
                 f"Open {section.child_label}",
@@ -8667,6 +8653,20 @@ def _render_personalize_summary(
                 on_click=_select_personalize_tab,
                 args=(st.session_state, section.child_id),
                 use_container_width=True,
+            )
+            (
+                in_cart_column,
+                decision_column,
+                optional_column,
+            ) = st.columns(3, gap="large")
+            in_cart_column.markdown(
+                f"**{len(section.settled_item_ids)}**  \nIn cart"
+            )
+            decision_column.markdown(
+                f"**{len(section_groups)}**  \nNeeds a decision"
+            )
+            optional_column.markdown(
+                f"**{len(section.optional_item_ids)}**  \nOptional"
             )
             groups_to_render = tuple(
                 group
@@ -8679,7 +8679,7 @@ def _render_personalize_summary(
                         f"Review {len(groups_to_render)} "
                         f"{'decision' if len(groups_to_render) == 1 else 'decisions'}"
                     ),
-                    expanded=True,
+                    expanded=False,
                 ):
                     for group in groups_to_render:
                         members = tuple(
@@ -8725,7 +8725,7 @@ def _render_personalize_summary(
 
     unavailable_lookup = unavailable_by_child or {}
     unavailable_rows: list[tuple[str, str, str]] = []
-    excluded_items: list[SupplyItemReview] = []
+    excluded_items: list[tuple[str, SupplyItemReview]] = []
     for section in sections:
         unavailable_items = unavailable_lookup.get(section.child_id, {})
         for item_id in section.unstocked_item_ids:
@@ -8748,7 +8748,7 @@ def _render_personalize_summary(
         for item_id in section.excluded_item_ids:
             item = item_by_id.get(item_id)
             if item is not None:
-                excluded_items.append(item)
+                excluded_items.append((section.child_label, item))
 
     if unavailable_rows:
         with st.container(
@@ -8769,23 +8769,32 @@ def _render_personalize_summary(
                 )
 
     if excluded_items:
-        with st.expander(f"Left out ({len(excluded_items)})"):
-            for item in excluded_items:
-                with st.popover(
-                    escape_streamlit_dollars(
-                        _review_summary_item_text(item)
-                    ),
-                    use_container_width=True,
+        with st.expander(f"Left out of cart ({len(excluded_items)})"):
+            for child_label, item in excluded_items:
+                with st.container(
+                    border=True,
+                    key=f"personalize-left-out-summary:{item.review_id}",
                 ):
-                    edited_by_id[item.review_id] = (
-                        _render_excluded_review_row(
-                            st,
-                            item,
-                            key_prefix=f"excluded:{item.review_id}",
-                            offers=offers,
-                            original_item=originals.get(item.review_id),
+                    st.markdown(
+                        escape_streamlit_dollars(
+                            f"**{child_label}: "
+                            f"{_review_summary_quantity_text(item)} "
+                            f"{_review_summary_item_text(item)}**"
                         )
                     )
+                    with st.popover(
+                        "Review or change",
+                        use_container_width=True,
+                    ):
+                        edited_by_id[item.review_id] = (
+                            _render_excluded_review_row(
+                                st,
+                                item,
+                                key_prefix=f"excluded:{item.review_id}",
+                                offers=offers,
+                                original_item=originals.get(item.review_id),
+                            )
+                        )
 
     return edited_by_id, tuple(confirmed_group_ids)
 
@@ -11268,6 +11277,38 @@ def _render_merge_quantity_controls(
     return action, selected_quantity
 
 
+def _merge_variant_item_name(
+    decision: Any,
+    variant: Any,
+) -> str:
+    """Name a variant with its complete parent-facing product name."""
+
+    item_name = REVIEW_PLURAL_ITEM_NAMES.get(
+        decision.canonical_item,
+        _item_display_name(decision.canonical_item).casefold(),
+    )
+    descriptors = tuple(
+        dict.fromkeys(
+            _parent_attribute_value(field_name, value)
+            for field_name, value in (
+                ("ruling", variant.attributes.ruling),
+                ("tip_style", variant.attributes.tip_style),
+                ("format", variant.attributes.format),
+                ("size", variant.attributes.size),
+                *variant.details,
+            )
+            if value not in (None, "", (), [])
+        )
+    )
+    if not descriptors:
+        return item_name
+    descriptor = " · ".join(descriptors)
+    item_root = item_name.split()[-1].removesuffix("s")
+    if re.search(rf"\b{re.escape(item_root)}s?\b", descriptor, re.IGNORECASE):
+        return descriptor
+    return f"{descriptor} {item_name}"
+
+
 def _render_merge_variant_controls(
     st: Any,
     decision: Any,
@@ -11280,32 +11321,7 @@ def _render_merge_variant_controls(
         confirmation_key = f"{variant.variant_id}:parent-confirmed"
         if quantity_key not in st.session_state:
             st.session_state[quantity_key] = variant.default_quantity
-        variant_values = [
-            _parent_attribute_value(field_name, value)
-            for field_name, value in (
-                ("ruling", variant.attributes.ruling),
-                ("tip_style", variant.attributes.tip_style),
-                ("format", variant.attributes.format),
-                ("size", variant.attributes.size),
-                *variant.details,
-            )
-            if field_name != "ambiguous_descriptor"
-            and value not in (None, "", (), [])
-        ]
-        variant_values.extend(
-            _parent_attribute_value(field_name, value)
-            for field_name, value in variant.details
-            if field_name == "ambiguous_descriptor"
-            and value not in (None, "", (), [])
-        )
-        variant_label = (
-            " · ".join(dict.fromkeys(variant_values))
-            or (
-                _display_source_line(variant.sources[0].exact_line)
-                + " · "
-                + _requirement_source_label(variant.sources[0])
-            )
-        )
+        variant_label = _merge_variant_item_name(decision, variant)
         selected[variant.variant_id] = int(
             st.number_input(
                 f"{variant_label.title()} quantity",
@@ -11625,20 +11641,7 @@ def _render_requirement_merge(st: Any) -> None:
                 )
                 if omitted_variants:
                     labels = tuple(
-                        next(
-                            (
-                                _parent_attribute_value(field_name, value)
-                                for field_name, value in (
-                                    ("ruling", variant.attributes.ruling),
-                                    ("tip_style", variant.attributes.tip_style),
-                                    ("format", variant.attributes.format),
-                                    ("size", variant.attributes.size),
-                                    *variant.details,
-                                )
-                                if value not in (None, "", (), [])
-                            ),
-                            item_name,
-                        )
+                        _merge_variant_item_name(decision, variant)
                         for variant in omitted_variants
                     )
                     st.caption(
@@ -12520,7 +12523,7 @@ def _render_review(st: Any) -> None:
             if left_out_count:
                 _render_personalize_heading(
                     st,
-                    f"Left out ({left_out_count})",
+                    f"Left out of cart ({left_out_count})",
                     "These items are not in the cart because you left them "
                     "out, already own them, or the simulated stores do not "
                     "carry them.",

@@ -4693,6 +4693,41 @@ assertion was relaxed.
 No extraction, matching, pricing, optimizer, gate, or business-threshold
 behavior changed.
 
+## 2026-07-30 — N-source duplicate-screen audit and Personalize Summary polish
+
+### N-source audit
+
+The duplicate merge groups every distinct source for one student's normalized
+item; it is not limited to a pair. Evidence rows, source-specific quantity
+choices, and variant quantities iterate over all sources. The parent decision
+model is nevertheless binary: all source lines are treated as either one
+product or separate products. It cannot represent an N-source partition such
+as two matching descriptions plus one different product.
+
+Several parent-facing paths are also pair-shaped. Unequal-quantity introductory
+copy reads only the first two quantities, combined-quantity and rationale copy
+says "both," the identity expander says "one product or two," and the
+different-product rationale takes only the first two source/value pairs. The
+source-choice map can also collapse truly identical labels. These limits were
+reported but deliberately not changed in this pass.
+
+### Work completed
+
+- Folded each student's source-page control into that student's Summary box.
+- Replaced the run-on count sentence with aligned columns ordered In cart,
+  Needs a decision, Optional.
+- Made each student's decision expander closed on initial Summary render.
+- Renamed the excluded-items area to "Left out of cart," added student
+  attribution, and gave each item a bordered, high-weight summary row.
+- Reused one full variant-name formatter for editable quantities and partial
+  exclusion messages, so copy names "lined composition notebooks" rather than
+  only "lined."
+
+### Architecture
+
+No merge behavior, quantity selection, extraction, matching, pricing,
+optimizer, gate, or business threshold changed.
+
 ## 2026-07-30 — Duplicate exclusion uses one authoritative quantity state
 
 ### Defect

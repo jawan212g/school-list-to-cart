@@ -3158,6 +3158,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
             self.radio_label_visibility: str | None = None
             self.column_specs: list[object] = []
             self.container_keys: list[str] = []
+            self.expanders: list[tuple[str, bool | None]] = []
             self.events: list[tuple[str, str]] = []
             self.components = SimpleNamespace(
                 v1=SimpleNamespace(html=lambda *args, **kwargs: None)
@@ -3191,7 +3192,9 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
             label: str,
             **kwargs: object,
         ) -> "ReviewScreenRecorder":
-            del label, kwargs
+            self.expanders.append(
+                (label, kwargs.get("expanded"))
+            )
             return self
 
         def popover(
@@ -3370,14 +3373,27 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     assert "1 decision remains." in summary.messages
     assert "Use these recommendations" in summary.buttons
     assert "Open Jawan" in summary.buttons
-    assert (
-        "1 needs a decision · 1 optional · 1 in cart"
-        in summary.writes
+    count_messages = (
+        "**1**  \nIn cart",
+        "**1**  \nNeeds a decision",
+        "**1**  \nOptional",
     )
+    assert all(message in summary.messages for message in count_messages)
+    count_positions = tuple(
+        summary.messages.index(message) for message in count_messages
+    )
+    assert count_positions == tuple(sorted(count_positions))
+    assert ("Review 1 decision", False) in summary.expanders
     assert ("popover", "Notebook paper") not in summary.events
     assert ("popover", "Tissues, optional") not in summary.events
     assert ("popover", "Pencils") not in summary.events
-    assert [1.2, 3.8, 1.2] in summary.column_specs
+    assert [4.8, 1.2] in summary.column_specs
+    assert 3 in summary.column_specs
+    assert ("Left out of cart (1)", None) in summary.expanders
+    assert any(
+        message.startswith("**Jawan:")
+        for message in summary.messages
+    )
 
     summary.select_view("child-1")
     student = ReviewScreenRecorder()
@@ -3881,7 +3897,21 @@ def test_personalize_edit_updates_student_summary_and_detail_together(
                 {"child_id": "child-1", "label": "Kevin"},
             )
         },
-        "extracted_lists": {"child-1": ExtractionEnvelope()},
+        "extracted_lists": {
+            "child-1": ExtractionEnvelope(
+                requirements=(
+                    Requirement(
+                        req_id="crayon",
+                        child_id="child-1",
+                        raw_text="1 Crayola crayon",
+                        canonical_item="crayons",
+                        quantity=1,
+                        brand_hint="Crayola",
+                        extraction_confidence=1.0,
+                    ),
+                )
+            )
+        },
         "review_items": (original,),
         "parent_added_review_items": (),
         "extraction_errors": {},
@@ -4084,8 +4114,16 @@ def test_personalize_edit_updates_student_summary_and_detail_together(
     assert "Crayola Markers" not in summary.buttons
     assert "Crayola Markers" not in summary.popovers
     assert (
-        "write",
-        "0 need a decision · 0 optional · 1 in cart",
+        "markdown",
+        "**1**  \nIn cart",
+    ) in summary.messages
+    assert (
+        "markdown",
+        "**0**  \nNeeds a decision",
+    ) in summary.messages
+    assert (
+        "markdown",
+        "**0**  \nOptional",
     ) in summary.messages
 
 
@@ -4303,8 +4341,9 @@ def test_personalize_summary_opens_typed_and_uploaded_sources(
     assert recorder.popovers.count("Open source pages") == 2
     assert recorder.text_sources == [typed_text]
     assert len(recorder.pdf_pages) == 2
-    assert [1.2, 3.8, 1.2] in recorder.column_specs
-    assert "**Sources used**" in recorder.messages
+    assert recorder.column_specs.count([4.8, 1.2]) == 2
+    assert recorder.column_specs.count(3) == 2
+    assert "**Sources used**" not in recorder.messages
     assert any("Sections read: 5th Grade and Highly Capable Class" in message for message in recorder.messages)
     assert any(f"{pdf_path.name} · page 2" in message for message in recorder.messages)
     assert any(f"{pdf_path.name} · page 3" in message for message in recorder.messages)
@@ -6285,6 +6324,45 @@ def _submit_composition_variant_state(
     merged = dict(recorder.session_state["extracted_lists"])
     app._refresh_personalize_review_cache(recorder.session_state, merged)
     return tuple(recorder.session_state["review_items"])
+
+
+def test_merge_variant_names_include_the_product_not_only_the_attribute() -> None:
+    """Partial-exclusion copy names the product a parent recognizes."""
+
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="graph",
+                child_id="child-1",
+                raw_text="1 graph paper composition notebook",
+                canonical_item="composition_notebooks",
+                quantity=1,
+                attributes={"ruling": "graph"},
+                source_section="5th",
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="lined",
+                child_id="child-1",
+                raw_text="4 regular composition notebooks",
+                canonical_item="composition_notebooks",
+                quantity=4,
+                attributes={"ruling": "lined"},
+                source_section="Highly Capable Class",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    _, merge_result = consolidate_extractions({"child-1": envelope})
+    decision = item_decisions(merge_result)[0]
+
+    assert tuple(
+        app._merge_variant_item_name(decision, variant)
+        for variant in decision.variants
+    ) == (
+        "graph composition notebooks",
+        "lined composition notebooks",
+    )
 
 
 def test_merge_checkbox_zeroes_submit_as_a_complete_exclusion(
