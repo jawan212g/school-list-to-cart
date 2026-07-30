@@ -4682,6 +4682,12 @@ Back navigation creates none. AppTest cannot observe browser scroll position
 or execute that assertion; the real movement still requires deployed-browser
 verification.
 
+The first x86 run failed before reaching those assertions because AppTest's
+state wrapper does not implement `Mapping.get`, unlike the application-facing
+session-state proxy. The test now reads AppTest state through its supported
+keyed interface with a missing-key fallback; no production behavior or
+assertion was relaxed.
+
 ### Architecture
 
 No extraction, matching, pricing, optimizer, gate, or business-threshold

@@ -36,6 +36,19 @@ def _assert_no_exception(test_app: AppTest) -> None:
     assert not test_app.exception
 
 
+def _session_value(
+    test_app: AppTest,
+    key: str,
+    default: Any = None,
+) -> Any:
+    """Read AppTest's keyed state without assuming Mapping.get support."""
+
+    try:
+        return test_app.session_state[key]
+    except KeyError:
+        return default
+
+
 def _run_working_progress_screen() -> AppTest:
     """Mount the production router with deterministic empty list inspection."""
 
@@ -683,7 +696,7 @@ def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> 
 
     test_app = _run_app()
     assert (
-        test_app.session_state.get(app.NEXT_TASK_SCROLL_COMPLETED_KEY)
+        _session_value(test_app, app.NEXT_TASK_SCROLL_COMPLETED_KEY)
         is None
     )
     assert any(
@@ -693,7 +706,7 @@ def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> 
     _click_label(test_app, "Continue to budget")
     assert test_app.session_state["intake_step"] == 1
     assert (
-        test_app.session_state.get(app.NEXT_TASK_SCROLL_COMPLETED_KEY)
+        _session_value(test_app, app.NEXT_TASK_SCROLL_COMPLETED_KEY)
         is None
     )
     assert any(
@@ -708,7 +721,7 @@ def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> 
     assert test_app.session_state["intake_step"] == 2
     assert test_app.session_state[app.NEXT_TASK_SCROLL_COMPLETED_KEY] == 1
     assert (
-        test_app.session_state.get(app.NEXT_TASK_SCROLL_PENDING_KEY)
+        _session_value(test_app, app.NEXT_TASK_SCROLL_PENDING_KEY)
         is None
     )
     assert {
@@ -782,7 +795,7 @@ def test_setup_callbacks_keep_captions_destinations_and_validation_aligned() -> 
     assert test_app.session_state["screen"] == "lists"
     assert test_app.session_state[app.NEXT_TASK_SCROLL_COMPLETED_KEY] == 5
     assert (
-        test_app.session_state.get(app.NEXT_TASK_SCROLL_PENDING_KEY)
+        _session_value(test_app, app.NEXT_TASK_SCROLL_PENDING_KEY)
         is None
     )
 
