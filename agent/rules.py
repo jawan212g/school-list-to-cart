@@ -248,10 +248,12 @@ PERSONALIZE_SUMMARY_COLUMNS = (
     "Student",
     "In cart",
     "Needs a decision",
-    "Excluded",
+    "Buy elsewhere",
+    "Left out",
 )
 # BR-52 amended: Personalize summary and vertical student tabs consume one
-# deterministic per-student state for cart, decision, and exclusion counts.
+# deterministic per-student state for cart, decision, unavailable, and
+# parent-excluded counts.
 
 PERSONALIZE_SOURCE_CONTROL_REASONS = frozenset(
     {"assumption", "uncertain"}

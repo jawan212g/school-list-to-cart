@@ -93,6 +93,7 @@ from agent.provider import (
 )
 from agent.rules import (
     ALLOWED_CATEGORIES,
+    AMBIGUOUS_UNNAMED_BRAND_REQUIREMENT_ISSUE,
     DEFAULT_TAX_BASIS_POINTS,
     CONFLICT_IDENTITY_DIFFERENT,
     CONFLICT_IDENTITY_SAME,
@@ -188,6 +189,7 @@ DEFAULT_BUDGET_TEXT = (
 DEFAULT_RADIUS_MILES = 10.0
 NO_SET_BUDGET_LABEL = "No set budget"
 PERSONALIZE_SELECTED_VIEW_KEY = "personalize_selected_view"
+PERSONALIZE_VIEW_REVISION_KEY = "personalize_view_revision"
 PERSONALIZE_VIEW_WIDGET_KEY = "personalize_view_control"
 DEFAULT_TAX_STATE_OPTION = "Choose a state — use the 7.0% default"
 DEVELOPMENT_DEBUG_ENV = "SCHOOL_CART_DEBUG"
@@ -545,6 +547,7 @@ class PersonalizeStudentSection:
     child_label: str
     anchor: str
     cart_item_ids: tuple[str, ...]
+    unstocked_item_ids: tuple[str, ...]
     excluded_item_ids: tuple[str, ...]
     decision_groups: tuple[ReviewFlagGroup, ...]
     additional_decision_ids: tuple[str, ...]
@@ -568,6 +571,12 @@ class PersonalizeStudentSection:
         """Count extracted items deliberately outside the cart."""
 
         return len(self.excluded_item_ids)
+
+    @property
+    def unstocked_count(self) -> int:
+        """Count understood items these simulated stores do not carry."""
+
+        return len(self.unstocked_item_ids)
 
     @property
     def pending_item_ids(self) -> tuple[str, ...]:
@@ -6949,6 +6958,7 @@ def build_personalize_student_sections(
     unhandled_group_ids: frozenset[str] = frozenset(),
     unstocked_item_ids: frozenset[str] = frozenset(),
     additional_excluded_ids: Mapping[str, Sequence[str]] | None = None,
+    additional_unstocked_ids: Mapping[str, Sequence[str]] | None = None,
     additional_decision_ids: Mapping[str, Sequence[str]] | None = None,
     additional_pending_item_ids: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[PersonalizeStudentSection, ...]:
@@ -6984,17 +6994,26 @@ def build_personalize_student_sections(
                     or item.required_quantity == EXCLUDED_REQUIREMENT_QUANTITY
                     or item.optional
                     or item.condition_applies is False
-                    or item.review_id in unstocked_item_ids
                 )
             )
         ) + tuple((additional_excluded_ids or {}).get(child_id, ()))
         excluded_ids = frozenset(excluded_item_ids)
+        child_unstocked_item_ids = tuple(
+            item.review_id
+            for item in child_items
+            if (
+                item.review_id in unstocked_item_ids
+                and item.review_id not in excluded_ids
+            )
+        ) + tuple((additional_unstocked_ids or {}).get(child_id, ()))
+        child_unstocked_ids = frozenset(child_unstocked_item_ids)
         cart_item_ids = tuple(
             item.review_id
             for item in child_items
             if (
                 item.is_purchasable
                 and item.review_id not in excluded_ids
+                and item.review_id not in child_unstocked_ids
             )
         )
         decision_groups = tuple(
@@ -7014,6 +7033,7 @@ def build_personalize_student_sections(
                     + re.sub(r"[^a-z0-9]+", "-", child_id.casefold()).strip("-")
                 ),
                 cart_item_ids=cart_item_ids,
+                unstocked_item_ids=child_unstocked_item_ids,
                 excluded_item_ids=excluded_item_ids,
                 decision_groups=decision_groups,
                 additional_decision_ids=tuple(
@@ -7046,7 +7066,8 @@ def _personalize_count_text(section: PersonalizeStudentSection) -> str:
         f"{section.item_count} in cart · "
         f"{section.decision_count} "
         f"{'needs' if section.decision_count == 1 else 'need'} a decision · "
-        f"{section.excluded_count} excluded"
+        f"{section.unstocked_count} to buy elsewhere · "
+        f"{section.excluded_count} left out"
     )
 
 
@@ -7066,6 +7087,10 @@ def _select_personalize_tab(
 ) -> None:
     """Switch the Personalize tab and optionally request one item scroll."""
 
+    if state.get(PERSONALIZE_SELECTED_VIEW_KEY) != tab_id:
+        state[PERSONALIZE_VIEW_REVISION_KEY] = (
+            int(state.get(PERSONALIZE_VIEW_REVISION_KEY, 0)) + 1
+        )
     state[PERSONALIZE_SELECTED_VIEW_KEY] = tab_id
     if scroll_target is None:
         state.pop("personalize_scroll_target", None)
@@ -7075,11 +7100,16 @@ def _select_personalize_tab(
 
 def _commit_personalize_view(
     state: MutableMapping[str, Any],
+    widget_key: str,
 ) -> None:
     """Copy the navigation widget choice into its non-widget state."""
 
-    selected = state.get(PERSONALIZE_VIEW_WIDGET_KEY)
+    selected = state.get(widget_key)
     if isinstance(selected, str):
+        if state.get(PERSONALIZE_SELECTED_VIEW_KEY) != selected:
+            state[PERSONALIZE_VIEW_REVISION_KEY] = (
+                int(state.get(PERSONALIZE_VIEW_REVISION_KEY, 0)) + 1
+            )
         state[PERSONALIZE_SELECTED_VIEW_KEY] = selected
         state.pop("personalize_scroll_target", None)
 
@@ -7097,9 +7127,8 @@ def _resolve_personalize_view(
     if selected not in valid_views:
         selected = "summary"
     state[PERSONALIZE_SELECTED_VIEW_KEY] = selected
+    state.setdefault(PERSONALIZE_VIEW_REVISION_KEY, 0)
     state.pop("personalize_active_tab", None)
-    if state.get(PERSONALIZE_VIEW_WIDGET_KEY) != selected:
-        state.pop(PERSONALIZE_VIEW_WIDGET_KEY, None)
     return str(selected)
 
 
@@ -7129,21 +7158,23 @@ def _personalize_decision_reason(
     """Return one short parent-facing reason for a pending item."""
 
     if conditional:
-        return "conditional item"
+        return "Choose the option that applies"
     issue_codes = frozenset(item.issue_codes)
     if "low_confidence" in issue_codes:
-        return "extraction uncertain"
+        return "Check the list reading"
     if "ambiguous_package_size" in issue_codes:
-        return "package size assumed"
+        return "Choose the package size"
     if "quantity_range" in issue_codes:
-        return "quantity range"
+        return "Choose the quantity"
     if "missing_quantity" in issue_codes:
-        return "quantity missing"
+        return "Enter a quantity"
     if "ambiguous_item" in issue_codes:
-        return "item wording unclear"
+        return "Choose the item"
+    if AMBIGUOUS_UNNAMED_BRAND_REQUIREMENT_ISSUE in issue_codes:
+        return "Choose the brand rule"
     if issue_codes:
-        return "details need checking"
-    return "parent choice needed"
+        return "Check the item details"
+    return "Choose how to handle this item"
 
 
 def _render_personalize_summary(
@@ -7151,7 +7182,6 @@ def _render_personalize_summary(
     sections: Sequence[PersonalizeStudentSection],
     item_by_id: Mapping[str, SupplyItemReview],
     *,
-    unstocked_item_ids: frozenset[str] = frozenset(),
     unavailable_by_child: Mapping[str, Mapping[str, str]] | None = None,
 ) -> None:
     """Render BR-52's complete production Personalize summary."""
@@ -7206,10 +7236,21 @@ def _render_personalize_summary(
         )
 
     st.markdown("**Every item**")
-    item_header = st.columns([1.25, 2.65, 2.1])
+    show_student_column = len(sections) > 1
+    item_column_widths = (
+        [1.25, 2.65, 2.1]
+        if show_student_column
+        else [3.35, 2.65]
+    )
+    item_header = st.columns(item_column_widths)
+    item_headers = (
+        ("Student", "Quantity and item", "Status")
+        if show_student_column
+        else ("Quantity and item", "Status")
+    )
     for column, label in zip(
         item_header,
-        ("Student", "Quantity and item", "Status"),
+        item_headers,
         strict=True,
     ):
         column.markdown(f"**{label}**")
@@ -7235,10 +7276,10 @@ def _render_personalize_summary(
                     item,
                     conditional=item_id in conditional_ids,
                 )
-                status = f"Needs a decision · {reason}"
+                status = f"Action needed · {reason}"
                 status_order = 0
             else:
-                status = "In cart"
+                status = "Included in your cart"
                 status_order = 1
             summary_rows.append(
                 (
@@ -7251,21 +7292,15 @@ def _render_personalize_summary(
                     status,
                 )
             )
-        for item_id in section.excluded_item_ids:
+        for item_id in section.unstocked_item_ids:
             item = item_by_id.get(item_id)
             unavailable_text = unavailable_items.get(item_id)
-            if item_id in unstocked_item_ids or unavailable_text is not None:
-                status = "Not stocked (source it yourself)"
-                item_text = (
-                    review_understanding_text(item)
-                    if item is not None
-                    else str(unavailable_text)
-                )
-            else:
-                if item is None:
-                    continue
-                status = "Excluded by you"
-                item_text = review_understanding_text(item)
+            status = "Stores do not carry this · buy it elsewhere"
+            item_text = (
+                review_understanding_text(item)
+                if item is not None
+                else str(unavailable_text)
+            )
             summary_rows.append(
                 (
                     1,
@@ -7275,6 +7310,21 @@ def _render_personalize_summary(
                     item_id,
                     item_text,
                     status,
+                )
+            )
+        for item_id in section.excluded_item_ids:
+            item = item_by_id.get(item_id)
+            if item is None:
+                continue
+            summary_rows.append(
+                (
+                    1,
+                    student_order[section.child_id],
+                    section.child_label,
+                    section.child_id,
+                    item_id,
+                    review_understanding_text(item),
+                    "Left out of your cart",
                 )
             )
 
@@ -7288,9 +7338,12 @@ def _render_personalize_summary(
         item_text,
         status,
     ) in summary_rows:
-        columns = st.columns([1.25, 2.65, 2.1])
-        columns[0].write(escape_streamlit_dollars(child_label))
-        columns[1].button(
+        columns = st.columns(item_column_widths)
+        item_column_index = 1 if show_student_column else 0
+        status_column_index = 2 if show_student_column else 1
+        if show_student_column:
+            columns[0].write(escape_streamlit_dollars(child_label))
+        columns[item_column_index].button(
             escape_streamlit_dollars(item_text),
             key=f"personalize-summary-item:{child_id}:{item_id}",
             on_click=_select_personalize_tab,
@@ -7301,18 +7354,20 @@ def _render_personalize_summary(
             ),
             use_container_width=True,
         )
-        columns[2].write(escape_streamlit_dollars(status))
+        columns[status_column_index].write(
+            escape_streamlit_dollars(status)
+        )
 
     st.markdown("**By student**")
-    header_columns = st.columns([2.2, 1.0, 1.15, 0.9, 1.75])
+    header_columns = st.columns([2.2, 0.85, 1.15, 1.05, 0.8, 1.75])
     for column, label in zip(
-        header_columns[:4],
+        header_columns[:5],
         PERSONALIZE_SUMMARY_COLUMNS,
         strict=True,
     ):
         column.markdown(f"**{label}**")
     for section in sections:
-        columns = st.columns([2.2, 1.0, 1.15, 0.9, 1.75])
+        columns = st.columns([2.2, 0.85, 1.15, 1.05, 0.8, 1.75])
         columns[0].button(
             section.child_label,
             key=f"personalize-summary-student:{section.child_id}",
@@ -7321,8 +7376,9 @@ def _render_personalize_summary(
         )
         columns[1].write(str(section.item_count))
         columns[2].write(str(section.decision_count))
-        columns[3].write(str(section.excluded_count))
-        approved = columns[4].button(
+        columns[3].write(str(section.unstocked_count))
+        columns[4].write(str(section.excluded_count))
+        approved = columns[5].button(
             "Approve defaults",
             key=f"approve-defaults:{section.child_id}",
             use_container_width=True,
@@ -7508,6 +7564,7 @@ def _render_review_detail_controls(
     source_references: Sequence[
         tuple[RequirementSource, ListInput | None]
     ] = (),
+    hidden_fields: frozenset[str] = frozenset(),
 ) -> SupplyItemReview:
     """Render secondary item editing controls inside a collapsed expander."""
 
@@ -7541,26 +7598,28 @@ def _render_review_detail_controls(
                 escape_streamlit_dollars(" ".join(decision_messages))
             )
         first, second = st.columns(2)
-        item_name = first.selectbox(
-            "Item",
-            options=tuple(sorted(ALLOWED_CATEGORIES)),
-            index=tuple(sorted(ALLOWED_CATEGORIES)).index(item.item_name),
-            format_func=_item_display_name,
-            key=f"{key_prefix}:item",
+        item_name = item.item_name
+        if "item" not in hidden_fields:
+            item_name = first.selectbox(
+                "Item",
+                options=tuple(sorted(ALLOWED_CATEGORIES)),
+                index=tuple(sorted(ALLOWED_CATEGORIES)).index(item.item_name),
+                format_func=_item_display_name,
+                key=f"{key_prefix}:item",
+            )
+        quantity = (
+            item.required_quantity
+            if item.required_quantity is not None
+            else MINIMUM_ACTIVE_REQUIREMENT_QUANTITY
         )
-        quantity = int(
-            second.number_input(
+        if "quantity" not in hidden_fields:
+            quantity = int(second.number_input(
                 "Quantity",
                 min_value=0,
-                value=(
-                    item.required_quantity
-                    if item.required_quantity is not None
-                    else 1
-                ),
+                value=quantity,
                 step=1,
                 key=f"{key_prefix}:quantity",
-            )
-        )
+            ))
         unit = first.selectbox(
             "Unit",
             options=("each", "pack", "box", "ream"),
@@ -7588,7 +7647,7 @@ def _render_review_detail_controls(
         }
         package_quantity_state = item.package_quantity_state
         package_size_value = item.package_size
-        if (
+        if "package" not in hidden_fields and (
             unit in {"pack", "box"}
             or package_quantity_state != "unspecified"
         ):
@@ -7619,39 +7678,46 @@ def _render_review_detail_controls(
                 )
             elif package_quantity_state == "unspecified":
                 package_size_value = None
-        brand = first.text_input(
-            "Brand",
-            value=item.brand or "",
-            key=f"{key_prefix}:brand",
-        )
+        brand = item.brand or ""
+        if "brand" not in hidden_fields:
+            brand = first.text_input(
+                "Brand",
+                value=brand,
+                key=f"{key_prefix}:brand",
+            )
         size = item.size or ""
-        if visibility["size"]:
+        if visibility["size"] and "size" not in hidden_fields:
             size = second.text_input(
                 "Size or dimensions",
                 value=size,
                 key=f"{key_prefix}:size",
             )
         colors = ", ".join(item.color)
-        if visibility["acceptable_colors"]:
+        if (
+            visibility["acceptable_colors"]
+            and "acceptable_colors" not in hidden_fields
+        ):
             colors = first.text_input(
                 "Acceptable colors",
                 value=colors,
                 key=f"{key_prefix}:colors",
             )
         material = item.material or ""
-        if visibility["material"]:
+        if visibility["material"] and "material" not in hidden_fields:
             material = second.text_input(
                 "Material",
                 value=material,
                 key=f"{key_prefix}:material",
             )
-        required_details = st.text_input(
-            "Other required details",
-            value=str(
-                item.required_attributes.get("other_details") or ""
-            ),
-            key=f"{key_prefix}:required-details",
+        required_details = str(
+            item.required_attributes.get("other_details") or ""
         )
+        if "other_details" not in hidden_fields:
+            required_details = st.text_input(
+                "Other required details",
+                value=required_details,
+                key=f"{key_prefix}:required-details",
+            )
         brand_options = (
             (
                 "Equivalent brands are okay",
@@ -7660,7 +7726,13 @@ def _render_review_detail_controls(
             if brand.strip()
             else ("Equivalent brands are okay",)
         )
-        if len(brand_options) == 1:
+        if "brand" in hidden_fields:
+            brand_mode = (
+                "Exact brand required"
+                if item.brand_required
+                else "Equivalent brands are okay"
+            )
+        elif len(brand_options) == 1:
             first.caption(
                 "Equivalent brands are okay. Enter a brand to require an "
                 "exact match."
@@ -7806,6 +7878,227 @@ def show_item_source_on_main(
     return not reasons.isdisjoint(PERSONALIZE_SOURCE_CONTROL_REASONS)
 
 
+def _render_primary_review_decisions(
+    st: Any,
+    item: SupplyItemReview,
+    *,
+    key_prefix: str,
+) -> tuple[SupplyItemReview, frozenset[str]]:
+    """Render every unresolved FR-12 choice before acknowledgement."""
+
+    updates: dict[str, object] = {}
+    hidden_fields: set[str] = set()
+    handled_issues: set[str] = set()
+    issue_codes = tuple(dict.fromkeys(item.issue_codes))
+
+    if "low_confidence" in issue_codes:
+        handled_issues.add("low_confidence")
+        st.markdown("**Decision: Is this reading correct?**")
+        source_column, interpretation_column = st.columns(2)
+        source_column.caption("What the list said")
+        source_column.write(
+            escape_streamlit_dollars(item.source_text)
+        )
+        interpretation_column.caption("What we understood")
+        interpretation_column.write(
+            escape_streamlit_dollars(review_understanding_text(item))
+        )
+        reading_action = st.radio(
+            "Choose what to do with this reading",
+            (
+                "Accept this reading",
+                "Edit the item or quantity",
+                "Remove this item",
+            ),
+            key=f"{key_prefix}:reading-action",
+        )
+        if reading_action == "Edit the item or quantity":
+            item_column, quantity_column = st.columns(2)
+            category_options = tuple(sorted(ALLOWED_CATEGORIES))
+            updates["item_name"] = item_column.selectbox(
+                "Item",
+                options=category_options,
+                index=category_options.index(item.item_name),
+                format_func=_item_display_name,
+                key=f"{key_prefix}:reading-item",
+            )
+            updates["required_quantity"] = int(
+                quantity_column.number_input(
+                    "Quantity",
+                    min_value=MINIMUM_ACTIVE_REQUIREMENT_QUANTITY,
+                    value=(
+                        item.required_quantity
+                        or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY
+                    ),
+                    step=1,
+                    key=f"{key_prefix}:reading-quantity",
+                )
+            )
+            hidden_fields.update({"item", "quantity"})
+        elif reading_action == "Remove this item":
+            updates["required_quantity"] = EXCLUDED_REQUIREMENT_QUANTITY
+            updates["review_status"] = "deleted"
+            hidden_fields.update({"item", "quantity"})
+
+    quantity_issues = {
+        "missing_quantity",
+        "quantity_range",
+    }.intersection(issue_codes)
+    if quantity_issues and "quantity" not in hidden_fields:
+        handled_issues.update(quantity_issues)
+        if "missing_quantity" in quantity_issues:
+            st.markdown("**Decision: How many are needed?**")
+            quantity_label = "Enter the quantity"
+        else:
+            st.markdown("**Decision: Which quantity should we use?**")
+            quantity_label = "Quantity to put in the cart"
+        quantity_max = (
+            item.quantity_max
+            if item.quantity_max is not None
+            else None
+        )
+        quantity = st.number_input(
+            quantity_label,
+            min_value=MINIMUM_ACTIVE_REQUIREMENT_QUANTITY,
+            max_value=quantity_max,
+            value=(
+                item.required_quantity
+                or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY
+            ),
+            step=1,
+            key=f"{key_prefix}:decision-quantity",
+        )
+        updates["required_quantity"] = int(quantity)
+        hidden_fields.add("quantity")
+
+    if "ambiguous_package_size" in issue_codes:
+        handled_issues.add("ambiguous_package_size")
+        assumed_size = (
+            item.package_size or MINIMUM_ACTIVE_REQUIREMENT_QUANTITY
+        )
+        st.markdown("**Decision: How many items are in the listed package?**")
+        st.write(
+            escape_streamlit_dollars(
+                f"We assumed {assumed_size}. Change it if needed."
+            )
+        )
+        any_pack_size = st.checkbox(
+            "Any pack size is fine",
+            value=item.package_quantity_state == "any",
+            key=f"{key_prefix}:decision-any-package",
+        )
+        package_size = assumed_size
+        if not any_pack_size:
+            package_size = int(
+                st.number_input(
+                    "Items in the listed package",
+                    min_value=MINIMUM_ACTIVE_REQUIREMENT_QUANTITY,
+                    value=assumed_size,
+                    step=1,
+                    key=f"{key_prefix}:decision-package-size",
+                )
+            )
+        updates["package_size"] = package_size
+        updates["package_quantity_state"] = (
+            "any" if any_pack_size else "assumed"
+        )
+        hidden_fields.add("package")
+
+    if (
+        "ambiguous_item" in issue_codes
+        and "item" not in hidden_fields
+    ):
+        handled_issues.add("ambiguous_item")
+        st.markdown("**Decision: Which item does the list mean?**")
+        category_options = tuple(sorted(ALLOWED_CATEGORIES))
+        updates["item_name"] = st.selectbox(
+            "Item to put in the cart",
+            options=category_options,
+            index=category_options.index(item.item_name),
+            format_func=_item_display_name,
+            key=f"{key_prefix}:decision-item",
+        )
+        hidden_fields.add("item")
+
+    if AMBIGUOUS_UNNAMED_BRAND_REQUIREMENT_ISSUE in issue_codes:
+        handled_issues.add(AMBIGUOUS_UNNAMED_BRAND_REQUIREMENT_ISSUE)
+        st.markdown("**Decision: What must stay exact?**")
+        brand = st.text_input(
+            "Required brand, if one applies",
+            value=item.brand or "",
+            key=f"{key_prefix}:decision-brand",
+        )
+        equivalents_allowed = st.checkbox(
+            "Equivalent brands are okay",
+            value=item.allow_equivalents,
+            key=f"{key_prefix}:decision-brand-equivalents",
+        )
+        normalized_brand = brand.strip() or None
+        updates["brand"] = normalized_brand
+        updates["brand_required"] = bool(
+            normalized_brand and not equivalents_allowed
+        )
+        updates["allow_equivalents"] = equivalents_allowed
+        hidden_fields.add("brand")
+
+    for issue in issue_codes:
+        if issue in handled_issues or issue == "conditional_item":
+            continue
+        issue_label = issue.replace("_", " ")
+        if "color" in issue:
+            field_name = "acceptable_colors"
+            st.markdown(f"**Decision: Which {issue_label} should we use?**")
+            colors = st.text_input(
+                "Acceptable colors",
+                value=", ".join(item.color),
+                key=f"{key_prefix}:decision-colors:{issue}",
+            )
+            updates["color"] = tuple(
+                value.strip()
+                for value in colors.split(",")
+                if value.strip()
+            )
+        elif "size" in issue:
+            field_name = "size"
+            st.markdown(f"**Decision: Which {issue_label} should we use?**")
+            updates["size"] = (
+                st.text_input(
+                    "Required size or dimensions",
+                    value=item.size or "",
+                    key=f"{key_prefix}:decision-size:{issue}",
+                ).strip()
+                or None
+            )
+        elif "material" in issue:
+            field_name = "material"
+            st.markdown(f"**Decision: Which {issue_label} should we use?**")
+            updates["material"] = (
+                st.text_input(
+                    "Required material",
+                    value=item.material or "",
+                    key=f"{key_prefix}:decision-material:{issue}",
+                ).strip()
+                or None
+            )
+        else:
+            field_name = "other_details"
+            st.markdown(f"**Decision: Check the {issue_label}.**")
+            required_attributes = dict(item.required_attributes)
+            details = st.text_input(
+                "What should the cart require?",
+                value=str(required_attributes.get("other_details") or ""),
+                key=f"{key_prefix}:decision-details:{issue}",
+            ).strip()
+            if details:
+                required_attributes["other_details"] = details
+            else:
+                required_attributes.pop("other_details", None)
+            updates["required_attributes"] = required_attributes
+        hidden_fields.add(field_name)
+
+    return item.model_copy(update=updates), frozenset(hidden_fields)
+
+
 def _render_compact_review_row(
     st: Any,
     members: Sequence[SupplyItemReview],
@@ -7917,6 +8210,13 @@ def _render_compact_review_row(
                 )
             )
 
+        edited_representative, hidden_fields = (
+            _render_primary_review_decisions(
+                st,
+                representative,
+                key_prefix=key_prefix,
+            )
+        )
         if flag_messages:
             confirmed = st.checkbox(
                 "I have checked this choice",
@@ -7930,11 +8230,12 @@ def _render_compact_review_row(
             confirmed = True
         edited_representative = _render_review_detail_controls(
             st,
-            representative,
+            edited_representative,
             key_prefix=key_prefix,
             offers=offers,
             decision_messages=decision_messages,
             source_references=tuple(detail_source_references),
+            hidden_fields=hidden_fields,
         )
     edited = {
         member.review_id: (
@@ -9937,7 +10238,7 @@ def _render_review(st: Any) -> None:
         child_id: dict(_personalize_unavailable_entries(envelope))
         for child_id, envelope in extractions.items()
     }
-    additional_excluded_ids = {
+    additional_unstocked_ids = {
         child_id: tuple(unavailable_items)
         for child_id, unavailable_items in unavailable_by_child.items()
     }
@@ -9971,7 +10272,7 @@ def _render_review(st: Any) -> None:
         flag_groups,
         unhandled_group_ids=unhandled_group_ids,
         unstocked_item_ids=unstocked_item_ids,
-        additional_excluded_ids=additional_excluded_ids,
+        additional_unstocked_ids=additional_unstocked_ids,
         additional_decision_ids=conditional_decision_ids,
         additional_pending_item_ids=conditional_pending_item_ids,
     )
@@ -10028,21 +10329,29 @@ def _render_review(st: Any) -> None:
                 width: 100%;
                 background: #ffffff;
             }
+            .st-key-personalize-tab-strip [data-testid="stWidgetLabel"] {
+                display: none !important;
+            }
             </style>
             """,
             unsafe_allow_html=True,
         )
         with st.container(key="personalize-tab-strip"):
-            active_tab = st.radio(
+            personalize_widget_key = (
+                f"{PERSONALIZE_VIEW_WIDGET_KEY}:"
+                f"{st.session_state[PERSONALIZE_VIEW_REVISION_KEY]}"
+            )
+            st.radio(
                 "Choose a student or Summary",
                 valid_tabs,
                 index=valid_tabs.index(selected_view),
                 format_func=tab_labels.__getitem__,
-                key=PERSONALIZE_VIEW_WIDGET_KEY,
+                key=personalize_widget_key,
                 label_visibility="collapsed",
                 on_change=_commit_personalize_view,
-                args=(st.session_state,),
+                args=(st.session_state, personalize_widget_key),
             )
+            active_tab = selected_view
 
     condition_answers: dict[str, str | None] = {}
     for group in condition_groups:
@@ -10071,7 +10380,6 @@ def _render_review(st: Any) -> None:
                 st,
                 student_sections,
                 item_by_id,
-                unstocked_item_ids=unstocked_item_ids,
                 unavailable_by_child=unavailable_by_child,
             )
         else:
@@ -10165,6 +10473,23 @@ def _render_review(st: Any) -> None:
             ):
                 st.success("No decisions needed.")
 
+            if envelope is not None:
+                _render_personalize_unavailable(
+                    st,
+                    child_id,
+                    envelope,
+                    tuple(
+                        item
+                        for item in all_unstocked_items
+                        if item.child_id == child_id
+                    ),
+                    scroll_target=(
+                        str(requested_scroll_target)
+                        if isinstance(requested_scroll_target, str)
+                        else None
+                    ),
+                )
+
             st.markdown("**In your cart**")
             settled_items = tuple(
                 item_by_id[item_id]
@@ -10221,23 +10546,6 @@ def _render_review(st: Any) -> None:
                                 offers=review_offers,
                             )
                         )
-
-            if envelope is not None:
-                _render_personalize_unavailable(
-                    st,
-                    child_id,
-                    envelope,
-                    tuple(
-                        item
-                        for item in all_unstocked_items
-                        if item.child_id == child_id
-                    ),
-                    scroll_target=(
-                        str(requested_scroll_target)
-                        if isinstance(requested_scroll_target, str)
-                        else None
-                    ),
-                )
 
             if envelope is not None or child_note_groups:
                 with st.expander("List details", expanded=False):
@@ -13486,6 +13794,7 @@ def _apply_custom_css(st: Any) -> None:
         [data-testid="stNumberInput"] [data-baseweb="input"],
         [data-testid="stSelectbox"] [data-baseweb="select"] > div,
         [data-testid="stMultiSelect"] [data-baseweb="select"] > div,
+        [data-testid="stTextArea"] [data-baseweb="textarea"],
         [data-testid="stTextArea"] [data-baseweb="base-input"] {
             min-height: 2.85rem;
             border: 1.5px solid #6e8d9e !important;
@@ -13502,11 +13811,18 @@ def _apply_custom_css(st: Any) -> None:
             outline: 0 !important;
             background-color: transparent !important;
         }
+        [data-testid="stTextArea"] textarea {
+            border: 2px solid #6e8d9e !important;
+            border-radius: 0.7rem !important;
+            background-color: #ffffff !important;
+            box-shadow: inset 0 0 0 1px rgba(110, 141, 158, 0.24) !important;
+        }
         [data-testid="stTextInput"] [data-baseweb="input"]:hover,
         [data-testid="stTextInput"] div:has(> input):hover,
         [data-testid="stNumberInput"] [data-baseweb="input"]:hover,
         [data-testid="stSelectbox"] [data-baseweb="select"] > div:hover,
         [data-testid="stMultiSelect"] [data-baseweb="select"] > div:hover,
+        [data-testid="stTextArea"] [data-baseweb="textarea"]:hover,
         [data-testid="stTextArea"] [data-baseweb="base-input"]:hover {
             border-color: var(--rss-notebook) !important;
         }
@@ -13515,6 +13831,7 @@ def _apply_custom_css(st: Any) -> None:
         [data-testid="stNumberInput"] [data-baseweb="input"]:focus-within,
         [data-testid="stSelectbox"] [data-baseweb="select"] > div:focus-within,
         [data-testid="stMultiSelect"] [data-baseweb="select"] > div:focus-within,
+        [data-testid="stTextArea"] [data-baseweb="textarea"]:focus-within,
         [data-testid="stTextArea"] [data-baseweb="base-input"]:focus-within {
             border-color: var(--rss-notebook) !important;
             box-shadow: 0 0 0 0.18rem rgba(0, 110, 174, 0.16) !important;

@@ -3293,3 +3293,59 @@ and replace the count-only Summary with a compact, complete review.
 
 Deploy this Personalize-only change and visually verify table density and
 source-popover sizing with two 20-plus-item lists.
+
+## 2026-07-29 - Personalize decisions, statuses, and navigation state
+
+### Objective
+
+Make every pending Personalize card actionable without opening secondary
+details, separate parent exclusions from unavailable items, and keep the
+navigation indicator synchronized with item jumps.
+
+### Work completed
+
+- Added a visible decision and its production control before the
+  acknowledgement on every flagged item card.
+- Added accept, edit, and remove choices for uncertain readings, with the exact
+  source line beside the interpreted item.
+- Added direct quantity, package-size, item, brand, color, size, material, and
+  other-detail controls for their corresponding issues.
+- Reworded Summary statuses as short parent actions.
+- Split unavailable items from parent-excluded items in BR-52's per-student
+  item sets and counts.
+- Omitted the repeated Student column for one-student sessions while retaining
+  it for multi-student sessions.
+- Synchronized the durable Personalize selection and displayed navigation
+  choice through a revisioned widget identity that is never written by the
+  application.
+- Moved the collapsed unavailable section between Decisions needed and In your
+  cart.
+- Hid the Personalize navigation label and added a visible production border
+  to the Lists paste field.
+
+### Files changed
+
+- `agent/rules.py`
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused Personalize suite:
+  `py -3.12-arm64 -m pytest -q tests/test_app.py tests/test_review.py -x`
+  -> 129 passed in 1.58 seconds.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 417 passed, 1 skipped in
+  3.54 seconds.
+- The production `_render_review` path was exercised with session state that
+  rejects application writes to widget-owned keys.
+- The decision-card test exercised every current decision issue through the
+  production student renderer and verified each control appears before its
+  acknowledgement.
+
+### Problems or limitations
+
+- Streamlit remains unavailable on this Windows ARM64 machine, so visual
+  inspection of spacing and the textarea border remains a deployed-environment
+  check. The emitted production CSS and production renderer behavior are
+  covered by tests.
