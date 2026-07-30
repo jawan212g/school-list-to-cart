@@ -2977,8 +2977,10 @@ def test_personalize_screen_groups_sources_in_student_summary() -> None:
     assert "data_editor" not in source
     assert "Personalize what goes in your cart" in source
     assert "_personalize_source_summary" in source
-    assert "Decisions needed" in source
+    assert "Needs your decision" in source
+    assert "Optional — your call" in source
     assert "In your cart" in source
+    assert "Left out" in source
     assert "Not available from these stores" not in source
     assert "_render_personalize_unavailable" in source
     assert "Products and prices come next" in source
@@ -3014,16 +3016,26 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
             source_text="1 pack notebook paper",
             confidence=0.8,
         ),
-        SupplyItemReview(
-            review_id="owned",
-            req_id="owned",
-            child_id="child-1",
-            item_name="backpacks",
+            SupplyItemReview(
+                review_id="owned",
+                req_id="owned",
+                child_id="child-1",
+                item_name="backpacks",
             required_quantity=0,
             already_owned=True,
-            source_text="1 backpack",
-            confidence=1.0,
-        ),
+                source_text="1 backpack",
+                confidence=1.0,
+            ),
+            SupplyItemReview(
+                review_id="optional",
+                req_id="optional",
+                child_id="child-1",
+                item_name="tissues",
+                required_quantity=1,
+                optional=True,
+                source_text="1 optional box of tissues",
+                confidence=1.0,
+            ),
     )
     class WidgetAwareState(dict[str, object]):
         """Enforce Streamlit's widget and stricter button state rules."""
@@ -3311,104 +3323,53 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
 
     summary = ReviewScreenRecorder()
     app._render_review(summary)
-    assert summary.tab_labels == ("Summary", "Jawan  (1)")
+    assert summary.tab_labels == ("Summary", "Jawan  [1]")
     assert summary.radio_label_visibility == "collapsed"
     assert "1 decision remains." in summary.messages
-    assert summary.buttons[:5] == [
-        "Notebook paper",
-        "Approve all AI recommendations",
-        "graphing calculator",
-        "Pencils",
-        "Backpack",
-    ]
-    assert "**The Supply List**" in summary.messages
-    assert "**Quantity**" in summary.messages
-    assert "**Item**" in summary.messages
-    assert (
-        "Action needed · Pack count missing · "
-        "AI assumed 150 per package"
-    ) in summary.writes
-    assert "Included in your cart" in summary.writes
-    assert "Left out of your cart" in summary.writes
-    assert "Buy this item elsewhere" in summary.writes
-    assert ["2", "1", "1", "1"] == [
-        value
-        for value in summary.writes
-        if value in {"0", "1", "2"}
-    ][-4:]
-    assert [3.2, 2.2, 0.8] in summary.column_specs
-    assert summary.column_specs.count([3.2, 2.2, 0.8]) >= 4
-    assert [1.15, 2.45, 2.2, 0.8] not in summary.column_specs
-    assert "personalize-unavailable-summary" in summary.container_keys
+    assert "Open Jawan" in summary.buttons
+    assert "Accept all remaining recommendations" in summary.buttons
+    assert "Notebook paper" not in summary.buttons
     assert any(
-        "#b42318" in message
-        and "personalize-unavailable-summary" in message
-        for message in summary.messages
+        "1 needs a decision" in value
+        and "1 optional" in value
+        and "2 in cart" in value
+        for value in summary.writes
     )
-    assert summary.events.index(
-        ("write", "Action needed · Pack count missing · AI assumed 150 per package")
-    ) < summary.events.index(("button", "Approve all AI recommendations"))
-    assert summary.events.index(
-        ("write", "Action needed · Pack count missing · AI assumed 150 per package")
-    ) < summary.events.index(
-        ("container", "personalize-unavailable-summary")
-    ) < summary.events.index(
-        ("write", "Included in your cart")
+    assert any(
+        key.startswith("personalize-summary-student-warning-")
+        for key in summary.container_keys
     )
 
-    summary.select_view("child-1")
+    summary.click("Open Jawan")
     student = ReviewScreenRecorder()
     app._render_review(student)
     assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "child-1"
+    assert "**Optional — your call (1)**" in student.messages
+    assert "Optional item · left out of the cart" in student.messages
+    assert not any(
+        label in student.buttons
+        for label in ("Include", "Exclude", "Include if it fits")
+    )
 
     student.select_view("summary")
     returned_summary = ReviewScreenRecorder()
     app._render_review(returned_summary)
     assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "summary"
 
-    item_label = next(
-        label
-        for label in returned_summary.buttons
-        if "notebook paper" in label.casefold()
-    )
-    returned_summary.click(item_label)
-    jumped_student = ReviewScreenRecorder()
-    app._render_review(jumped_student)
-    assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "child-1"
-    assert jumped_student.radio_selected == "child-1"
-    assert "personalize_scroll_target" not in state
-
-    jumped_student.select_view("summary")
+    returned_summary.click("Accept all remaining recommendations")
     final_summary = ReviewScreenRecorder()
     app._render_review(final_summary)
-    assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "summary"
     assert any(
         key.startswith(f"{app.PERSONALIZE_VIEW_WIDGET_KEY}:")
         for key in state.widget_keys
     )
     assert "personalize_active_tab" not in state
 
-    final_summary.check("Accept this AI recommendation")
     assert state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] == frozenset(
         {"review-flag-1"}
     )
-    approved_summary = ReviewScreenRecorder()
-    app._render_review(approved_summary)
-    assert "Nothing left to decide." in approved_summary.messages
-    assert "AI recommendation approved" in approved_summary.writes
-    assert (
-        "Accept this AI recommendation"
-        not in approved_summary.checkbox_callbacks
-    )
-    assert "Approve all AI recommendations" not in approved_summary.buttons
-    state.set_widget("settled:flagged:quantity", 2)
-    edited_summary = ReviewScreenRecorder()
-    app._render_review(edited_summary)
-    assert "Changed by you" in edited_summary.writes
-    assert state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] == frozenset()
-    assert state[app.PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] == frozenset(
-        {"review-flag-1"}
-    )
+    assert "Nothing left to decide." in final_summary.messages
+    assert "Accept all remaining recommendations" not in final_summary.buttons
 
 
 def test_personalize_student_cards_render_each_decision_before_acknowledgement(
@@ -3756,15 +3717,13 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     events = recorder.events
 
     assert sum(
-        event == ("radio", "Choose what to send to the cart")
+        event == ("button", "Use this recommendation")
         for event in events
     ) == 7
-    assert recorder.radio_options[
-        "Choose what to send to the cart"
-    ] == (
-        "Accept the AI recommendation",
-        "Edit the item or quantity",
-    )
+    assert sum(
+        event == ("button", "Change item or quantity")
+        for event in events
+    ) == 7
     assert sum(
         event == ("button", "Send selection to cart")
         for event in events
@@ -3811,12 +3770,12 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     assert tuple(state["review_items"])[0].item_name == "markers"
     assert tuple(state["review_items"])[0].required_quantity == 5
 
-    accepting_send = [
+    accepting_default = [
         callback
         for callback in recorder.button_callbacks
-        if callback[0] == "Send selection to cart"
+        if callback[0] == "Use this recommendation"
     ][1]
-    accepting_send[1](*accepting_send[2])  # type: ignore[operator]
+    accepting_default[1](*accepting_default[2])  # type: ignore[operator]
     assert state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] == frozenset(
         {"review-flag-2"}
     )
@@ -3824,8 +3783,8 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     unavailable_position = events.index(
         ("expander", "Not available from these stores (1)")
     )
-    cart_position = events.index(("markdown", "**In your cart**"))
-    assert unavailable_position < cart_position
+    cart_position = events.index(("markdown", "**In your cart (1)**"))
+    assert cart_position < unavailable_position
     assert "personalize-unavailable-student-child-1" in (
         recorder.container_keys
     )
@@ -4019,6 +3978,17 @@ def test_personalize_edit_updates_student_summary_and_detail_together(
             del label, kwargs
             return bool(self._widget(key, value))
 
+        def toggle(
+            self,
+            label: str,
+            *,
+            key: str,
+            value: bool = False,
+            **kwargs: object,
+        ) -> bool:
+            del label, kwargs
+            return bool(self._widget(key, value))
+
         def button(self, label: str, **kwargs: object) -> bool:
             key = kwargs.get("key")
             if isinstance(key, str):
@@ -4043,12 +4013,13 @@ def test_personalize_edit_updates_student_summary_and_detail_together(
     first = Recorder()
     app._render_review(first)
     state.set_widget("settled:crayon:quantity", 2)
+    state.set_widget("settled:crayon:more-options", True)
     state.set_widget("settled:crayon:item", "markers")
 
     edited_student = Recorder()
     app._render_review(edited_student)
     assert any(
-        kind == "markdown" and "2 Crayola markers" in text
+        kind == "expander" and "2 Crayola markers" in text
         for kind, text in edited_student.messages
     )
     assert (
@@ -4061,13 +4032,12 @@ def test_personalize_edit_updates_student_summary_and_detail_together(
     app._select_personalize_tab(state, "summary")
     summary = Recorder()
     app._render_review(summary)
-    assert "Crayola Markers" in summary.buttons
-    assert ("write", "2") in summary.messages
-    assert ("caption", "List requested: 1") in summary.messages
-    assert (
-        "caption",
-        "List requested: Crayola Crayons",
-    ) in summary.messages
+    assert "Crayola Markers" not in summary.buttons
+    assert "Open Kevin" in summary.buttons
+    assert any(
+        kind == "write" and "0 need a decision" in text
+        for kind, text in summary.messages
+    )
 
 
 def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
@@ -4136,6 +4106,15 @@ def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
 
         def container(self, **kwargs: object) -> "SourceScreenRecorder":
             del kwargs
+            return self
+
+        def expander(
+            self,
+            label: str,
+            **kwargs: object,
+        ) -> "SourceScreenRecorder":
+            del kwargs
+            self.messages.append(str(label))
             return self
 
         def popover(
@@ -4211,22 +4190,22 @@ def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
     app._render_review(recorder)
 
     assert len(recorder.popovers) == 2
-    assert "Kevin" in recorder.popovers[0]
-    assert "Kevin's supply list" in recorder.popovers[0]
+    assert recorder.popovers[0] == "View pasted list · Kevin"
     assert "Maya" in recorder.popovers[1]
     assert pdf_path.name in recorder.popovers[1]
     assert recorder.text_sources == [typed_text]
     assert len(recorder.pdf_pages) == 1
-    assert [1.15, 2.45, 2.2, 0.8] in recorder.column_specs
-    assert "**Quantity**" in recorder.messages
-    assert "**Item**" in recorder.messages
-    assert "**Quantity and item**" not in recorder.messages
-    assert recorder.messages.index("**Source documents**") < (
-        recorder.messages.index("**The Supply List**")
-    )
-    assert recorder.messages.index("**The Supply List**") < (
-        recorder.messages.index("**By student**")
-    )
+    assert [1.8, 3.2, 1.25] in recorder.column_specs
+    assert "2 lists · 1 pasted · 1 uploaded" in recorder.messages
+    assert "**The Supply List**" not in recorder.messages
+    assert "**By student**" not in recorder.messages
+
+    state["list_inputs"] = (state["list_inputs"][0],)
+    pasted_only = SourceScreenRecorder()
+    app._render_review(pasted_only)
+    assert "1 list · 1 pasted" in pasted_only.messages
+    assert pasted_only.popovers == ["View pasted list · Kevin"]
+    assert pasted_only.text_sources == [typed_text]
 
 
 def test_personalize_source_summary_extracts_scope_and_deduplicates_gaps() -> None:
@@ -4712,8 +4691,7 @@ def test_already_owned_sets_visible_quantity_zero_and_excludes_cart() -> None:
         supply_scope="unspecified",
         allow_equivalents=True,
         already_owned=True,
-        notes="",
-        delete=False,
+            delete=False,
     )
 
     assert updated.required_quantity == 0
@@ -5023,8 +5001,7 @@ def test_review_exclusions_persist_zero_in_production_item(
         optional=False,
         allow_equivalents=True,
         already_owned=already_owned,
-        notes="",
-        delete=delete,
+            delete=delete,
     )
 
     assert updated.required_quantity == 0
@@ -5047,48 +5024,6 @@ def test_package_preference_is_hidden_for_every_single_instance_item() -> None:
         ),
         "closest_quantity": "Avoid extra items, even if that costs more",
     }
-
-
-def test_resolved_conflict_source_moves_off_main_card() -> None:
-    """BR-53: completed conflicts keep sources only inside More detail."""
-
-    resolved = SupplyItemReview(
-        review_id="review-folders",
-        req_id="folders",
-        child_id="child-1",
-        item_name="folders",
-        required_quantity=2,
-        sources=(
-            RequirementSource(
-                source_req_id="one",
-                document_name="district.pdf",
-                section_name="5th Grade",
-                page_number=2,
-                exact_line="2 folders",
-                quantity=2,
-            ),
-            RequirementSource(
-                source_req_id="two",
-                document_name="district.pdf",
-                section_name="Highly Capable",
-                page_number=3,
-                exact_line="2 folders",
-                quantity=2,
-            ),
-        ),
-        system_decisions=("consolidated_sources",),
-        source_text="2 folders",
-        confidence=1.0,
-    )
-
-    assert not app.show_item_source_on_main(resolved)
-    assert app.show_item_source_on_main(
-        resolved,
-        ("The original line may be unclear.",),
-    )
-    assert app.show_item_source_on_main(
-        resolved.model_copy(update={"package_quantity_state": "assumed"})
-    )
 
 
 def test_only_unresolved_wording_asks_identity_on_main_card() -> None:
@@ -6074,6 +6009,7 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
     class SourceControl:
         session_state: dict[str, object] = {}
         popover_labels: list[str] = []
+        captions: list[str] = []
         rendered_text_pages: list[tuple[str, bool]] = []
 
         @classmethod
@@ -6082,9 +6018,9 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
             cls.popover_labels.append(label)
             return Popover()
 
-        @staticmethod
-        def caption(value: str) -> None:
-            del value
+        @classmethod
+        def caption(cls, value: str) -> None:
+            cls.captions.append(value)
 
         @classmethod
         def code(
@@ -6137,6 +6073,10 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
     assert SourceControl.rendered_text_pages == [
         (list_input.source_page_texts[1], False),
         (list_input.source_page_texts[1], False),
+    ]
+    assert SourceControl.captions == [
+        f"Cited line on this page: {source_line}",
+        f"Cited line on this page: {source_line}",
     ]
 
 
@@ -6312,6 +6252,13 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
         "_render_review_detail_controls",
         lambda st, item, **kwargs: item,
     )
+    app._render_personalize_child_sources(
+        recorder,
+        "child-1",
+        "Kevin",
+    )
+    student_source_count = len(recorder.popovers)
+    before_item = len(recorder.popovers)
     app._render_compact_review_row(
         recorder,
         (item,),
@@ -6319,7 +6266,7 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
         key_prefix="item",
         offers=(),
     )
-    item_surface_count = len(recorder.popovers)
+    item_surface_count = len(recorder.popovers) - before_item
 
     conflict = item_decisions(
         consolidate_requirements(
@@ -6350,7 +6297,8 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
         )
     )[0]
     app._render_merge_source_rows(recorder, conflict, list_input)
-    conflict_surface_count = len(recorder.popovers) - item_surface_count
+    before_conflict = student_source_count + item_surface_count
+    conflict_surface_count = len(recorder.popovers) - before_conflict
 
     envelope = ExtractionEnvelope(
         catalog_unavailable_items=(
@@ -6379,11 +6327,12 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
         len(recorder.popovers) - before_unavailable
     )
 
-    assert item_surface_count == 1
+    assert student_source_count == 1
+    assert item_surface_count == 0
     assert conflict_surface_count == 2
-    assert unavailable_surface_count == 1
+    assert unavailable_surface_count == 0
     conflict_labels = recorder.popovers[
-        item_surface_count : item_surface_count + conflict_surface_count
+        before_conflict : before_conflict + conflict_surface_count
     ]
     standalone_labels = tuple(
         label
@@ -6395,11 +6344,7 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
         and "Kevin's supply list" in label
         for label in conflict_labels
     )
-    assert all(
-        label.startswith("View source")
-        and "Kevin's supply list" in label
-        for label in standalone_labels
-    )
+    assert standalone_labels == ("View pasted list",)
     assert recorder.text_pages == [
         pasted
         for _ in recorder.popovers

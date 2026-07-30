@@ -701,7 +701,6 @@ class SupplyItemReview(BaseModel):
     variant_sources: tuple[RequirementSource, ...] = ()
     product_variant_id: str | None = None
     system_decisions: tuple[str, ...] = ()
-    notes: str | None = None
     source_text: str = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
     review_status: ReviewStatus = "pending"

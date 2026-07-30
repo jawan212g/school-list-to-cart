@@ -217,6 +217,48 @@ def test_package_assumption_populates_editable_production_field() -> None:
     assert confirmed.package_quantity_state == "assumed"
 
 
+def test_named_container_does_not_invent_a_missing_pack_count() -> None:
+    """BR-23: a stated box is complete when item contents are not count-based."""
+
+    tissues = Requirement(
+        req_id="tissues",
+        child_id="child-1",
+        raw_text="1 box of tissues",
+        canonical_item="tissues",
+        quantity=1,
+        unit_type="box",
+        extraction_confidence=1.0,
+    )
+    headphones = Requirement(
+        req_id="headphones",
+        child_id="child-1",
+        raw_text="1 pair of headphones",
+        canonical_item="headphones",
+        quantity=1,
+        unit_type="each",
+        extraction_confidence=1.0,
+    )
+
+    rows = organize_extractions(
+        {
+            "child-1": ExtractionEnvelope(
+                requirements=(tissues, headphones),
+            )
+        }
+    )
+
+    rows_by_source = {row.source_text: row for row in rows}
+    assert set(rows_by_source) == {tissues.raw_text, headphones.raw_text}
+    assert all(
+        "ambiguous_package_size" not in row.issue_codes for row in rows
+    )
+    assert rows_by_source[tissues.raw_text].package_size is None
+    assert (
+        rows_by_source[tissues.raw_text].package_quantity_state
+        == "unspecified"
+    )
+
+
 def test_pack_quantity_any_is_distinct_from_unspecified() -> None:
     """BR-35: parent acceptance of any pack size remains explicit data."""
 

@@ -9,6 +9,7 @@ from agent.rules import (
     AMBIGUOUS_UNNAMED_BRAND_REQUIREMENT_ISSUE,
     CLEAR_EXTRACTION_CONFIDENCE,
     CONFIDENCE_FLOOR,
+    COUNT_BASED_CATEGORIES,
     ITEM_FULFILLMENT_PREFERENCE_DEFAULT,
     NONPAGINATED_SOURCE_PAGE,
     PACKAGE_QUANTITY_STATE_DEFAULT,
@@ -345,7 +346,14 @@ def _review_issues(requirement: Requirement) -> tuple[str, ...]:
         issues.append("low_confidence")
     if requirement.quantity_is_range:
         issues.append("quantity_range")
-    if requirement.unit_type in {"pack", "box"}:
+    if (
+        requirement.unit_type in {"pack", "box"}
+        and (
+            requirement.canonical_item in COUNT_BASED_CATEGORIES
+            or requirement.canonical_item
+            in STANDARD_CONTAINER_CONTENT_COUNTS
+        )
+    ):
         if requirement.attributes.count is None:
             issues.append("ambiguous_package_size")
     if requirement.is_purchasable and not requirement.canonical_item:
@@ -449,7 +457,6 @@ def organize_extractions(
                     variant_sources=requirement.variant_sources,
                     product_variant_id=requirement.product_variant_id,
                     system_decisions=requirement.system_decisions,
-                    notes=None,
                     source_text=requirement.raw_text,
                     confidence=requirement.extraction_confidence,
                     review_status="pending",

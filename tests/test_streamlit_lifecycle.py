@@ -115,6 +115,68 @@ app._render_sections(st)
     return test_app
 
 
+def _run_personalize_screen() -> AppTest:
+    """Mount the production Personalize screen with two settled items."""
+
+    test_app = AppTest.from_string(
+        """
+import streamlit as st
+import app
+from agent.schema import ExtractionEnvelope, SupplyItemReview
+
+st.session_state.setdefault(
+    "intake",
+    {
+        "children": (
+            {
+                "child_id": "child-1",
+                "label": "Maya",
+                "grade": "Grade 2",
+            },
+        )
+    },
+)
+st.session_state.setdefault(
+    "extracted_lists",
+    {"child-1": ExtractionEnvelope()},
+)
+st.session_state.setdefault(
+    "review_items",
+    (
+        SupplyItemReview(
+            review_id="pencils",
+            req_id="pencils",
+            child_id="child-1",
+            item_name="pencils",
+            required_quantity=12,
+            source_text="12 pencils",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="erasers",
+            req_id="erasers",
+            child_id="child-1",
+            item_name="erasers",
+            required_quantity=2,
+            source_text="2 erasers",
+            confidence=1.0,
+        ),
+    ),
+)
+st.session_state.setdefault("parent_added_review_items", ())
+st.session_state.setdefault("extraction_errors", {})
+st.session_state.setdefault("list_inputs", ())
+st.session_state.setdefault(app.PERSONALIZE_SELECTED_VIEW_KEY, "child-1")
+app._render_review(st)
+"""
+    )
+    test_app.session_state["settled:pencils:expanded"] = True
+    test_app.session_state["settled:erasers:expanded"] = False
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
 def _widget(
     test_app: AppTest,
     widget_type: str,
@@ -272,7 +334,7 @@ def test_classroom_budget_default_tracks_count_until_parent_edits() -> None:
 def test_preferences_do_not_narrate_unused_budget_state() -> None:
     """FR-03: confirming a budget mode exposes no internal cleanup message."""
 
-    test_app = _complete_students(_run_app(), ("Maya",))
+    test_app = _complete_students(_run_app(), ("Maya", "Noah"))
     _set_widget(
         test_app,
         "radio",
@@ -300,7 +362,7 @@ def test_preferences_do_not_narrate_unused_budget_state() -> None:
 def test_preferences_explain_discarded_entered_individual_budgets() -> None:
     """FR-03: the screen names a real consequence without internal vocabulary."""
 
-    test_app = _complete_students(_run_app(), ("Maya",))
+    test_app = _complete_students(_run_app(), ("Maya", "Noah"))
     _set_widget(
         test_app,
         "radio",
@@ -328,7 +390,7 @@ def test_preferences_explain_discarded_entered_individual_budgets() -> None:
 def test_preferences_explain_discarded_entered_combined_budget() -> None:
     """FR-03: the reverse mode change explains only the amount affected."""
 
-    test_app = _complete_students(_run_app(), ("Maya",))
+    test_app = _complete_students(_run_app(), ("Maya", "Noah"))
     _set_widget(
         test_app,
         "radio",
@@ -592,3 +654,38 @@ def test_section_override_recomputes_excluded_section_count() -> None:
 
     captions = " ".join(str(item.value) for item in test_app.caption)
     assert "section was for another grade" not in captions
+
+
+def test_personalize_item_expanders_and_controls_keep_independent_state() -> None:
+    """FR-12: real keyed item disclosures survive their control reruns."""
+
+    test_app = _run_personalize_screen()
+    assert test_app.session_state["settled:pencils:expanded"] is True
+    assert test_app.session_state["settled:erasers:expanded"] is False
+
+    test_app.number_input(
+        key="settled:pencils:quantity"
+    ).set_value(24).run()
+    _assert_no_exception(test_app)
+    assert test_app.session_state["settled:pencils:expanded"] is True
+    assert test_app.session_state["settled:erasers:expanded"] is False
+    assert test_app.number_input(
+        key="settled:pencils:quantity"
+    ).value == 24
+
+    test_app.toggle(
+        key="settled:pencils:more-options"
+    ).set_value(True).run()
+    _assert_no_exception(test_app)
+    test_app.text_input(
+        key="settled:pencils:brand"
+    ).set_value("Ticonderoga").run()
+    _assert_no_exception(test_app)
+    assert test_app.session_state["settled:pencils:expanded"] is True
+    assert test_app.session_state["settled:erasers:expanded"] is False
+    assert test_app.number_input(
+        key="settled:pencils:quantity"
+    ).value == 24
+    assert test_app.text_input(
+        key="settled:pencils:brand"
+    ).value == "Ticonderoga"

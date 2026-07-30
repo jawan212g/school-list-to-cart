@@ -104,6 +104,7 @@ class ListInput:
     mime_type: str | None = None
     document_name: str | None = None
     source_page_texts: tuple[str, ...] = ()
+    input_kind: Literal["uploaded", "pasted"] = "uploaded"
 
     @property
     def resolved_document_name(self) -> str:

@@ -3954,3 +3954,112 @@ from source evidence, parent choices, and deterministic calculations.
 
 - Read the changed lines together in the deployed app to confirm the repeated
   “we believe,” “looks like,” and “appears” phrasing feels balanced in context.
+
+## 2026-07-30 — Personalize pack-count and source wording fixes
+
+### Decisions made
+
+- Kept BR-23 unchanged. A missing numeric package count now triggers review only
+  for canonical items whose package contents are count-sensitive.
+- Kept the full cited page in the source popover and relabeled the exact line as
+  the locator within that page.
+- Added an explicit session-only input kind to retained list inputs so pasted
+  lists and uploaded documents can be described accurately.
+- Deferred the optional-item intent feature pending approval of its state,
+  plan-resolution, visibility, and BR-73 design.
+
+### Files changed
+
+- `agent/review.py`
+- `agent/pipeline.py`
+- `app.py`
+- `tests/test_review.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused review and app tests: 132 passed.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 420 passed, 1 skipped in
+  3.20 seconds.
+
+### Problems or limitations
+
+- Streamlit is unavailable locally on this Windows ARM64 environment, so the
+  rendering behavior was verified through the production render functions and
+  tests rather than by launching the application.
+
+### Remaining work
+
+- Optional-item choices remain unchanged until the proposed deferred-intent rule
+  and resolution behavior are approved.
+
+## 2026-07-30 — Personalize layout and durable disclosure state
+
+### Objective
+
+Restructure Personalize around one Summary/student navigation dimension, put
+outstanding decisions first, reduce routine item weight, and preserve each
+item's disclosure and edit state across Streamlit reruns.
+
+### Work completed
+
+- Replaced the duplicate inventory Summary with one routing card per student or
+  classroom, compact counts, source access, and scoped recommendation actions.
+- Ordered each student view as decisions, optional items, cart items, then
+  items left out; sections with no items are not rendered.
+- Added one source disclosure near the top of each student view and one
+  aggregate source disclosure on Summary.
+- Replaced the decision checkbox with explicit recommendation and edit buttons.
+- Added keyed in-cart disclosures with Tier 1 purchase controls and Tier 2
+  item-detail controls.
+- Raised the Streamlit minimum to 1.60 for state-tracked expanders and added an
+  x86 GitHub Actions job that runs the full suite, including AppTest.
+
+### Named finding — fourth defined-but-unconsumed mechanism
+
+`SupplyItemReview.notes` was the fourth mechanism found to be defined but
+unconsumed, after BR-34, BR-32's ambiguous-descriptor list, and `brand_hint`.
+The Personalize form collected a Parent note and displayed it on later reruns,
+but `confirmed_requirements()` never copied it into a requirement. The note was
+therefore silently dropped at that boundary and could not affect matching,
+planning, or the shopping plan. The field and control were removed rather than
+continuing to collect text the application did not use.
+
+### Decisions made
+
+- Optional items remain left out and display no choice controls; a deferred
+  include-if-it-fits intent remains out of scope until its rule is proposed and
+  approved.
+- In-cart counts remain post-merge requirement counts. They are not package or
+  SKU line counts because those do not exist until planning.
+- `Other required details` remains because it flows into requirement
+  attributes and attribute-sensitive matching.
+- The Item selector remains as a Tier 2 correction control; source provenance
+  remains attached when its canonical category changes.
+- Zero-item sections are hidden because an empty heading adds navigation noise
+  without giving the parent an action.
+
+### Testing performed
+
+- Focused production-render tests: 131 passed; the Streamlit AppTest module was
+  skipped on Windows ARM64.
+- Full local suite: 419 passed, 1 skipped.
+- The first x86 Actions run exposed stale single-entry budget-mode values in
+  existing lifecycle tests. Those fixtures were corrected to use two entries
+  when testing the multi-entry mode switch.
+
+### Problems or limitations
+
+- The new Personalize expander lifecycle test cannot execute on the local
+  Windows ARM64 environment and must be verified by the x86 workflow.
+- Existing `use_container_width` parameters are deprecated in Streamlit 1.60
+  but remain supported. Replacing them is a separate compatibility cleanup.
+- The default expander style still has more visual weight than the new
+  `type="compact"` style. Compact may suit routine in-cart rows, but it was not
+  enabled without explicit approval.
+
+### Remaining work
+
+- Propose the optional-item deferred-intent behavior before assigning or
+  implementing BR-73.
