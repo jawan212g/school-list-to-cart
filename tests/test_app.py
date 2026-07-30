@@ -2141,14 +2141,22 @@ def test_forward_scroll_targets_streamlit_page_top_and_app_title() -> None:
     """Successful transitions target the real Streamlit scroller and title."""
 
     script = app._page_top_scroll_script()
+    main_source = inspect.getsource(app.main)
 
     assert 'section[data-testid="stMain"]' in script
     assert '[data-testid="stAppViewContainer"]' in script
-    assert 'querySelector(".rss-title")' in script
-    assert "main.scrollTop = 0" in script
+    assert 'getElementById("rss-app-title")' in script
+    assert "querySelectorAll(" in script
+    assert "getComputedStyle(ancestor)" in script
+    assert "scrollTargets.forEach" in script
+    assert "target.scrollTop = 0" in script
     assert "scrollingElement.scrollTop = 0" in script
+    assert "title.scrollIntoView" in script
     assert 'behavior: "auto"' in script
     assert "window.parent" in script
+    assert main_source.index("_render_app_title(st)") < main_source.index(
+        "_render_requested_next_task_scroll(st)"
+    )
 
 
 def test_decision_log_copy_uses_student_terminology() -> None:

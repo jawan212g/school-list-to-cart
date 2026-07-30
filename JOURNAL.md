@@ -4768,6 +4768,44 @@ the lightweight upload signature check.
 No new model call, extraction interpretation, matching behavior, money path,
 optimizer calculation, approval condition, or business threshold changed.
 
+## 2026-07-30 — Page-top navigation respects browser zoom
+
+### Objective
+
+Make the one-time forward-navigation scroll reliably reveal the Ready, Set,
+School title even when a parent reviews the app at a non-default browser zoom.
+
+### Diagnosis
+
+The shared script rendered before the title, so two animation frames were only
+a timing assumption. It also selected the first of two possible Streamlit
+containers, which could be a non-scrolling wrapper while the actual scrolling
+ancestor remained unchanged.
+
+### Work completed
+
+- Added a stable `rss-app-title` target to the visible application title.
+- Rendered the one-time navigation script after the title exists.
+- Replaced the first-match container choice with all known Streamlit scroll
+  containers plus dynamically detected scrollable ancestors of the title.
+- Kept an unconditional `scrollIntoView` call for the title and retained the
+  document/window resets as fallbacks.
+- Preserved the numbered session-state episode guard. No retry timer or
+  repeated rerun scroll was added, so the parent can scroll normally after the
+  initial transition.
+
+### Verification boundary
+
+The tests verify the transition guard, render ordering, stable title target,
+and generated browser script. AppTest cannot execute the browser JavaScript or
+observe a real scroll position at different zoom levels, so deployed-browser
+verification remains required.
+
+### Architecture
+
+No extraction, matching, pricing, optimizer, gate, or business-threshold
+behavior changed.
+
 ## 2026-07-30 — Duplicate exclusion uses one authoritative quantity state
 
 ### Defect

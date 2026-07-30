@@ -747,17 +747,43 @@ def _page_top_scroll_script() -> str:
             const hostDocument = hostWindow.document;
             const scrollToAppTop = () => {
               try {
-                const main =
-                  hostDocument.querySelector(
-                    'section[data-testid="stMain"]'
-                  ) ||
-                  hostDocument.querySelector('[data-testid="stAppViewContainer"]');
-                const title = hostDocument.querySelector(".rss-title");
-                if (main) {
-                  if (typeof main.scrollTo === "function") {
-                    main.scrollTo({top: 0, left: 0, behavior: "auto"});
+                const title =
+                  hostDocument.getElementById("rss-app-title") ||
+                  hostDocument.querySelector(".rss-title");
+                const scrollTargets = new Set(
+                  hostDocument.querySelectorAll(
+                    'section[data-testid="stMain"], ' +
+                    '[data-testid="stAppViewContainer"]'
+                  )
+                );
+                let ancestor = title ? title.parentElement : null;
+                while (
+                  ancestor &&
+                  ancestor !== hostDocument.body &&
+                  ancestor !== hostDocument.documentElement
+                ) {
+                  const style = hostWindow.getComputedStyle(ancestor);
+                  if (
+                    /(auto|scroll|overlay)/.test(style.overflowY) ||
+                    ancestor.scrollHeight > ancestor.clientHeight
+                  ) {
+                    scrollTargets.add(ancestor);
                   }
-                  main.scrollTop = 0;
+                  ancestor = ancestor.parentElement;
+                }
+                scrollTargets.forEach((target) => {
+                  if (typeof target.scrollTo === "function") {
+                    target.scrollTo({top: 0, left: 0, behavior: "auto"});
+                  }
+                  target.scrollTop = 0;
+                  target.scrollLeft = 0;
+                });
+                if (title) {
+                  title.scrollIntoView({
+                    block: "start",
+                    inline: "nearest",
+                    behavior: "auto"
+                  });
                 }
                 const scrollingElement = hostDocument.scrollingElement;
                 if (scrollingElement) {
@@ -767,9 +793,6 @@ def _page_top_scroll_script() -> str:
                 hostDocument.documentElement.scrollTop = 0;
                 hostDocument.body.scrollTop = 0;
                 hostWindow.scrollTo({top: 0, left: 0, behavior: "auto"});
-                if (title && title.getBoundingClientRect().top < 0) {
-                  title.scrollIntoView({block: "start", behavior: "auto"});
-                }
               } catch (_error) {
                 // Scrolling is an enhancement; navigation remains available.
               }
@@ -16241,7 +16264,8 @@ def _render_app_title(st: Any) -> None:
 
     st.markdown(
         (
-            '<h1 class="rss-title" aria-label="Ready, Set, School">'
+            '<h1 id="rss-app-title" class="rss-title" '
+            'aria-label="Ready, Set, School">'
             '<span class="rss-title__ready">Ready,</span>'
             '<span class="rss-title__set">Set,</span>'
             '<span class="rss-title__school">School</span>'
@@ -16265,10 +16289,10 @@ def main() -> None:
     preserve_navigation_state(st.session_state)
     _initialize_state(st)
     _apply_custom_css(st)
-    _render_requested_next_task_scroll(st)
     screen = st.session_state["screen"]
     _sync_work_episode_for_screen(st.session_state, screen)
     _render_app_title(st)
+    _render_requested_next_task_scroll(st)
     progress_screen = (
         "lists"
         if screen == "working"
