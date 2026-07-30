@@ -4555,6 +4555,10 @@ saved, but section grouping had already used the earlier value. Optional widget
 state is now resolved before the single BR-52 section model is built, so the
 item moves into the cart on the same interaction.
 
+The follow-up fixture also said `1 box of tissues` while constructing a
+Requirement with unit `each`. It was corrected to the production extraction
+shape (`box`) rather than weakening the expected cart transition.
+
 ### Deferred decision
 
 School-provided items remain display-only. A parent override should be a

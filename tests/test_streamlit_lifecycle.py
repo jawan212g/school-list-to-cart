@@ -252,6 +252,7 @@ st.session_state.setdefault(
                     raw_text="1 box of tissues, optional",
                     canonical_item="tissues",
                     quantity=1,
+                    unit_type="box",
                     is_required=False,
                     requirement_type="optional",
                     extraction_confidence=1.0,
