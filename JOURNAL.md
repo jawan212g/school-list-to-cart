@@ -4376,3 +4376,33 @@ from the actual expanders and controls.
 - ARM64 cannot execute the AppTest behavior.
 - The x86 workflow result determines whether keyed-expander independence
   actually holds; a failure will be reported rather than worked around.
+
+## 2026-07-30 — Personalize disclosures were never independent
+
+### Finding
+
+The production-shaped behavioral AppTest proved that settled item disclosures
+did not stay open independently. Editing a quantity changed the expander label,
+and Streamlit 1.60 includes that label in the stateful expander's internal
+identity. The row was therefore remounted with its default closed state. The
+quantity and other controls used separate keys and survived; this defect affected
+open state only.
+
+This behavior had passed its test across several rounds while never being true.
+It surfaced only after the test stopped inventing literal widget-key strings and
+instead derived row identities from the same production helpers used by the
+screen. All 13 AppTests are now production-shaped. Four of the first 12 had not
+been: they exercised UI states production could not create.
+
+### Resolution
+
+Each settled row now passes its own tracked expander state back as the initial
+open value when Streamlit rebuilds an expander identity. Opening or editing one
+row neither opens nor closes a sibling row. No item value or merge behavior was
+changed.
+
+### Verification boundary
+
+The behavioral test is intentionally unchanged: it opens row A, edits it, opens
+row B, edits it, and requires both rows to stay open with independent values.
+ARM64 cannot execute this AppTest; the x86 workflow is the verification path.

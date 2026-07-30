@@ -9502,6 +9502,7 @@ def _render_settled_review_row(
     expander_key = personalize_row_expander_key(key_prefix)
     with st.expander(
         escape_streamlit_dollars(review_understanding_text(item)),
+        expanded=bool(st.session_state.get(expander_key, False)),
         key=expander_key,
         on_change="rerun",
     ):
