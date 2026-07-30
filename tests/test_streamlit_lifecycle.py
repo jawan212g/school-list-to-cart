@@ -905,6 +905,11 @@ def test_personalize_edit_survives_summary_round_trip_without_button_crash() -> 
         test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY]
         == "child-1"
     )
+    first_bulk_key = next(
+        button.key
+        for button in test_app.button
+        if button.label == "Use all recommendations here"
+    )
 
     _click_label(test_app, "Change item or quantity")
     assert (
@@ -929,3 +934,9 @@ def test_personalize_edit_survives_summary_round_trip_without_button_crash() -> 
         test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY]
         == "child-1"
     )
+    reopened_bulk_key = next(
+        button.key
+        for button in test_app.button
+        if button.label == "Use all recommendations here"
+    )
+    assert reopened_bulk_key != first_bulk_key
