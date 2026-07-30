@@ -824,6 +824,7 @@ def _resolved_variant_requirements(
     compatible_brand_hint: str | None,
     compatible_exclusions: tuple[str, ...],
     system_decisions: tuple[str, ...],
+    confirmed_variant_ids: frozenset[str],
 ) -> tuple[Requirement, ...]:
     """Apply parent-entered variant quantities to production requirements."""
 
@@ -837,7 +838,7 @@ def _resolved_variant_requirements(
         if quantity == 0:
             continue
         variant_system_decisions = system_decisions
-        if variant.variant_id in quantities:
+        if variant.variant_id in confirmed_variant_ids:
             variant_system_decisions = tuple(
                 dict.fromkeys(
                     (
@@ -920,12 +921,22 @@ def consolidate_requirements(
         Literal["same", "different"],
     ] | None = None,
     excluded_decision_ids: Iterable[str] = (),
+    confirmed_variant_ids: Iterable[str] | None = None,
 ) -> RequirementMergeResult:
     """Merge same-student duplicates and flag quantity conflicts (FR-14)."""
 
     choices = quantity_choices or {}
     active_constraint_choices = constraint_choices or {}
     active_variant_choices = variant_quantity_choices or {}
+    active_confirmed_variant_ids = (
+        frozenset(confirmed_variant_ids)
+        if confirmed_variant_ids is not None
+        else frozenset(
+            variant_id
+            for quantities in active_variant_choices.values()
+            for variant_id in quantities
+        )
+    )
     active_identity_choices = product_identity_choices or {}
     excluded_ids = frozenset(excluded_decision_ids)
     grouped: dict[tuple[Any, ...], list[Requirement]] = {}
@@ -1091,6 +1102,7 @@ def consolidate_requirements(
                     brand_hint,
                     exclusions,
                     system_decisions,
+                    active_confirmed_variant_ids,
                 )
             )
             continue
@@ -1106,6 +1118,7 @@ def consolidate_requirements(
                     brand_hint,
                     exclusions,
                     system_decisions,
+                    active_confirmed_variant_ids,
                 )
             )
             continue
@@ -1192,6 +1205,7 @@ def consolidate_extractions(
         Literal["same", "different"],
     ] | None = None,
     excluded_decision_ids: Iterable[str] = (),
+    confirmed_variant_ids: Iterable[str] | None = None,
 ) -> tuple[dict[str, ExtractionEnvelope], RequirementMergeResult]:
     """Merge production extraction envelopes without changing their metadata."""
 
@@ -1206,6 +1220,7 @@ def consolidate_extractions(
         variant_quantity_choices=variant_quantity_choices,
         product_identity_choices=product_identity_choices,
         excluded_decision_ids=excluded_decision_ids,
+        confirmed_variant_ids=confirmed_variant_ids,
     )
     requirements_by_child: dict[str, list[Requirement]] = {
         child_id: [] for child_id in extractions

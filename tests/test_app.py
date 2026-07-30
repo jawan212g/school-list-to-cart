@@ -27,6 +27,7 @@ from agent.review import (
     organize_extractions,
     review_flag_groups,
 )
+from agent.rules import SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY
 from agent.schema import (
     CatalogUnavailableItem,
     DocumentSelection,
@@ -3354,10 +3355,15 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     assert summary.radio_label_visibility == "collapsed"
     assert "1 decision remains." in summary.messages
     assert "Use these recommendations" in summary.buttons
-    assert ("popover", "Notebook paper") in summary.events
-    assert ("popover", "Tissues, optional") in summary.events
-    assert ("popover", "Pencils") in summary.events
-    assert [1.1, 0.9, 1.1] in summary.column_specs
+    assert "Open Jawan" in summary.buttons
+    assert (
+        "1 needs a decision · 1 optional · 1 in cart"
+        in summary.writes
+    )
+    assert ("popover", "Notebook paper") not in summary.events
+    assert ("popover", "Tissues, optional") not in summary.events
+    assert ("popover", "Pencils") not in summary.events
+    assert [1.2, 3.8, 1.2] in summary.column_specs
 
     summary.select_view("child-1")
     student = ReviewScreenRecorder()
@@ -4062,8 +4068,11 @@ def test_personalize_edit_updates_student_summary_and_detail_together(
     summary = Recorder()
     app._render_review(summary)
     assert "Crayola Markers" not in summary.buttons
-    assert "Crayola Markers" in summary.popovers
-    assert ("markdown", "**In cart (1)**") in summary.messages
+    assert "Crayola Markers" not in summary.popovers
+    assert (
+        "write",
+        "0 need a decision · 0 optional · 1 in cart",
+    ) in summary.messages
 
 
 def test_personalize_summary_opens_typed_and_uploaded_sources(
@@ -4280,7 +4289,7 @@ def test_personalize_summary_opens_typed_and_uploaded_sources(
     assert recorder.popovers.count("Open source pages") == 2
     assert recorder.text_sources == [typed_text]
     assert len(recorder.pdf_pages) == 2
-    assert [1.1, 0.9, 1.1] in recorder.column_specs
+    assert [1.2, 3.8, 1.2] in recorder.column_specs
     assert "**Sources used**" in recorder.messages
     assert any("Sections read: 5th Grade and Highly Capable Class" in message for message in recorder.messages)
     assert any(f"{pdf_path.name} · page 2" in message for message in recorder.messages)
@@ -5034,6 +5043,27 @@ def test_exclusion_actions_zero_the_visible_quantity_state() -> None:
     assert merge_state["quantity"] == 0
     assert merge_state["custom-pending"] is False
 
+    variant_state: dict[str, object] = {
+        "exclude": True,
+        "graph": 0,
+        "lined": 0,
+    }
+    app.mark_merge_quantity_confirmed(
+        variant_state,
+        "graph-confirmed",
+        "exclude",
+        ("graph", "lined"),
+    )
+    assert variant_state["exclude"] is True
+    variant_state["graph"] = 1
+    app.mark_merge_quantity_confirmed(
+        variant_state,
+        "graph-confirmed",
+        "exclude",
+        ("graph", "lined"),
+    )
+    assert variant_state["exclude"] is False
+
     for trigger in ("owned", "delete"):
         review_state: dict[str, object] = {
             trigger: True,
@@ -5679,7 +5709,7 @@ def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> Non
     )
     identity_expander_event = (
         "expander",
-        "Change · same product or different products",
+        "Change your answer · one product or two?",
     )
     assert identity_rationale_event in recorder.events
     assert identity_expander_event in recorder.events
@@ -6042,6 +6072,28 @@ def test_merge_exclusion_reaches_personalize_cart(
         lambda *args, **kwargs: ("total", 5),
     )
     recorder = MergeRecorder()
+    assert decision.quantity_interrupt is not None
+    quantity_key = f"{decision.quantity_interrupt.interrupt_id}:quantity"
+    choice_key = f"{decision.quantity_interrupt.interrupt_id}:choice"
+    custom_pending_key = (
+        f"{decision.quantity_interrupt.interrupt_id}:custom-pending"
+    )
+    recorder.session_state[quantity_key] = 5
+    app.apply_merge_item_exclusion(
+        recorder.session_state,
+        exclude_key,
+        choice_key,
+        (quantity_key,),
+        custom_pending_key,
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_merge_quantity_controls",
+        lambda *args, **kwargs: (
+            "custom",
+            int(recorder.session_state[quantity_key]),
+        ),
+    )
     with pytest.raises(RerunRequested):
         app._render_requirement_merge(recorder)
 
@@ -6061,6 +6113,188 @@ def test_merge_exclusion_reaches_personalize_cart(
         review_flag_groups(personalize_rows),
     )
     assert sections[0].cart_item_ids == ()
+
+
+def _submit_composition_variant_state(
+    monkeypatch: pytest.MonkeyPatch,
+    quantities: tuple[int, int],
+) -> tuple[SupplyItemReview, ...]:
+    """Drive the production merge renderer with its displayed variant values."""
+
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="graph",
+                child_id="child-1",
+                raw_text="1 graph paper composition notebook",
+                canonical_item="composition_notebooks",
+                quantity=1,
+                attributes={"ruling": "graph"},
+                source_section="5th",
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="lined",
+                child_id="child-1",
+                raw_text="4 regular composition notebooks",
+                canonical_item="composition_notebooks",
+                quantity=4,
+                attributes={"ruling": "lined"},
+                source_section="Highly Capable Class",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    _, merge_result = consolidate_extractions({"child-1": envelope})
+    decision = item_decisions(merge_result)[0]
+
+    class RerunRequested(Exception):
+        pass
+
+    class MergeRecorder:
+        def __init__(self) -> None:
+            identity_key = f"{decision.decision_id}:same-or-different"
+            self.session_state: dict[str, object] = {
+                "requirement_merge_result": merge_result,
+                "unmerged_extracted_lists": {"child-1": envelope},
+                "intake": {
+                    "children": (
+                        {
+                            "child_id": "child-1",
+                            "label": "Jawan",
+                            "grade": "Grade 5",
+                        },
+                    )
+                },
+                "list_inputs": (),
+                "review_items": organize_extractions({"child-1": envelope}),
+                "parent_added_review_items": (),
+                identity_key: "Different products",
+                f"{identity_key}:facts": (
+                    resolve_item_decision_state(decision).state_fingerprint
+                ),
+                f"{decision.decision_id}:exclude": False,
+            }
+            for variant, quantity in zip(
+                decision.variants,
+                quantities,
+                strict=True,
+            ):
+                self.session_state[f"{variant.variant_id}:quantity"] = quantity
+
+        def __enter__(self) -> "MergeRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def container(self, **kwargs: object) -> "MergeRecorder":
+            del kwargs
+            return self
+
+        def expander(self, *args: object, **kwargs: object) -> "MergeRecorder":
+            del args, kwargs
+            return self
+
+        def columns(self, spec: object) -> tuple["MergeRecorder", ...]:
+            count = spec if isinstance(spec, int) else len(spec)
+            return tuple(self for _ in range(count))
+
+        def header(self, value: object) -> None:
+            del value
+
+        def subheader(self, value: object) -> None:
+            del value
+
+        def write(self, value: object) -> None:
+            del value
+
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del value, kwargs
+
+        def caption(self, value: object) -> None:
+            del value
+
+        def radio(
+            self,
+            label: str,
+            options: tuple[str, ...],
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, options, kwargs
+            return str(self.session_state[key])
+
+        def number_input(
+            self,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> int:
+            del label, kwargs
+            return int(self.session_state[key])
+
+        def checkbox(
+            self,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> bool:
+            del label, kwargs
+            return bool(self.session_state[key])
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del kwargs
+            return label == "Continue with these choices"
+
+        def warning(self, value: object) -> None:
+            del value
+
+        def error(self, value: object) -> None:
+            raise AssertionError(value)
+
+        def rerun(self) -> None:
+            raise RerunRequested
+
+    monkeypatch.setattr(
+        app,
+        "_render_merge_source_rows",
+        lambda *args, **kwargs: None,
+    )
+    recorder = MergeRecorder()
+    with pytest.raises(RerunRequested):
+        app._render_requirement_merge(recorder)
+
+    merged = dict(recorder.session_state["extracted_lists"])
+    app._refresh_personalize_review_cache(recorder.session_state, merged)
+    return tuple(recorder.session_state["review_items"])
+
+
+def test_merge_checkbox_zeroes_submit_as_a_complete_exclusion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Displayed zeroes from the exclusion action keep every variant out."""
+
+    assert _submit_composition_variant_state(monkeypatch, (0, 0)) == ()
+
+
+def test_merge_restoring_one_variant_keeps_the_other_variant_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restoring one displayed quantity cannot revive an untouched zero."""
+
+    rows = _submit_composition_variant_state(monkeypatch, (1, 0))
+
+    assert len(rows) == 1
+    assert rows[0].required_quantity == 1
+    assert rows[0].source_text == "1 graph paper composition notebook"
+    assert (
+        SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY
+        not in rows[0].system_decisions
+    )
 
 
 def _submit_merge_choices_to_personalize(

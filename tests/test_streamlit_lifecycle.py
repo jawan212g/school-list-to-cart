@@ -363,6 +363,120 @@ app._render_review(st)
     return test_app
 
 
+def _run_composition_merge_screen() -> AppTest:
+    """Mount the production duplicate-resolution screen with two variants."""
+
+    test_app = AppTest.from_string(
+        """
+import streamlit as st
+import app
+from agent.requirement_merge import consolidate_extractions
+from agent.schema import ExtractionEnvelope, Requirement
+
+envelope = ExtractionEnvelope(
+    requirements=(
+        Requirement(
+            req_id="graph",
+            child_id="child-1",
+            raw_text="1 graph paper composition notebook",
+            canonical_item="composition_notebooks",
+            quantity=1,
+            attributes={"ruling": "graph"},
+            source_section="5th",
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="lined",
+            child_id="child-1",
+            raw_text="4 regular composition notebooks",
+            canonical_item="composition_notebooks",
+            quantity=4,
+            attributes={"ruling": "lined"},
+            source_section="Highly Capable Class",
+            extraction_confidence=1.0,
+        ),
+    )
+)
+_, merge_result = consolidate_extractions({"child-1": envelope})
+st.session_state.setdefault("requirement_merge_result", merge_result)
+st.session_state.setdefault("unmerged_extracted_lists", {"child-1": envelope})
+st.session_state.setdefault(
+    "intake",
+    {
+        "children": (
+            {
+                "child_id": "child-1",
+                "label": "Jawan",
+                "grade": "Grade 5",
+            },
+        )
+    },
+)
+st.session_state.setdefault("list_inputs", ())
+st.session_state.setdefault("review_items", ())
+st.session_state.setdefault("parent_added_review_items", ())
+st.session_state.setdefault("screen", "requirement_merge")
+if st.session_state["screen"] == "requirement_merge":
+    app._render_requirement_merge(st)
+else:
+    app._refresh_personalize_review_cache(
+        st.session_state,
+        dict(st.session_state["extracted_lists"]),
+    )
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
+def _composition_review_rows(test_app: AppTest) -> tuple[Any, ...]:
+    return tuple(_session_value(test_app, "review_items", ()))
+
+
+def test_merge_exclusion_checkbox_keeps_every_variant_out() -> None:
+    """The production checkbox alone excludes both displayed variants."""
+
+    test_app = _run_composition_merge_screen()
+    checkbox = next(
+        item
+        for item in test_app.checkbox
+        if item.label == "Do not add this item to the cart"
+    )
+    checkbox.check().run()
+    _assert_no_exception(test_app)
+    _click_label(test_app, "Continue with these choices")
+
+    assert _composition_review_rows(test_app) == ()
+
+
+def test_merge_restoring_one_variant_does_not_restore_its_sibling() -> None:
+    """One restored quantity unchecks exclusion without reviving another zero."""
+
+    test_app = _run_composition_merge_screen()
+    checkbox = next(
+        item
+        for item in test_app.checkbox
+        if item.label == "Do not add this item to the cart"
+    )
+    checkbox.check().run()
+    _assert_no_exception(test_app)
+    test_app.number_input[0].set_value(1).run()
+    _assert_no_exception(test_app)
+    checkbox = next(
+        item
+        for item in test_app.checkbox
+        if item.label == "Do not add this item to the cart"
+    )
+    assert checkbox.value is False
+    _click_label(test_app, "Continue with these choices")
+
+    rows = _composition_review_rows(test_app)
+    assert len(rows) == 1
+    assert rows[0].required_quantity == 1
+    assert rows[0].source_text == "1 graph paper composition notebook"
+
+
 def _widget(
     test_app: AppTest,
     widget_type: str,

@@ -4692,3 +4692,41 @@ assertion was relaxed.
 
 No extraction, matching, pricing, optimizer, gate, or business-threshold
 behavior changed.
+
+## 2026-07-30 — Duplicate exclusion uses one authoritative quantity state
+
+### Defect
+
+The duplicate-resolution screen represented exclusion twice: a whole-item
+checkbox produced a transient excluded-decision set, while per-variant
+quantities were submitted through a separate map that discarded untouched
+zeroes. As a result, a zeroed variant missing from that map fell back to its
+original quantity and returned to the cart. This was the third live failure in
+carrying a duplicate-resolution exclusion into Personalize.
+
+### Resolution
+
+- The displayed quantities are now authoritative for multi-variant inclusion:
+  all zero excludes the item, while any positive quantity includes only those
+  positive variants.
+- The checkbox writes those quantities, and a quantity edit derives the
+  checkbox state from the same values.
+- Submission carries every displayed quantity, including zero, so the merge
+  layer cannot restore an omitted variant from its default.
+- Quantity inclusion remains separate from review confirmation: only a
+  quantity the parent actually edits receives the parent-confirmed marker.
+- The Personalize Summary again leads with compact per-student counts and
+  displays only unresolved decisions inline; optional and in-cart items remain
+  available in each student's view.
+
+### Verification boundary
+
+The ARM64 suite passes with the Streamlit lifecycle module skipped. Two x86
+AppTests exercise the real checkbox callback, submission, and Personalize
+rebuild; their result must come from the GitHub Actions runner because
+Streamlit is unavailable on this ARM64 machine.
+
+### Architecture
+
+No model call, matching behavior, money path, optimizer calculation, approval
+condition, or business threshold changed.

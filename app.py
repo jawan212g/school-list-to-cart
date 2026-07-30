@@ -8606,160 +8606,99 @@ def _render_personalize_summary(
     labels_by_child.update(child_labels or {})
     _render_personalize_session_sources(st, labels_by_child)
 
-    st.markdown(
-        """
-        <style>
-        div[class*="st-key-personalize-summary-lane-"] {
-            min-height: 12rem;
-            background: #ffffff !important;
-        }
-        @media (max-width: 700px) {
-            .st-key-personalize-summary-columns
-            > div[data-testid="stHorizontalBlock"] {
-                flex-direction: column !important;
-            }
-            .st-key-personalize-summary-columns
-            > div[data-testid="stHorizontalBlock"]
-            > div[data-testid="stColumn"] {
-                width: 100% !important;
-                flex: 1 1 100% !important;
-            }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    group_by_row = {
-        row_id: group.group_id
-        for group in all_flag_groups
-        for row_id in group.row_ids
-    }
     originals = original_items or {}
     edited_by_id: dict[str, SupplyItemReview] = {}
-    show_student = len(sections) > 1
-
-    def item_label(item: SupplyItemReview) -> str:
-        label = _review_summary_item_text(item)
-        if show_student:
-            label += f" · {labels_by_child.get(item.child_id, 'Student')}"
-        return escape_streamlit_dollars(label)
-
-    with st.container(key="personalize-summary-columns"):
-        decision_column, optional_column, cart_column = st.columns(
-            [1.1, 0.9, 1.1],
-            gap="large",
+    rendered_group_ids: set[str] = set()
+    for section in sections:
+        section_groups = tuple(
+            group
+            for group in section.decision_groups
+            if group.group_id in decision_groups
         )
-
-        with decision_column.container(
+        with st.container(
             border=True,
-            key="personalize-summary-lane-decisions",
+            key=f"personalize-summary-student:{section.child_id}",
         ):
-            st.markdown(f"**Decisions needed ({decision_count})**")
-            if not decision_groups:
-                st.caption("No decisions are waiting.")
-            for group in decision_groups.values():
-                members = tuple(
-                    item_by_id[row_id]
-                    for row_id in group.row_ids
-                    if row_id in item_by_id
+            name_column, count_column, open_column = st.columns(
+                [1.2, 3.8, 1.2],
+                gap="medium",
+                vertical_alignment="center",
+            )
+            name_column.markdown(
+                escape_streamlit_dollars(f"**{section.child_label}**")
+            )
+            count_column.write(
+                (
+                    f"{len(section_groups)} "
+                    f"{'needs' if len(section_groups) == 1 else 'need'} a "
+                    f"decision · {len(section.optional_item_ids)} optional · "
+                    f"{len(section.settled_item_ids)} in cart"
                 )
-                if not members:
-                    continue
-                representative = item_by_id[group.representative_id]
-                with st.popover(
-                    item_label(representative),
-                    use_container_width=True,
-                ):
-                    edited, confirmed = _render_compact_review_row(
-                        st,
-                        members,
-                        labels_by_child,
-                        key_prefix=group.group_id,
-                        offers=offers,
-                        flag_messages=group.messages,
-                        original_items=originals,
-                        view_revision=view_revision,
-                    )
-                    edited_by_id.update(edited)
-                    if confirmed:
-                        confirmed_group_ids.add(group.group_id)
-            if decision_groups:
-                st.caption(
-                    "Use the current recommendation shown for every "
-                    "decision in this column."
-                )
-                st.button(
-                    "Use these recommendations",
-                    key=(
-                        "personalize-action:approve-all:"
-                        f"{view_revision}"
+            )
+            open_column.button(
+                f"Open {section.child_label}",
+                key=(
+                    "personalize-action:open-student:"
+                    f"{view_revision}:{section.child_id}"
+                ),
+                on_click=_select_personalize_tab,
+                args=(st.session_state, section.child_id),
+                use_container_width=True,
+            )
+            groups_to_render = tuple(
+                group
+                for group in section_groups
+                if group.group_id not in rendered_group_ids
+            )
+            if groups_to_render:
+                with st.expander(
+                    (
+                        f"Review {len(groups_to_render)} "
+                        f"{'decision' if len(groups_to_render) == 1 else 'decisions'}"
                     ),
-                    on_click=_approve_personalize_groups,
-                    args=(st.session_state, tuple(decision_groups)),
-                    use_container_width=True,
+                    expanded=True,
+                ):
+                    for group in groups_to_render:
+                        members = tuple(
+                            item_by_id[row_id]
+                            for row_id in group.row_ids
+                            if row_id in item_by_id
+                        )
+                        if not members:
+                            continue
+                        edited, confirmed = _render_compact_review_row(
+                            st,
+                            members,
+                            labels_by_child,
+                            key_prefix=group.group_id,
+                            offers=offers,
+                            flag_messages=group.messages,
+                            original_items=originals,
+                            view_revision=view_revision,
+                        )
+                        edited_by_id.update(edited)
+                        if confirmed:
+                            confirmed_group_ids.add(group.group_id)
+                    st.caption(
+                        "Use the current recommendations shown above for "
+                        f"{section.child_label}."
+                    )
+                    st.button(
+                        "Use these recommendations",
+                        key=(
+                            "personalize-action:approve-student:"
+                            f"{view_revision}:{section.child_id}"
+                        ),
+                        on_click=_approve_personalize_groups,
+                        args=(
+                            st.session_state,
+                            tuple(group.group_id for group in groups_to_render),
+                        ),
+                        use_container_width=True,
+                    )
+                rendered_group_ids.update(
+                    group.group_id for group in groups_to_render
                 )
-
-        optional_items = tuple(
-            item_by_id[item_id]
-            for section in sections
-            for item_id in section.optional_item_ids
-            if item_id in item_by_id
-        )
-        with optional_column.container(
-            border=True,
-            key="personalize-summary-lane-optional",
-        ):
-            st.markdown(f"**Optional ({len(optional_items)})**")
-            if not optional_items:
-                st.caption("No optional items were listed.")
-            for item in optional_items:
-                with st.popover(
-                    item_label(item),
-                    use_container_width=True,
-                ):
-                    edited_by_id[item.review_id] = (
-                        _render_optional_review_row(
-                            st,
-                            item,
-                            key_prefix=f"optional:{item.review_id}",
-                            offers=offers,
-                            original_item=originals.get(item.review_id),
-                        )
-                    )
-
-        cart_items = tuple(
-            item_by_id[item_id]
-            for section in sections
-            for item_id in section.settled_item_ids
-            if item_id in item_by_id
-        )
-        with cart_column.container(
-            border=True,
-            key="personalize-summary-lane-cart",
-        ):
-            st.markdown(f"**In cart ({len(cart_items)})**")
-            if not cart_items:
-                st.caption("No items are in the cart yet.")
-            for item in cart_items:
-                with st.popover(
-                    item_label(item),
-                    use_container_width=True,
-                ):
-                    edited_by_id[item.review_id] = (
-                        _render_settled_review_row(
-                            st,
-                            item,
-                            key_prefix=personalize_settled_row_key_prefix(
-                                item
-                            ),
-                            offers=offers,
-                            original_item=originals.get(item.review_id),
-                            ai_recommendation_approved=(
-                                group_by_row.get(item.review_id)
-                                in confirmed_group_ids
-                            ),
-                        )
-                    )
 
     unavailable_lookup = unavailable_by_child or {}
     unavailable_rows: list[tuple[str, str, str]] = []
@@ -8810,7 +8749,9 @@ def _render_personalize_summary(
         with st.expander(f"Left out ({len(excluded_items)})"):
             for item in excluded_items:
                 with st.popover(
-                    item_label(item),
+                    escape_streamlit_dollars(
+                        _review_summary_item_text(item)
+                    ),
                     use_container_width=True,
                 ):
                     edited_by_id[item.review_id] = (
@@ -11064,10 +11005,17 @@ def mark_merge_quantities_custom(
 def mark_merge_quantity_confirmed(
     state: MutableMapping[str, Any],
     confirmation_key: str,
+    exclude_key: str | None = None,
+    quantity_keys: Sequence[str] = (),
 ) -> None:
-    """Record that a parent actively changed one variant quantity."""
+    """Record one variant edit and synchronize the exclusion checkbox."""
 
     state[confirmation_key] = True
+    if exclude_key is not None and quantity_keys:
+        state[exclude_key] = not any(
+            int(state.get(quantity_key, 0)) > EXCLUDED_REQUIREMENT_QUANTITY
+            for quantity_key in quantity_keys
+        )
 
 
 def apply_merge_item_exclusion(
@@ -11076,10 +11024,18 @@ def apply_merge_item_exclusion(
     choice_key: str | None,
     quantity_keys: Sequence[str],
     custom_pending_key: str | None = None,
+    quantity_defaults: Mapping[str, int] | None = None,
 ) -> None:
-    """Apply BR-56 to every visible conflict-card quantity control."""
+    """Make visible quantities the single BR-56 inclusion source."""
 
     if not bool(state.get(exclude_key)):
+        defaults = quantity_defaults or {}
+        if quantity_keys and not any(
+            int(state.get(quantity_key, 0)) > EXCLUDED_REQUIREMENT_QUANTITY
+            for quantity_key in quantity_keys
+        ):
+            for quantity_key in quantity_keys:
+                state[quantity_key] = int(defaults.get(quantity_key, 1))
         return
     if choice_key is not None:
         state[choice_key] = MERGE_CUSTOM_QUANTITY_LABEL
@@ -11334,8 +11290,19 @@ def _render_merge_variant_controls(
                 step=1,
                 key=quantity_key,
                 on_change=mark_merge_quantity_confirmed,
-                args=(st.session_state, confirmation_key),
-                help="Set a kind to zero if you do not want it in the cart.",
+                args=(
+                    st.session_state,
+                    confirmation_key,
+                    f"{decision.decision_id}:exclude",
+                    tuple(
+                        f"{item.variant_id}:quantity"
+                        for item in decision.variants
+                    ),
+                ),
+                help=(
+                    "Set the quantity to zero if you don't want that one in "
+                    "your cart."
+                ),
             )
         )
     return selected
@@ -11504,7 +11471,7 @@ def _render_requirement_merge(st: Any) -> None:
                     ),
                 )
                 with st.expander(
-                    "Change · same product or different products"
+                    "Change your answer · one product or two?"
                 ):
                     identity_choice = st.radio(
                         identity_question,
@@ -11562,6 +11529,25 @@ def _render_requirement_merge(st: Any) -> None:
                     else ()
                 )
             )
+            merge_quantity_defaults = (
+                {
+                    f"{variant.variant_id}:quantity": int(
+                        variant.default_quantity
+                    )
+                    for variant in decision.variants
+                }
+                if pending_variants is not None
+                else (
+                    {
+                        (
+                            f"{decision.quantity_interrupt.interrupt_id}:"
+                            "quantity"
+                        ): int(decision.quantity_interrupt.default_quantity)
+                    }
+                    if decision.quantity_interrupt is not None
+                    else {}
+                )
+            )
             custom_pending_key = (
                 f"{decision.quantity_interrupt.interrupt_id}:custom-pending"
                 if decision.quantity_interrupt is not None
@@ -11577,13 +11563,26 @@ def _render_requirement_merge(st: Any) -> None:
                     merge_choice_key,
                     merge_quantity_keys,
                     custom_pending_key,
+                    merge_quantity_defaults,
                 ),
                 help=(
                     "Use this when you do not want this item included in the "
                     "shopping plan."
                 ),
             )
-            if excluded:
+            excluded_by_quantity = (
+                not any(pending_variants.values())
+                if pending_variants is not None
+                else (
+                    pending_selection[1] == EXCLUDED_REQUIREMENT_QUANTITY
+                    if (
+                        pending_selection is not None
+                        and pending_selection[1] is not None
+                    )
+                    else excluded
+                )
+            )
+            if excluded_by_quantity:
                 excluded_decision_ids.add(decision.decision_id)
                 st.caption(
                     "This item will stay out of the cart."
@@ -11593,8 +11592,42 @@ def _render_requirement_merge(st: Any) -> None:
                 variant_quantity_choices[decision.decision_id] = (
                     pending_variants
                 )
-                if not any(pending_variants.values()):
-                    validation_errors.append(item_name)
+                omitted_variants = tuple(
+                    variant
+                    for variant in decision.variants
+                    if (
+                        pending_variants.get(variant.variant_id)
+                        == EXCLUDED_REQUIREMENT_QUANTITY
+                    )
+                )
+                if omitted_variants:
+                    labels = tuple(
+                        next(
+                            (
+                                _parent_attribute_value(field_name, value)
+                                for field_name, value in (
+                                    ("ruling", variant.attributes.ruling),
+                                    ("tip_style", variant.attributes.tip_style),
+                                    ("format", variant.attributes.format),
+                                    ("size", variant.attributes.size),
+                                    *variant.details,
+                                )
+                                if value not in (None, "", (), [])
+                            ),
+                            item_name,
+                        )
+                        for variant in omitted_variants
+                    )
+                    st.caption(
+                        (
+                            f"{labels[0].title()} will stay out of the cart."
+                            if len(labels) == 1
+                            else (
+                                f"{_join_names(tuple(name.title() for name in labels))} "
+                                "will stay out of the cart."
+                            )
+                        )
+                    )
             elif (
                 pending_selection is not None
                 and decision.quantity_interrupt is not None
@@ -11628,31 +11661,22 @@ def _render_requirement_merge(st: Any) -> None:
             )
         )
     }
-    confirmed_variant_quantity_choices = {
-        decision_id: {
-            variant_id: quantity
-            for variant_id, quantity in quantities.items()
-            if bool(
-                st.session_state.get(
-                    f"{variant_id}:parent-confirmed"
-                )
-            )
-        }
-        for decision_id, quantities in variant_quantity_choices.items()
-    }
-    confirmed_variant_quantity_choices = {
-        decision_id: quantities
-        for decision_id, quantities
-        in confirmed_variant_quantity_choices.items()
-        if quantities
-    }
+    confirmed_variant_ids = frozenset(
+        variant_id
+        for quantities in variant_quantity_choices.values()
+        for variant_id in quantities
+        if bool(
+            st.session_state.get(f"{variant_id}:parent-confirmed")
+        )
+    )
     merged, resolved = consolidate_extractions(
         st.session_state["unmerged_extracted_lists"],
         quantity_choices=quantity_choices,
         constraint_choices={},
-        variant_quantity_choices=confirmed_variant_quantity_choices,
+        variant_quantity_choices=variant_quantity_choices,
         product_identity_choices=product_identity_choices,
         excluded_decision_ids=excluded_decision_ids,
+        confirmed_variant_ids=confirmed_variant_ids,
     )
     st.session_state["extracted_lists"] = merged
     st.session_state["requirement_merge_result"] = resolved
