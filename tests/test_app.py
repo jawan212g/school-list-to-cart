@@ -3727,7 +3727,7 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     assert sum(
         event == ("button", "Send selection to cart")
         for event in events
-    ) == 7
+    ) == 0
     assert (
         "checkbox",
         "I have checked this choice",
@@ -3750,6 +3750,10 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     state.set_widget("review-flag-1:decision-quantity", 5)
     edited_recorder = DecisionScreenRecorder()
     app._render_review(edited_recorder)
+    assert sum(
+        event == ("button", "Send selection to cart")
+        for event in edited_recorder.events
+    ) == 1
     assert (
         "markdown",
         "**5 markers**",
@@ -5823,6 +5827,154 @@ def test_lists_merge_screen_names_identical_backpack_wording(
         "worded differently" not in caption
         for caption in recorder.captions
     )
+
+
+def test_merge_exclusion_reaches_personalize_cart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A submitted duplicate exclusion invalidates stale Personalize rows."""
+
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="folders-grade",
+                child_id="child-1",
+                raw_text="2 folders",
+                canonical_item="folders",
+                quantity=2,
+                source_section="5th",
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="folders-capable",
+                child_id="child-1",
+                raw_text="3 folders",
+                canonical_item="folders",
+                quantity=3,
+                source_section="Highly Capable Class",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    _, merge_result = consolidate_extractions({"child-1": envelope})
+    decision = item_decisions(merge_result)[0]
+    exclude_key = f"{decision.decision_id}:exclude"
+
+    class RerunRequested(Exception):
+        pass
+
+    class MergeRecorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {
+                "requirement_merge_result": merge_result,
+                "unmerged_extracted_lists": {"child-1": envelope},
+                "intake": {
+                    "children": (
+                        {
+                            "child_id": "child-1",
+                            "label": "Jawan",
+                            "grade": "Grade 5",
+                        },
+                    )
+                },
+                "list_inputs": (),
+                "review_items": organize_extractions({"child-1": envelope}),
+                "parent_added_review_items": (),
+                exclude_key: True,
+            }
+
+        def __enter__(self) -> "MergeRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def container(self, **kwargs: object) -> "MergeRecorder":
+            del kwargs
+            return self
+
+        def expander(self, *args: object, **kwargs: object) -> "MergeRecorder":
+            del args, kwargs
+            return self
+
+        def columns(self, spec: object) -> tuple["MergeRecorder", ...]:
+            count = spec if isinstance(spec, int) else len(spec)
+            return tuple(self for _ in range(count))
+
+        def header(self, value: object) -> None:
+            del value
+
+        def subheader(self, value: object) -> None:
+            del value
+
+        def write(self, value: object) -> None:
+            del value
+
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del value, kwargs
+
+        def caption(self, value: object) -> None:
+            del value
+
+        def radio(
+            self,
+            label: str,
+            options: tuple[str, ...],
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> str:
+            del label, kwargs
+            return str(self.session_state.get(key, options[0]))
+
+        def checkbox(
+            self,
+            label: str,
+            *,
+            key: str,
+            **kwargs: object,
+        ) -> bool:
+            del label, kwargs
+            return bool(self.session_state.get(key, False))
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del kwargs
+            return label == "Continue with these choices"
+
+        def warning(self, value: object) -> None:
+            del value
+
+        def error(self, value: object) -> None:
+            raise AssertionError(value)
+
+        def rerun(self) -> None:
+            raise RerunRequested
+
+    monkeypatch.setattr(
+        app,
+        "_render_merge_source_rows",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_merge_quantity_controls",
+        lambda *args, **kwargs: ("total", 5),
+    )
+    recorder = MergeRecorder()
+    with pytest.raises(RerunRequested):
+        app._render_requirement_merge(recorder)
+
+    assert recorder.session_state["review_items"] == ()
+    merged = recorder.session_state["extracted_lists"]
+    assert tuple(merged["child-1"].requirements) == ()
+
+    personalize_rows = organize_extractions(dict(merged))
+    sections = app.build_personalize_student_sections(
+        tuple(recorder.session_state["intake"]["children"]),
+        personalize_rows,
+        review_flag_groups(personalize_rows),
+    )
+    assert sections[0].cart_item_ids == ()
 
 
 def test_custom_quantity_choice_highlights_until_parent_enters_value() -> None:
