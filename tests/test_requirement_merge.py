@@ -308,8 +308,8 @@ def test_graph_and_regular_composition_books_are_different_products() -> None:
     assert resolved.quantity_control == "variants"
     assert resolved.rationale == (
         "Highly Capable Class asks for graph and 5th Grade asks for lined. "
-        "Those are different composition notebooks, so we've kept them "
-        "separate."
+        "Those look like different composition notebooks to us, so we've "
+        "kept them separate."
     )
     assert AMBIGUOUS_PRODUCT_DESCRIPTORS == frozenset()
 
@@ -524,8 +524,8 @@ def test_boolean_product_difference_uses_parent_language() -> None:
 
     assert rationale == (
         "5th Grade asks for pre-sharpened and Highly Capable Class asks for "
-        "unsharpened. Those are different pencils, so we've kept them "
-        "separate."
+        "unsharpened. Those look like different pencils to us, so we've kept "
+        "them separate."
     )
     assert "True" not in rationale
     assert "False" not in rationale
@@ -960,8 +960,8 @@ def test_parent_can_override_type_b_to_one_product() -> None:
     assert merged.requirements[0].attributes.material == "cardboard"
     assert merged.requirements[0].attributes.connector is None
     assert same_product_override_notice(decision) == (
-        "You said these are the same product, so we've used the description "
-        "from 5th Grade. Change it below if you'd rather use the other one."
+        "You chose to treat these lines as the same product. The cart will "
+        "use the product details from 5th Grade."
     )
 
 

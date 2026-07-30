@@ -4833,8 +4833,8 @@ def test_durable_quantity_default_keeps_combined_choice_without_selecting_it() -
         choices,
     ) == "**1** — Quantity from 5th Grade"
     assert app.quantity_preselection_rationale(interrupt) == (
-        "Backpacks are usually reused rather than used up, so we've "
-        "preselected one instead of adding both requests together."
+        "We think backpacks are more likely to be reused than used up, so "
+        "we've preselected one instead of adding both requests together."
     )
 
 
@@ -4887,9 +4887,9 @@ def test_type_a_quantity_choices_do_not_repeat_source_text() -> None:
     )
     assert all("tissues" not in label for label in labels)
     assert app.quantity_preselection_rationale(interrupt) == (
-        "Both parts of the list ask for tissues, and tissues get used up, so "
-        "we've added the amounts together. Change it if that's more than you "
-        "need."
+        "Both parts of the list ask for tissues. We expect tissues to get "
+        "used up, so we've added the amounts together. Change it if that's "
+        "more than you need."
     )
     assert app.visible_quantity_preselection_rationale(
         interrupt,
@@ -5201,7 +5201,8 @@ def test_identity_rationale_radio_and_quantity_share_resolved_state() -> None:
     assert resolved.quantity_control == "variants"
     assert resolved.rationale == (
         "5th Grade asks for cardboard and Highly Capable Class asks for "
-        "plastic. Those are different folders, so we've kept them separate."
+        "plastic. Those look like different folders to us, so we've kept "
+        "them separate."
     )
 
     state[identity_key] = "The same product"
@@ -5263,10 +5264,11 @@ def test_same_product_override_remains_explained_in_personalize() -> None:
     )[0]
 
     assert app.review_system_decision_messages(review_item) == (
-        "This item appears in 2 places; page 2 asks for 3 and page 3 asks "
-        "for 2. The cart uses 5. You chose one product, so the cart will use "
-        "material: cardboard from 5th Grade. This keeps one real source "
-        "description instead of mixing details from different products.",
+        "We believe these 2 source lines describe one item; page 2 asks for "
+        "3 and page 3 asks for 2. The cart uses 5. You chose one product, so "
+        "the cart will use material: cardboard from 5th Grade. This keeps one "
+        "real source description instead of mixing details from different "
+        "products.",
     )
 
 
@@ -5385,9 +5387,9 @@ def test_conflict_rows_keep_production_exact_lines_separate_from_quantity() -> N
         "**Source**",
     ]
     assert recorder.column_specs == [
-        (0.7, 3.2, 1.7, 2.4),
-        (0.7, 3.2, 1.7, 2.4),
-        (0.7, 3.2, 1.7, 2.4),
+        (0.7, 3.2, 1.5, 2.8),
+        (0.7, 3.2, 1.5, 2.8),
+        (0.7, 3.2, 1.5, 2.8),
     ]
 
     ungraded_decision = replace(
@@ -5535,6 +5537,8 @@ def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> Non
                 "list_inputs": (),
             }
             self.captions: list[str] = []
+            self.events: list[tuple[str, str]] = []
+            self.expander_labels: list[str] = []
             self.radio_options: list[tuple[str, ...]] = []
             self.writes: list[str] = []
 
@@ -5553,7 +5557,9 @@ def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> Non
             label: str,
             **kwargs: object,
         ) -> "ListsMergeRecorder":
-            del label, kwargs
+            del kwargs
+            self.expander_labels.append(label)
+            self.events.append(("expander", label))
             return self
 
         def columns(self, spec: object) -> tuple["ListsMergeRecorder", ...]:
@@ -5573,7 +5579,9 @@ def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> Non
             del value, kwargs
 
         def caption(self, value: object) -> None:
-            self.captions.append(str(value))
+            rendered = str(value)
+            self.captions.append(rendered)
+            self.events.append(("caption", rendered))
 
         def radio(
             self,
@@ -5623,14 +5631,14 @@ def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> Non
 
     rendered = "\n".join(recorder.captions)
     assert (
-        "Rationale: Backpacks are usually reused rather than used up, so "
-        "we've preselected one instead of adding both requests together."
+        "Rationale: We think backpacks are more likely to be reused than used "
+        "up, so we've preselected one instead of adding both requests together."
         in rendered
     )
     assert (
-        "Rationale: Both parts of the list ask for tissues, and tissues get "
-        "used up, so we've added the amounts together. Change it if that's "
-        "more than you need."
+        "Rationale: Both parts of the list ask for tissues. We expect tissues "
+        "to get used up, so we've added the amounts together. Change it if "
+        "that's more than you need."
         in rendered
     )
     assert (
@@ -5640,14 +5648,32 @@ def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> Non
         in rendered
     )
     assert (
-        "Rationale: Both lines describe the same thing, just worded "
-        "differently."
+        "Rationale: We believe both lines describe the same thing, just "
+        "worded differently."
         in rendered
+    )
+    identity_rationale_event = (
+        "caption",
+        "Rationale: We believe both lines describe the same thing, just "
+        "worded differently.",
+    )
+    identity_expander_event = (
+        "expander",
+        "Change · same product or different products",
+    )
+    assert identity_rationale_event in recorder.events
+    assert identity_expander_event in recorder.events
+    assert recorder.events.index(identity_rationale_event) < recorder.events.index(
+        identity_expander_event
+    )
+    assert (
+        "More detail · same product or different products"
+        not in recorder.expander_labels
     )
     assert (
         "Rationale: 5th Grade asks for cardboard and Highly Capable Class "
-        "asks for plastic. Those are different folders, so we've kept them "
-        "separate."
+        "asks for plastic. Those look like different folders to us, so we've "
+        "kept them separate."
         in rendered
     )
     assert all("working limit" not in caption for caption in recorder.captions)
@@ -5679,12 +5705,53 @@ def test_lists_merge_screen_renders_parent_rationales_and_full_sections() -> Non
         resolve_item_decision_state(folder_decision).state_fingerprint
     )
     recorder.captions.clear()
+    recorder.events.clear()
     app._render_requirement_merge(recorder)
     assert (
-        "Result: You said these are the same product, so we've used the "
-        "description from 5th Grade. Change it below if you'd rather use the "
-        "other one."
+        "Result: You chose to treat these lines as the same product. The cart "
+        "will use the product details from 5th Grade."
         in recorder.captions
+    )
+    result_event = (
+        "caption",
+        "Result: You chose to treat these lines as the same product. The cart "
+        "will use the product details from 5th Grade.",
+    )
+    assert result_event in recorder.events
+    result_index = recorder.events.index(result_event)
+    assert recorder.events[result_index + 1] == identity_expander_event
+    assert all(
+        "Rationale: 5th Grade asks for cardboard" not in caption
+        for caption in recorder.captions
+    )
+
+    backpack_decision = next(
+        decision
+        for decision in item_decisions(result)
+        if decision.canonical_item == "backpacks"
+    )
+    backpack_identity_key = (
+        f"{backpack_decision.decision_id}:same-or-different"
+    )
+    recorder.session_state[backpack_identity_key] = "Different products"
+    recorder.session_state[f"{backpack_identity_key}:facts"] = (
+        resolve_item_decision_state(backpack_decision).state_fingerprint
+    )
+    recorder.captions.clear()
+    recorder.events.clear()
+    app._render_requirement_merge(recorder)
+    assert (
+        "Result: You chose to treat these lines as different products."
+        in recorder.captions
+    )
+    different_result_event = (
+        "caption",
+        "Result: You chose to treat these lines as different products.",
+    )
+    different_result_index = recorder.events.index(different_result_event)
+    assert (
+        recorder.events[different_result_index + 1]
+        == identity_expander_event
     )
 
 
@@ -6046,14 +6113,30 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
         source_line=source_line,
         key="pasted-source",
     )
+    district_input = replace(
+        list_input,
+        document_name="Machiasschoolsupplylist 1.pdf",
+    )
+    app._render_source_reference(
+        SourceControl(),
+        district_input,
+        page_number=1,
+        source_line=source_line,
+        key="table-source",
+        under_source_header=True,
+    )
 
-    assert len(SourceControl.popover_labels) == 1
+    assert len(SourceControl.popover_labels) == 2
     source_label = SourceControl.popover_labels[0]
     assert source_label.startswith("View source")
     assert "Maya's supply list" in source_label
     assert source_label.endswith("page 2")
+    assert SourceControl.popover_labels[1] == (
+        "Machiasschoolsupplylist 1.pdf · page 2"
+    )
     assert SourceControl.rendered_text_pages == [
-        (list_input.source_page_texts[1], False)
+        (list_input.source_page_texts[1], False),
+        (list_input.source_page_texts[1], False),
     ]
 
 
@@ -6299,10 +6382,23 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
     assert item_surface_count == 1
     assert conflict_surface_count == 2
     assert unavailable_surface_count == 1
+    conflict_labels = recorder.popovers[
+        item_surface_count : item_surface_count + conflict_surface_count
+    ]
+    standalone_labels = tuple(
+        label
+        for label in recorder.popovers
+        if label not in conflict_labels
+    )
+    assert all(
+        not label.startswith("View source")
+        and "Kevin's supply list" in label
+        for label in conflict_labels
+    )
     assert all(
         label.startswith("View source")
         and "Kevin's supply list" in label
-        for label in recorder.popovers
+        for label in standalone_labels
     )
     assert recorder.text_pages == [
         pasted
@@ -6369,8 +6465,8 @@ def test_system_merge_decisions_are_plainly_visible() -> None:
 
     assert len(messages) == 1
     assert messages[0] == (
-        "This item appears in 2 places; page 2 asks for 1 and page 3 asks "
-        "for 1, so 1 is used."
+        "We believe these 2 source lines describe one item; page 2 asks for "
+        "1 and page 3 asks for 1, so 1 is used."
     )
 
 
@@ -6410,8 +6506,8 @@ def test_personalize_keeps_resolved_decisions_in_more_detail() -> None:
 
     assert main_messages == ()
     assert detail_messages == (
-        "This item appears in 2 places; page 2 asks for 1 and page 3 asks "
-        "for 1, so 1 is used.",
+        "We believe these 2 source lines describe one item; page 2 asks for "
+        "1 and page 3 asks for 1, so 1 is used.",
     )
 
 
@@ -6434,7 +6530,7 @@ def test_reconciled_boolean_attribute_uses_product_language() -> None:
 
     assert messages == (
         "One part of the list specifies sharpening as pre-sharpened; another "
-        "leaves it open, so pre-sharpened is kept.",
+        "appears to leave it open, so pre-sharpened is kept.",
     )
     assert "True" not in messages[0]
     assert "sharpened:" not in messages[0]

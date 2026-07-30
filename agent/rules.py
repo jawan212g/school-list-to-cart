@@ -634,15 +634,14 @@ def quantity_preselection_rationale(
 
     if canonical_item in SINGLE_INSTANCE_REQUIREMENT_ITEMS:
         return (
-            f"{item_name.capitalize()} are usually reused rather than used "
-            "up, so we've preselected one instead of adding both requests "
-            "together."
+            f"We think {item_name} are more likely to be reused than used up, "
+            "so we've preselected one instead of adding both requests together."
         )
     if selected_action == "total":
         return (
-            f"Both parts of the list ask for {item_name}, and {item_name} "
-            "get used up, so we've added the amounts together. Change it if "
-            "that's more than you need."
+            f"Both parts of the list ask for {item_name}. We expect "
+            f"{item_name} to get used up, so we've added the amounts together. "
+            "Change it if that's more than you need."
         )
     return (
         f"Adding both amounts would come to {combined_quantity} {item_name}, "
@@ -678,13 +677,16 @@ def product_identity_rationale(
     """Generate BR-43/BR-45's default product-identity rationale."""
 
     if conflict_type != "different_products":
-        return "Both lines describe the same thing, just worded differently."
+        return (
+            "We believe both lines describe the same thing, just worded "
+            "differently."
+        )
     first_source, first_value = source_values[0]
     second_source, second_value = source_values[1]
     return (
         f"{first_source} asks for {first_value} and {second_source} asks for "
-        f"{second_value}. Those are different {item_name}, so we've kept them "
-        "separate."
+        f"{second_value}. Those look like different {item_name} to us, so "
+        "we've kept them separate."
     )
 
 
@@ -694,10 +696,15 @@ def same_product_override_rationale(
     """Explain BR-44's source-backed result after a parent override."""
 
     return (
-        "You said these are the same product, so we've used the description "
-        f"from {source_name}. Change it below if you'd rather use the other "
-        "one."
+        "You chose to treat these lines as the same product. The cart will "
+        f"use the product details from {source_name}."
     )
+
+
+def different_product_override_rationale() -> str:
+    """Explain a parent's override of a same-product preselection."""
+
+    return "You chose to treat these lines as different products."
 
 
 def personalize_same_product_override_rationale(

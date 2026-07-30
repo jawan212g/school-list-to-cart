@@ -131,6 +131,7 @@ from agent.rules import (
     SYSTEM_DECISION_RECONCILED_EXCLUSIONS,
     SUBSTITUTION_NONE,
     grade_token_identifier,
+    different_product_override_rationale,
     parent_attribute_value as rule_parent_attribute_value,
     personalize_same_product_override_rationale as rule_personalize_override_rationale,
     quantity_preselection_rationale as rule_quantity_preselection_rationale,
@@ -406,24 +407,26 @@ ATTRIBUTE_DISPLAY_NAMES: Mapping[str, str] = {
 }
 SUBSTITUTION_REASON_LABELS: Mapping[str, str] = {
     "allowed_pack_size": "Package size is within the allowed overage",
-    "attribute_change:acceptable_colors": "Requested color differs",
-    "attribute_change:character": "Requested character differs",
-    "attribute_change:connector": "Requested connector differs",
-    "attribute_change:material": "Requested material differs",
-    "attribute_change:ruling": "Requested ruling differs",
-    "attribute_change:sharpened": "Requested sharpening differs",
-    "attribute_change:size": "Requested size differs",
-    "attribute_change:style": "Requested style differs",
-    "attribute_change:tab_count": "Requested tab count differs",
-    "attribute_change:tip_style": "Requested tip style differs",
-    "brand_lock_break": "Required brand differs",
-    "different_unlocked_brand": "Different brand; no brand was required",
-    "pack_count_difference": "Package count differs materially",
+    "attribute_change:acceptable_colors": "Requested color may differ",
+    "attribute_change:character": "Requested character may differ",
+    "attribute_change:connector": "Requested connector may differ",
+    "attribute_change:material": "Requested material may differ",
+    "attribute_change:ruling": "Requested ruling may differ",
+    "attribute_change:sharpened": "Requested sharpening may differ",
+    "attribute_change:size": "Requested size may differ",
+    "attribute_change:style": "Requested style may differ",
+    "attribute_change:tab_count": "Requested tab count may differ",
+    "attribute_change:tip_style": "Requested tip style may differ",
+    "brand_lock_break": "Required brand may differ",
+    "different_unlocked_brand": (
+        "Brand differs; we did not find a required brand in the list"
+    ),
+    "pack_count_difference": "Package count may differ materially",
 }
 SUBSTITUTION_SEVERITY_LABELS: Mapping[str, str] = {
     "major": "Parent approval required",
-    "minor": "Equivalent alternative",
-    "none": "Exact match",
+    "minor": "Possible equivalent",
+    "none": "Looks like an exact match",
 }
 GRADE_NAME_VALUES: Mapping[str, str] = {
     "prekindergarten": "pk",
@@ -2207,7 +2210,7 @@ def _approval_message(
             request = source_lines[0] if source_lines else line.canonical_item
             return (
                 f'The list requests “{request}.” Choose from the stocked '
-                "catalog matches below."
+                "catalog options that look like matches below."
             )
         return (
             f"{product_name} from {store_name} needs your approval before "
@@ -2245,7 +2248,7 @@ def _approval_recommendation(
     if attribute_labels:
         return (
             f"{recommended}; it is the current lowest-total-cost stocked "
-            "match, but the parent should choose the acceptable "
+            "option we believe fits, but the parent should choose the acceptable "
             f"{_join_names(attribute_labels)}."
         )
     if line is not None:
@@ -3613,6 +3616,7 @@ def _render_source_reference(
     source_line: str,
     key: str,
     button_label: str | None = None,
+    under_source_header: bool = False,
 ) -> None:
     """Place the exact source line and rendered source page one click away."""
 
@@ -3646,11 +3650,16 @@ def _render_source_reference(
     button_document_name = _source_document_button_label(
         reference.document_name
     )
+    default_button_label = (
+        f"{button_document_name}{page_text}"
+        if under_source_header
+        else f"View source · {button_document_name}{page_text}"
+    )
     with st.popover(
         (
             button_label
             if button_label is not None
-            else f"View source · {button_document_name}{page_text}"
+            else default_button_label
         ),
         help=_source_reference_hover_text(reference),
         use_container_width=True,
@@ -6899,13 +6908,15 @@ def review_system_decision_messages(
         )
         if len(set(source_quantities)) == 1:
             messages.append(
-                f"This item appears in {len(decision_sources)} places; {locations}, "
-                f"so {item.required_quantity or source_quantities[0]} is used."
+                f"We believe these {len(decision_sources)} source lines "
+                f"describe one item; {locations}, so "
+                f"{item.required_quantity or source_quantities[0]} is used."
             )
         else:
             messages.append(
-                f"This item appears in {len(decision_sources)} places; {locations}. "
-                f"The cart uses {item.required_quantity or max(source_quantities)}."
+                f"We believe these {len(decision_sources)} source lines "
+                f"describe one item; {locations}. The cart uses "
+                f"{item.required_quantity or max(source_quantities)}."
             )
     for decision in item.system_decisions:
         if decision.startswith(SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX):
@@ -6954,13 +6965,14 @@ def review_system_decision_messages(
     if SYSTEM_DECISION_RECONCILED_BRAND in item.system_decisions:
         if item.brand:
             messages.append(
-                f"One source names {item.brand}; the other does not require a "
-                "different brand, so that brand is kept."
+                f"One source names {item.brand}; the other appears not to "
+                "require a different brand, so that brand is kept."
             )
     if SYSTEM_DECISION_RECONCILED_EXCLUSIONS in item.system_decisions:
         if item.exclusions:
             messages.append(
-                "The cart keeps every listed restriction: "
+                "We believe these are the listed restrictions, so the cart "
+                "keeps them: "
                 + _join_names(item.exclusions)
                 + "."
             )
@@ -6989,7 +7001,7 @@ def review_system_decision_messages(
         if value_text:
             messages.append(
                 f"One part of the list specifies {field_label} as {value_text}; "
-                f"another leaves it open, so {value_text} is kept."
+                f"another appears to leave it open, so {value_text} is kept."
             )
     if not messages:
         return ()
@@ -9592,7 +9604,8 @@ def _render_sections(st: Any) -> None:
                         escape_streamlit_dollars(f"**{section.label}**")
                     )
                     reason = (
-                        f"Matched to {child['label']}'s entered grade."
+                        f"This looks like a match for {child['label']}'s "
+                        "entered grade."
                         if section_id in choice.automatically_selected_ids
                         else "Chosen by you."
                     )
@@ -9962,9 +9975,40 @@ def _render_quantity_preselection_rationale(
 ) -> None:
     """Render BR-55's rationale without exposing internal thresholds."""
 
-    st.caption(
-        escape_streamlit_dollars("Rationale: " + rationale)
-    )
+    _render_merge_decision_status(st, rationale=rationale)
+
+
+def _render_merge_decision_status(
+    st: Any,
+    *,
+    rationale: str | None = None,
+    result: str | None = None,
+) -> None:
+    """Render one selection-sensitive rationale-or-result line."""
+
+    if rationale is not None and result is not None:
+        raise ValueError("A merge decision cannot show two status lines")
+    if rationale is not None:
+        st.caption(
+            escape_streamlit_dollars("Rationale: " + rationale)
+        )
+    elif result is not None:
+        st.caption(
+            escape_streamlit_dollars("Result: " + result)
+        )
+
+
+def _merge_identity_override_result(
+    decision: Any,
+    resolved_identity: Any,
+) -> str | None:
+    """Describe a changed product-identity choice without inventing effects."""
+
+    if resolved_identity.is_preselected:
+        return None
+    if resolved_identity.selected_identity == CONFLICT_IDENTITY_SAME:
+        return same_product_override_notice(decision)
+    return different_product_override_rationale()
 
 
 def apply_merge_quick_choice(
@@ -10030,7 +10074,7 @@ def _render_merge_source_rows(
 ) -> None:
     """Show quantity, exact source line, section, and source link-out."""
 
-    column_widths = [0.7, 3.2, 1.7, 2.4]
+    column_widths = [0.7, 3.2, 1.5, 2.8]
     (
         heading_quantity,
         heading_line,
@@ -10076,6 +10120,7 @@ def _render_merge_source_rows(
                         f"{decision.decision_id}:source-row:"
                         f"{row.source.source_req_id}:{index}"
                     ),
+                    under_source_header=True,
                 )
 
 
@@ -10303,8 +10348,9 @@ def _render_requirement_merge(st: Any) -> None:
 
     st.header("Choose what goes in the cart")
     st.write(
-        "The same item appears differently in more than one part of a list. "
-        "Choose which items to include and what quantity belongs in the cart."
+        "Some list lines look like they may refer to the same item but use "
+        "different wording. Choose which items to include and what quantity "
+        "belongs in the cart."
     )
     pending_errors = tuple(
         st.session_state.get("requirement_merge_validation_errors", ())
@@ -10400,16 +10446,26 @@ def _render_requirement_merge(st: Any) -> None:
                     decision,
                     selected_identity,
                 )
-                if resolved_identity.rationale is not None:
-                    st.caption(
-                        escape_streamlit_dollars(
-                            f"Rationale: {resolved_identity.rationale}"
-                        )
-                    )
+                _render_merge_decision_status(
+                    st,
+                    rationale=resolved_identity.rationale,
+                    result=_merge_identity_override_result(
+                        decision,
+                        resolved_identity,
+                    ),
+                )
             else:
                 identity_choice = str(st.session_state[identity_key])
+                _render_merge_decision_status(
+                    st,
+                    rationale=resolved_identity.rationale,
+                    result=_merge_identity_override_result(
+                        decision,
+                        resolved_identity,
+                    ),
+                )
                 with st.expander(
-                    "More detail · same product or different products"
+                    "Change · same product or different products"
                 ):
                     identity_choice = st.radio(
                         identity_question,
@@ -10425,27 +10481,9 @@ def _render_requirement_merge(st: Any) -> None:
                         decision,
                         selected_identity,
                     )
-                    if resolved_identity.rationale is not None:
-                        st.caption(
-                            escape_streamlit_dollars(
-                                f"Rationale: {resolved_identity.rationale}"
-                            )
-                        )
             product_identity_choices[decision.decision_id] = (
                 resolved_identity.selected_identity
             )
-            if (
-                resolved_identity.selected_identity
-                == CONFLICT_IDENTITY_SAME
-                and not resolved_identity.is_preselected
-            ):
-                override_notice = same_product_override_notice(decision)
-                if override_notice is not None:
-                    st.caption(
-                        escape_streamlit_dollars(
-                            f"Result: {override_notice}"
-                        )
-                    )
 
             pending_selection: tuple[str, int | None] | None = None
             pending_variants: dict[str, int] | None = None
@@ -13180,8 +13218,8 @@ def _render_substitutions(
                 )
     if decision_rows:
         st.warning(
-            "These products differ from the stated requirement or involved "
-            "a parent decision."
+            "Some products look different from the stated requirement to us; "
+            "others involved a parent decision."
         )
         st.table(escape_streamlit_data(decision_rows))
     if package_rows:
@@ -13191,12 +13229,12 @@ def _render_substitutions(
         st.info(
             (
                 f"{routine_equivalent_count} store-brand "
-                f"{'equivalent was' if routine_equivalent_count == 1 else 'equivalents were'} "
-                "chosen — no brand was specified."
+                f"{'product looked' if routine_equivalent_count == 1 else 'products looked'} "
+                "equivalent to us — no brand was specified."
             )
         )
     if not decision_rows and not package_rows and not routine_equivalent_count:
-        st.write("No substitutions or package overage were needed.")
+        st.write("We did not identify any substitutions or package overage.")
 
 
 def _addon_checkbox_key(

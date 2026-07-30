@@ -343,8 +343,8 @@ def _record_cart_decisions(
         log.record(
             "match",
             (
-                f"Selected {line.sku} for {line.canonical_item} using "
-                f"{confidence_text}."
+                f"Selected {line.sku} for {line.canonical_item} because it "
+                f"appeared to fit, based on {confidence_text}."
             ),
             actor="agent",
             affected_lines=(line.line_id,),
@@ -359,8 +359,8 @@ def _record_cart_decisions(
             log.record(
                 "substitution",
                 (
-                    f"Classified {line.sku} as "
-                    f"{line.substitution_type}: {reason_text}."
+                    f"We treated {line.sku} as {line.substitution_type} "
+                    f"because of: {reason_text}."
                 ),
                 actor="agent",
                 affected_lines=(line.line_id,),

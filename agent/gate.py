@@ -341,7 +341,8 @@ def _line_interrupts(
                         interrupt_id=interrupt_id,
                         kind="brand_lock_break",
                         message=(
-                            f"{line.sku} breaks the required brand lock."
+                            f"{line.sku} appears to break the required brand "
+                            "lock."
                         ),
                         recommendation=(
                             "Keep this pending unless the parent explicitly "
@@ -369,7 +370,8 @@ def _line_interrupts(
                         interrupt_id=interrupt_id,
                         kind="attribute_choice",
                         message=(
-                            f"{line.sku} changes a specified preference: "
+                            f"{line.sku} appears to change a specified "
+                            "preference: "
                             f"{attributes}."
                         ),
                         recommendation=(
@@ -394,7 +396,7 @@ def _line_interrupts(
                         interrupt_id=interrupt_id,
                         kind="major_substitution",
                         message=(
-                            f"{line.sku} is a major substitution: "
+                            f"{line.sku} looks like a major substitution: "
                             f"{', '.join(reasons)}."
                         ),
                         recommendation=(

@@ -3793,3 +3793,164 @@ table without creating a second section-resolution path.
 - Inspect the deployed table at desktop and phone widths and decide separately
   whether the now-partly-redundant “Quantity from …” radio labels should be
   shortened.
+
+## 2026-07-30 - Concise source labels in duplicate evidence
+
+### Objective
+
+Remove the repeated “View source” prefix from source controls rendered under
+the duplicate evidence table’s Source header while preserving every standalone
+source label and the existing popover contents.
+
+### Work completed
+
+- Added an `under_source_header` context parameter to the shared
+  `_render_source_reference` component.
+- Used that parameter only in `_render_merge_source_rows`; its buttons now read
+  as document and page references without the redundant prefix.
+- Left all eight standalone production call sites on the existing full
+  “View source · …” label path.
+- Widened the Source column from 2.4 to 2.8 and narrowed Section from 1.7 to
+  1.5. Quantity remains 0.7 and “What the list says” remains the widest column
+  at 3.2.
+- Kept BR-41’s 30-character document-name cap. It remains useful for unusually
+  long filenames, preserves the extension, and leaves the full filename in the
+  unchanged hover text. The 29-character Machias filename is not shortened.
+
+### Decisions made
+
+- No alternate source component or call-site string replacement was created.
+  The shared component owns both label forms.
+- Source resolution, page resolution, cached provenance, and popover content
+  remain unchanged.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused source and evidence tests:
+  `py -3.12-arm64 -m pytest -q tests/test_app.py -k
+  "conflict_rows or source_button_filename or pasted_list_screen_builds or
+  pasted_source_controls"` -> 4 passed, 108 deselected in 1.71 seconds.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 419 passed, 1 skipped in
+  3.17 seconds.
+
+### Problems or limitations
+
+- Streamlit is not installed locally on Windows ARM64, so physical button
+  clipping was not visually measurable. The production-renderer test verifies
+  the shorter exact label and wider Source allocation.
+
+### Remaining work
+
+- None for this scoped copy and layout change.
+
+### Recommended next step
+
+- Confirm the Machias document and page number remain fully visible in the
+  deployed table at the demonstration viewport.
+
+## 2026-07-30 - Duplicate decision rationale and result placement
+
+### Objective
+
+Keep the same/different-product explanation visible on the duplicate-resolution
+card and replace it with a truthful result when the parent changes the
+preselected answer.
+
+### Work completed
+
+- Traced the identity decision through consolidation, normalization,
+  aggregation, matching, and review before changing its copy.
+- Added one shared rationale-or-result renderer and used it for both quantity
+  rationale display and product-identity status display.
+- Moved the product-identity status above the collapsed decision control.
+- Renamed that control to “Change · same product or different products.”
+- Replaced the inaccurate surviving-description claim with the source-backed
+  effect the code actually applies.
+- Extended the production Lists renderer test to verify ordering and both
+  override directions.
+
+### Files changed
+
+- `app.py`
+- `agent/rules.py`
+- `tests/test_app.py`
+- `tests/test_requirement_merge.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused renderer and merge tests: 2 passed.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 419 passed, 1 skipped in
+  3.19 seconds.
+
+### Problems or limitations
+
+- The merge retains the first source-backed variant’s product constraints, but
+  there is no explicit parent-selectable surviving-description field.
+
+### Remaining work
+
+- If desired in a later scope, show the exact retained product attributes in
+  the result line instead of only naming their source section.
+
+## 2026-07-30 - Parent-facing inference language sweep
+
+### Objective
+
+Make rationale, result, and explanation copy distinguish the app’s inferences
+from source evidence, parent choices, and deterministic calculations.
+
+### Work completed
+
+- Hedged product-identity, quantity-use, grade-match, reconciliation, catalog
+  equivalence, substitution, and selected-match claims at their source
+  templates.
+- Kept source quotations, parent choices, quantities, costs, taxes, fees,
+  document locations, and explicit assumption labels direct.
+- Updated exact-copy tests for the merge and Personalize production paths.
+
+### Decisions made
+
+- Used one plain hedge per inferred line rather than adding a general
+  disclaimer.
+- Left “AI read,” “AI assumed,” and “AI recommended” wording unchanged because
+  it already identifies the statement as an interpretation rather than fact.
+- Left school-provided-item wording direct because it paraphrases an explicit
+  source-list section.
+
+### Files changed
+
+- `agent/rules.py`
+- `agent/gate.py`
+- `agent/pipeline.py`
+- `app.py`
+- `tests/test_app.py`
+- `tests/test_requirement_merge.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused merge, app, gate, and pipeline tests: 171 passed.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 419 passed, 1 skipped in
+  3.61 seconds.
+
+### Problems or limitations
+
+- Streamlit is unavailable locally on this Windows ARM64 environment, so the
+  copy was verified through production render functions and tests rather than
+  a locally launched interface.
+
+### Remaining work
+
+- None for this copy-only sweep.
+
+### Recommended next step
+
+- Read the changed lines together in the deployed app to confirm the repeated
+  “we believe,” “looks like,” and “appears” phrasing feels balanced in context.
