@@ -922,9 +922,14 @@ def test_personalize_optional_item_can_return_to_cart() -> None:
     test_app.session_state[expander_key] = True
     test_app.run()
     _assert_no_exception(test_app)
+    optional_expander = next(
+        expander
+        for expander in test_app.expander
+        if expander.label == app.review_understanding_text(optional_item)
+    )
     optional_checkbox = next(
         checkbox
-        for checkbox in test_app.checkbox
+        for checkbox in optional_expander.checkbox
         if checkbox.label == "This item is optional"
     )
     optional_checkbox.set_value(False).run()
@@ -981,7 +986,13 @@ def test_personalize_edit_survives_summary_round_trip_without_button_crash() -> 
         == "summary"
     )
 
-    _click_label(test_app, "Open Jawan")
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    navigation.set_value("child-1").run()
+    _assert_no_exception(test_app)
     assert (
         test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY]
         == "child-1"
