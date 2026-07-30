@@ -262,10 +262,10 @@ st.session_state.setdefault(
                 Requirement(
                     req_id="school-crayons",
                     child_id="child-1",
-                    raw_text="District will provide 1 box of crayons",
+                    raw_text="District will provide 24 crayons",
                     canonical_item="crayons",
-                    quantity=1,
-                    unit_type="box",
+                    quantity=24,
+                    unit_type="each",
                     is_required=False,
                     is_purchasable=False,
                     requirement_type="optional",

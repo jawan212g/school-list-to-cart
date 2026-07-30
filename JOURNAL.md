@@ -4631,6 +4631,12 @@ button callback, immediate row regrouping, provenance preservation, and
 decision recording are covered by the x86 AppTest workflow and are not treated
 as verified until that workflow passes.
 
+The first x86 fixture used `1 box of crayons` without a package count. Production
+correctly retained its separate missing-pack-count review after the parent chose
+to buy the item; the purchase choice must not confirm an extraction assumption.
+The fixture was changed to the production-valid explicit quantity `24 crayons`
+so the lifecycle test isolates the school-provided override.
+
 ### Architecture
 
 No model call, matching behavior, price, optimizer calculation, or business
