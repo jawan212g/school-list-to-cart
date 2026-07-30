@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -205,6 +207,9 @@ PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY = (
     "personalize_parent_edited_group_ids"
 )
 PERSONALIZE_ORIGINAL_ITEMS_KEY = "personalize_original_review_items"
+PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY = (
+    "personalize_review_source_fingerprint"
+)
 WORK_EPISODE_COUNTER_KEY = "working_progress_episode_counter"
 WORK_EPISODE_ACTIVE_KEY = "working_progress_active_episode"
 WORK_SCROLL_COMPLETED_KEY = "working_scroll_completed_episode"
@@ -3233,6 +3238,7 @@ def _initialize_state(st: Any) -> None:
         "last_added_review_item": None,
         "requirement_merge_validation_errors": (),
         "review_items": (),
+        PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY: None,
         "organized_list_confirmed": False,
         "allow_unresolved_items": False,
         "list_identity_confirmed": False,
@@ -4139,11 +4145,13 @@ def clear_inactive_intake_entries(
                 updated = dict(mapping)
                 updated.pop(child_id, None)
                 state[mapping_key] = updated
-        review_items = tuple(state.get("review_items", ()))
-        if review_items:
-            state["review_items"] = tuple(
+        parent_added_items = tuple(
+            state.get("parent_added_review_items", ())
+        )
+        if parent_added_items:
+            state["parent_added_review_items"] = tuple(
                 item
-                for item in review_items
+                for item in parent_added_items
                 if getattr(item, "child_id", None) != child_id
             )
         if had_entry or had_budget or had_list or had_selection:
@@ -5848,7 +5856,6 @@ def _render_lists(st: Any) -> None:
             st.session_state["source_reference_cache"] = {}
             st.session_state["structure_errors"] = {}
             st.session_state["structure_cache_ready"] = False
-            st.session_state["review_items"] = ()
             st.session_state["organized_list_confirmed"] = False
             _limit_reached_stage(st.session_state, 2)
             st.session_state["progress_substep"] = "extracting the lists"
@@ -6010,9 +6017,6 @@ def _render_lists(st: Any) -> None:
         st.session_state["requirement_product_identity_choices"] = {}
         st.session_state["requirement_excluded_merge_decisions"] = frozenset()
         st.session_state["requirement_merge_validation_errors"] = ()
-        st.session_state["review_items"] = ()
-        st.session_state["parent_added_review_items"] = ()
-        st.session_state["last_added_review_item"] = None
         st.session_state["organized_list_confirmed"] = False
         _limit_reached_stage(st.session_state, 2)
         st.session_state["allow_unresolved_items"] = False
@@ -7457,17 +7461,76 @@ def _initialize_personalize_original_items(
     return originals
 
 
-def _reset_personalize_review_state(
-    state: MutableMapping[str, Any],
-) -> None:
-    """Discard review rows derived from an older extraction or merge result."""
+def _extraction_envelopes_fingerprint(
+    extractions: Mapping[str, ExtractionEnvelope],
+) -> str:
+    """Fingerprint the finalized extraction envelopes that produce review rows."""
 
-    state["review_items"] = ()
-    state["parent_added_review_items"] = ()
+    payload = tuple(
+        (
+            child_id,
+            extractions[child_id].model_dump(mode="json"),
+        )
+        for child_id in sorted(extractions)
+    )
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _clear_source_review_widget_state(
+    state: MutableMapping[str, Any],
+    source_items: Sequence[SupplyItemReview],
+) -> None:
+    """Discard mounted widget values tied to superseded source review rows."""
+
+    prefixes = {
+        prefix
+        for item in source_items
+        for prefix in (
+            f"settled:{item.review_id}",
+            f"excluded:{item.review_id}",
+            f"optional:{item.review_id}",
+        )
+    }
+    prefixes.update(
+        group.group_id for group in review_flag_groups(source_items)
+    )
+    for key in tuple(state):
+        if not isinstance(key, str):
+            continue
+        if any(
+            key == prefix or key.startswith(f"{prefix}:")
+            for prefix in prefixes
+        ):
+            state.pop(key, None)
+
+
+def _refresh_personalize_review_cache(
+    state: MutableMapping[str, Any],
+    extractions: Mapping[str, ExtractionEnvelope],
+) -> bool:
+    """Rebuild BR-52 source rows whenever their finalized envelopes change."""
+
+    fingerprint = _extraction_envelopes_fingerprint(extractions)
+    if (
+        state.get(PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY) == fingerprint
+        and "review_items" in state
+    ):
+        return False
+
+    prior_source_items = tuple(state.get("review_items", ()))
+    _clear_source_review_widget_state(state, prior_source_items)
+    state["review_items"] = organize_extractions(dict(extractions))
+    state[PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY] = fingerprint
     state[PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] = frozenset()
     state[PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] = frozenset()
     state[PERSONALIZE_ORIGINAL_ITEMS_KEY] = {}
-    state.pop("last_added_review_item", None)
+    return True
 
 
 def _review_item_or_quantity_changed(
@@ -9970,7 +10033,6 @@ def _prepare_student_list_replacement(
     state["requirement_product_identity_choices"] = {}
     state["requirement_excluded_merge_decisions"] = frozenset()
     state["requirement_merge_validation_errors"] = ()
-    state["review_items"] = ()
     state["organized_list_confirmed"] = False
     state["list_identity_confirmed"] = False
     _invalidate_plan_state(state)
@@ -10371,7 +10433,6 @@ def _render_sections(st: Any) -> None:
         st.session_state["requirement_excluded_merge_decisions"] = frozenset()
         st.session_state["requirement_merge_validation_errors"] = ()
         st.session_state["organized_list_confirmed"] = False
-        _reset_personalize_review_state(st.session_state)
         _limit_reached_stage(st.session_state, 2)
         _invalidate_plan_state(st.session_state)
         st.session_state["progress_substep"] = "extracting selected sections"
@@ -11216,7 +11277,6 @@ def _render_requirement_merge(st: Any) -> None:
     st.session_state["requirement_excluded_merge_decisions"] = (
         frozenset(excluded_decision_ids)
     )
-    _reset_personalize_review_state(st.session_state)
     st.session_state["requirement_merge_resolved"] = True
     st.session_state["screen"] = "working"
     st.rerun()
@@ -11538,6 +11598,7 @@ def _render_review(st: Any) -> None:
     if intake is None or not extractions:
         st.session_state["screen"] = "lists"
         st.rerun()
+    _refresh_personalize_review_cache(st.session_state, extractions)
     children = tuple(intake["children"])
     child_labels = {
         str(child["child_id"]): str(child["label"])
@@ -12243,6 +12304,9 @@ def _render_review(st: Any) -> None:
     st.session_state["review_items"] = reviewed
     st.session_state["parent_added_review_items"] = ()
     st.session_state["extracted_lists"] = confirmed
+    st.session_state[PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY] = (
+        _extraction_envelopes_fingerprint(confirmed)
+    )
     st.session_state["organized_list_confirmed"] = True
     st.session_state["allow_unresolved_items"] = False
     _limit_reached_stage(st.session_state, 3)
@@ -12534,7 +12598,6 @@ def _render_working(st: Any) -> None:
             )
             st.session_state["requirement_merge_validation_errors"] = ()
             st.session_state["extraction_errors"] = extraction_errors
-            _reset_personalize_review_state(st.session_state)
             st.session_state["extraction_cache_ready"] = True
             st.session_state["ui_error_active"] = bool(extraction_errors)
             status.update(
@@ -12590,10 +12653,10 @@ def _render_working(st: Any) -> None:
         return
 
     if not st.session_state["organized_list_confirmed"]:
-        if not st.session_state["review_items"]:
-            st.session_state["review_items"] = organize_extractions(
-                dict(extractions)
-            )
+        _refresh_personalize_review_cache(
+            st.session_state,
+            extractions,
+        )
         st.session_state["progress_substep"] = "checking what the lists said"
         st.session_state["screen"] = "review"
         st.rerun()

@@ -59,6 +59,18 @@ class _StructuredExtractionClient:
         self.responses = _StructuredResponses(payload)
 
 
+def _mark_personalize_review_cache_current(
+    state: dict[str, object],
+) -> None:
+    """Give hand-built review-screen fixtures a production cache fingerprint."""
+
+    extractions = state["extracted_lists"]
+    assert isinstance(extractions, dict)
+    state[app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY] = (
+        app._extraction_envelopes_fingerprint(extractions)
+    )
+
+
 def _real_pipeline_result(stated_grade: str) -> PipelineResult:
     """Run the actual extraction and pipeline contracts without a model call."""
 
@@ -3110,6 +3122,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         "list_inputs": (),
         app.PERSONALIZE_SELECTED_VIEW_KEY: "summary",
     })
+    _mark_personalize_review_cache_current(state)
 
     class ReviewScreenRecorder:
         def __init__(self) -> None:
@@ -3518,6 +3531,7 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
         "list_inputs": (),
         app.PERSONALIZE_SELECTED_VIEW_KEY: "child-1",
     })
+    _mark_personalize_review_cache_current(state)
 
     class DecisionScreenRecorder:
         def __init__(self) -> None:
@@ -3850,6 +3864,7 @@ def test_personalize_edit_updates_student_summary_and_detail_together(
         "list_inputs": (),
         app.PERSONALIZE_SELECTED_VIEW_KEY: "child-1",
     })
+    _mark_personalize_review_cache_current(state)
 
     class Recorder:
         def __init__(self) -> None:
@@ -4082,6 +4097,7 @@ def test_personalize_summary_opens_typed_and_uploaded_sources() -> None:
         ),
         app.PERSONALIZE_SELECTED_VIEW_KEY: "summary",
     }
+    _mark_personalize_review_cache_current(state)
 
     class SourceScreenRecorder:
         def __init__(self) -> None:
@@ -5964,11 +5980,16 @@ def test_merge_exclusion_reaches_personalize_cart(
     with pytest.raises(RerunRequested):
         app._render_requirement_merge(recorder)
 
-    assert recorder.session_state["review_items"] == ()
     merged = recorder.session_state["extracted_lists"]
     assert tuple(merged["child-1"].requirements) == ()
 
-    personalize_rows = organize_extractions(dict(merged))
+    rebuilt = app._refresh_personalize_review_cache(
+        recorder.session_state,
+        dict(merged),
+    )
+    assert rebuilt is True
+    personalize_rows = tuple(recorder.session_state["review_items"])
+    assert personalize_rows == ()
     sections = app.build_personalize_student_sections(
         tuple(recorder.session_state["intake"]["children"]),
         personalize_rows,
@@ -6098,7 +6119,11 @@ def _submit_merge_choices_to_personalize(
         app._render_requirement_merge(recorder)
 
     merged = dict(recorder.session_state["extracted_lists"])
-    personalize_rows = organize_extractions(merged)
+    app._refresh_personalize_review_cache(
+        recorder.session_state,
+        merged,
+    )
+    personalize_rows = tuple(recorder.session_state["review_items"])
     return recorder.session_state, personalize_rows
 
 
@@ -6136,7 +6161,7 @@ def test_merge_quantity_choice_reaches_personalize(
         selected_quantity=17,
     )
 
-    assert state["review_items"] == ()
+    assert tuple(state["review_items"]) == personalize_rows
     assert len(personalize_rows) == 1
     assert personalize_rows[0].required_quantity == 17
 
@@ -6185,10 +6210,174 @@ def test_merge_product_identity_choice_reaches_personalize(
         configure_state=choose_same,
     )
 
-    assert state["review_items"] == ()
+    assert tuple(state["review_items"]) == personalize_rows
     assert len(personalize_rows) == 1
     assert personalize_rows[0].required_quantity == 4
     assert personalize_rows[0].material == "cardboard"
+
+
+def test_grade_change_writer_refreshes_stale_personalize_rows() -> None:
+    """A grade-driven re-extraction cannot leave the earlier review rows visible."""
+
+    earlier = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="old-grade",
+                child_id="child-1",
+                raw_text="12 pencils",
+                canonical_item="pencils",
+                quantity=12,
+                source_section="2nd Grade",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    updated = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="new-grade",
+                child_id="child-1",
+                raw_text="24 pencils",
+                canonical_item="pencils",
+                quantity=24,
+                source_section="5th Grade",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    state: dict[str, object] = {
+        "document_selections": {
+            "child-1": DocumentSelection(
+                selected_section_ids=("grade-2",),
+                selected_section_labels=("2nd Grade",),
+            )
+        },
+        "intake_previous_grade_0": "Grade 2",
+        "review_items": organize_extractions({"child-1": earlier}),
+        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY: (
+            app._extraction_envelopes_fingerprint({"child-1": earlier})
+        ),
+    }
+
+    notices = app.clear_section_selection_after_grade_change(
+        state,
+        0,
+        "Grade 5",
+        "Maya",
+    )
+    assert notices
+    state["extracted_lists"] = {"child-1": updated}
+
+    assert app._refresh_personalize_review_cache(
+        state,
+        state["extracted_lists"],  # type: ignore[arg-type]
+    )
+    rows = tuple(state["review_items"])
+    assert len(rows) == 1
+    assert rows[0].required_quantity == 24
+    assert rows[0].source_section == "5th Grade"
+
+
+def test_automatic_section_writer_refreshes_stale_personalize_rows() -> None:
+    """An automatically selected section cannot reuse another section's rows."""
+
+    earlier = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="manual-section",
+                child_id="child-1",
+                raw_text="1 backpack",
+                canonical_item="backpacks",
+                quantity=1,
+                source_section="Highly Capable Class",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    updated = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="automatic-section",
+                child_id="child-1",
+                raw_text="2 composition books",
+                canonical_item="composition_notebooks",
+                quantity=2,
+                source_section="5th Grade",
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    state: dict[str, object] = {
+        "review_items": organize_extractions({"child-1": earlier}),
+        "parent_added_review_items": (),
+        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY: (
+            app._extraction_envelopes_fingerprint({"child-1": earlier})
+        ),
+    }
+
+    assert app._refresh_personalize_review_cache(
+        state,
+        {"child-1": updated},
+    )
+    rows = tuple(state["review_items"])
+    assert len(rows) == 1
+    assert rows[0].item_name == "composition_notebooks"
+    assert rows[0].source_section == "5th Grade"
+
+
+def test_source_refresh_preserves_parent_added_item() -> None:
+    """Independent parent input survives a source-envelope cache rebuild."""
+
+    earlier = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="old-list",
+                child_id="child-1",
+                raw_text="12 pencils",
+                canonical_item="pencils",
+                quantity=12,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    updated = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="replacement-list",
+                child_id="child-1",
+                raw_text="3 folders",
+                canonical_item="folders",
+                quantity=3,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    parent_item = SupplyItemReview(
+        review_id="parent-added",
+        req_id="parent-added",
+        child_id="child-1",
+        item_name="erasers",
+        required_quantity=2,
+        source_text="Added by parent",
+        confidence=1.0,
+    )
+    state: dict[str, object] = {
+        "review_items": organize_extractions({"child-1": earlier}),
+        "parent_added_review_items": (parent_item,),
+        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINT_KEY: (
+            app._extraction_envelopes_fingerprint({"child-1": earlier})
+        ),
+    }
+
+    assert app._refresh_personalize_review_cache(
+        state,
+        {"child-1": updated},
+    )
+    source_rows = tuple(state["review_items"])
+    assert len(source_rows) == 1
+    assert source_rows[0].item_name == "folders"
+    assert source_rows[0].required_quantity == 3
+    assert state["parent_added_review_items"] == (parent_item,)
 
 
 def test_custom_quantity_choice_highlights_until_parent_enters_value() -> None:

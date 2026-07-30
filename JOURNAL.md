@@ -4267,3 +4267,51 @@ that source-derived cache.
 
 Review and separately approve replacing enumerated Personalize cache resets
 with source-fingerprint validation.
+
+## 2026-07-30 — Personalize source cache made staleness-aware
+
+### Objective
+
+Replace path-by-path invalidation of source-derived Personalize rows with one
+deterministic comparison against the finalized extraction envelopes.
+
+### Work completed
+
+- Added a stable SHA-256 fingerprint over the child-keyed, finalized
+  `ExtractionEnvelope` payloads.
+- Stored the fingerprint beside `review_items` and made both production entry
+  paths into Personalize rebuild source-derived rows whenever it changes.
+- Removed the dedicated reset helper and its section, extraction, and
+  duplicate-resolution calls, as well as older direct source-row clears in
+  list replacement paths.
+- Kept parent-added rows outside the source-derived cache. They now survive a
+  source rebuild; only removing their student removes those independent rows.
+- Cleared widget values tied to superseded source rows so mounted controls
+  cannot reapply an older item or quantity after a rebuild.
+
+### Decisions made
+
+- The finalized envelopes are the fingerprint input because they already
+  contain the resolved section and duplicate decisions that determine
+  Personalize. Hashing every upstream draft separately would duplicate the
+  merge contract.
+- A fingerprint match preserves in-progress parent edits. A mismatch resets
+  only source-derived review decisions and originals, then rebuilds from the
+  current envelopes.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Added regressions for grade-driven re-extraction, automatic section
+  selection, and parent-added-item survival across a source rebuild.
+- Full ARM64 suite: 426 passed, 1 x86-only module skipped.
+
+### Remaining work
+
+- The x86 AppTest count must be confirmed by the next workflow run; no push
+  was made as part of this local change.
