@@ -210,7 +210,8 @@ def _run_personalize_screen() -> AppTest:
         """
 import streamlit as st
 import app
-from agent.schema import ExtractionEnvelope, SupplyItemReview
+from agent.review import organize_extractions
+from agent.schema import ExtractionEnvelope, Requirement
 
 st.session_state.setdefault(
     "intake",
@@ -226,30 +227,32 @@ st.session_state.setdefault(
 )
 st.session_state.setdefault(
     "extracted_lists",
-    {"child-1": ExtractionEnvelope()},
+    {
+        "child-1": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="pencils",
+                    child_id="child-1",
+                    raw_text="12 pencils",
+                    canonical_item="pencils",
+                    quantity=12,
+                    extraction_confidence=1.0,
+                ),
+                Requirement(
+                    req_id="erasers",
+                    child_id="child-1",
+                    raw_text="2 erasers",
+                    canonical_item="erasers",
+                    quantity=2,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+    },
 )
 st.session_state.setdefault(
     "review_items",
-    (
-        SupplyItemReview(
-            review_id="pencils",
-            req_id="pencils",
-            child_id="child-1",
-            item_name="pencils",
-            required_quantity=12,
-            source_text="12 pencils",
-            confidence=1.0,
-        ),
-        SupplyItemReview(
-            review_id="erasers",
-            req_id="erasers",
-            child_id="child-1",
-            item_name="erasers",
-            required_quantity=2,
-            source_text="2 erasers",
-            confidence=1.0,
-        ),
-    ),
+    organize_extractions(dict(st.session_state["extracted_lists"])),
 )
 st.session_state.setdefault("parent_added_review_items", ())
 st.session_state.setdefault("extraction_errors", {})
@@ -258,6 +261,8 @@ st.session_state.setdefault(app.PERSONALIZE_SELECTED_VIEW_KEY, "child-1")
 app._render_review(st)
 """
     )
+    test_app.run()
+    _assert_no_exception(test_app)
     test_app.session_state["settled:pencils:expanded"] = True
     test_app.session_state["settled:erasers:expanded"] = False
     test_app.run()

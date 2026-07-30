@@ -4315,3 +4315,32 @@ deterministic comparison against the finalized extraction envelopes.
 
 - The x86 AppTest count must be confirmed by the next workflow run; no push
   was made as part of this local change.
+
+## 2026-07-30 — Personalize AppTest fixture aligned with its source
+
+### Objective
+
+Correct the x86-only keyed-expander test without weakening the extraction
+fingerprint invariant.
+
+### Work completed
+
+- Replaced an impossible empty `ExtractionEnvelope` plus hand-injected review
+  rows with two real `Requirement` objects and review rows produced by
+  `organize_extractions`.
+- Mounted the Personalize screen once before setting expander state, matching
+  the real lifecycle in which those widgets exist before a parent opens them.
+- Audited all 13 AppTests for the same envelope/review mismatch. This was the
+  only AppTest that constructs that relationship; the other 12 exercise setup,
+  section, or progress state without source-derived review rows.
+
+### Files changed
+
+- `tests/test_streamlit_lifecycle.py`
+- `JOURNAL.md`
+
+### Testing and remaining work
+
+- ARM64 cannot execute this Streamlit AppTest module.
+- The x86 workflow run is required before keyed-expander independence is
+  considered verified against a production-shaped session.
