@@ -4063,3 +4063,45 @@ continuing to collect text the application did not use.
 
 - Propose the optional-item deferred-intent behavior before assigning or
   implementing BR-73.
+
+## 2026-07-30 — Four production-shaped AppTest mismatches exposed by x86
+
+### Finding
+
+Of the 12 AppTests that had never executed on the Windows ARM64 development
+machine, four were wrong in the same specific way: their fixture or rerun route
+constructed a UI state that production does not produce. None of these defects
+in the tests was visible until the x86 runner existed.
+
+The four instances were:
+
+1. `test_preferences_do_not_narrate_unused_budget_state`
+2. `test_preferences_explain_discarded_entered_individual_budgets`
+3. `test_preferences_explain_discarded_entered_combined_budget`
+4. `test_section_statement_and_submitted_scope_use_same_live_state`
+
+The first three built one-entry sessions and then selected multi-entry budget
+options that the production Budget screen does not offer for one entry. The
+fourth used an inline AppTest script that called `_render_sections()`
+unconditionally on every rerun. Production routes by
+`st.session_state["screen"]` and stops calling that renderer after it advances
+the session to `working`; the test instead called the old screen again and
+created a rerun loop that production does not have.
+
+### Commit history and timeout decision
+
+- `03a9093` increased only the section AppTest harness timeout from Streamlit's
+  3-second default to 15 seconds. This was an attempted workaround, not a
+  root-cause fix, and its x86 run still failed.
+- `bf2e958` corrected the harness route to match production. That routing
+  change, rather than the timeout increase, ended the rerun loop.
+- The timeout override has now been removed. The section AppTest again uses
+  Streamlit's 3-second default so the corrected route is tested without the
+  failed workaround.
+
+### Process lesson
+
+An AppTest must reproduce both the controls production makes available for the
+current session shape and the production screen router. Future AppTest fixtures
+and wrappers should be checked against both before being treated as
+production-path coverage.

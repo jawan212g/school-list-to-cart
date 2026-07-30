@@ -109,8 +109,7 @@ st.session_state.setdefault("organized_list_confirmed", False)
 st.session_state.setdefault("extraction_cache_ready", False)
 if st.session_state.get("screen") == "sections":
     app._render_sections(st)
-""",
-        default_timeout=15,
+"""
     )
     test_app.run()
     _assert_no_exception(test_app)
