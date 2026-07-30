@@ -618,9 +618,15 @@ SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX = "ambiguous_descriptor_default:"
 # Residual wording with no product-defining explanation asks exactly once.
 
 SAME_PRODUCT_OVERRIDE_SOURCE_PREFIX = "same_product_override_source:"
+SYSTEM_DECISION_PARENT_REVIEWED_DUPLICATE_SOURCES = (
+    "parent_reviewed_duplicate_sources"
+)
 # BR-44: one resolved identity state drives the radio, rationale, and quantity
-# controls. If a parent merges rule-distinct products, retain the first complete
-# source-backed variant rather than synthesizing attributes across products.
+# controls and remains consumed downstream. Once the parent submits that
+# source-evidence decision, Personalize does not ask them to review the same
+# generic source uncertainty again. If a parent merges rule-distinct products,
+# retain the first complete source-backed variant rather than synthesizing
+# attributes across products.
 
 
 def quantity_preselection_rationale(

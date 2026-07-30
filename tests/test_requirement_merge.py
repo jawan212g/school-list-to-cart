@@ -7,6 +7,7 @@ import pytest
 from agent.match import StructuredSuitabilityJudge
 from agent.pipeline import PipelineSession, run_pipeline_from_confirmed_extractions
 from agent.requirement_merge import (
+    consolidate_extractions,
     consolidate_requirements,
     item_decisions,
     resolve_item_decision_state,
@@ -19,7 +20,11 @@ from agent.rules import (
 )
 from agent.aggregate import aggregate_requirements
 from agent.optimize import OptimizationConfig, optimize_cart
-from agent.review import confirmed_requirements, organize_extractions
+from agent.review import (
+    confirmed_requirements,
+    organize_extractions,
+    review_flag_groups,
+)
 from agent.schema import ExtractionEnvelope, Requirement
 from data.loader import Offer, Store
 
@@ -311,6 +316,51 @@ def test_graph_and_regular_composition_books_are_different_products() -> None:
         "Those look like different composition notebooks to us, so we've "
         "kept them separate."
     )
+
+
+def test_reviewed_composition_variants_do_not_ask_about_same_sources_again() -> None:
+    """A completed duplicate decision carries into the Personalize rows."""
+
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="graph",
+                child_id="child-1",
+                raw_text="Composition book (sewn binding) - graph paper",
+                canonical_item="composition_notebooks",
+                quantity=1,
+                attributes={"ruling": "graph"},
+                source_document="Machiasschoolsupplylist 1.pdf",
+                source_section="5th",
+                source_page=2,
+                extraction_confidence=0.6,
+            ),
+            Requirement(
+                req_id="regular",
+                child_id="child-1",
+                raw_text="Regular composition books",
+                canonical_item="composition_notebooks",
+                quantity=4,
+                attributes={"ruling": "lined"},
+                source_document="Machiasschoolsupplylist 1.pdf",
+                source_section="Highly Capable Class",
+                source_page=3,
+                extraction_confidence=0.6,
+            ),
+        )
+    )
+    initial = consolidate_requirements(envelope.requirements)
+    decision = item_decisions(initial)[0]
+
+    merged, _ = consolidate_extractions(
+        {"child-1": envelope},
+        product_identity_choices={decision.decision_id: "different"},
+    )
+    rows = organize_extractions(merged)
+
+    assert len(rows) == 2
+    assert tuple(row.required_quantity for row in rows) == (1, 4)
+    assert review_flag_groups(rows) == ()
     assert AMBIGUOUS_PRODUCT_DESCRIPTORS == frozenset()
 
 

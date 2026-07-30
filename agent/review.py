@@ -15,6 +15,7 @@ from agent.rules import (
     PACKAGE_QUANTITY_STATE_DEFAULT,
     STANDARD_CONTAINER_CONTENT_COUNTS,
     STANDARD_PACK_COUNTS,
+    SYSTEM_DECISION_PARENT_REVIEWED_DUPLICATE_SOURCES,
     unnamed_brand_requirement_needs_review,
 )
 from agent.schema import (
@@ -342,7 +343,11 @@ def _review_issues(requirement: Requirement) -> tuple[str, ...]:
     issues: list[str] = []
     if requirement.quantity < 1:
         issues.append("missing_quantity")
-    if requirement.extraction_confidence < float(CONFIDENCE_FLOOR):
+    if (
+        requirement.extraction_confidence < float(CONFIDENCE_FLOOR)
+        and SYSTEM_DECISION_PARENT_REVIEWED_DUPLICATE_SOURCES
+        not in requirement.system_decisions
+    ):
         issues.append("low_confidence")
     if requirement.quantity_is_range:
         issues.append("quantity_range")

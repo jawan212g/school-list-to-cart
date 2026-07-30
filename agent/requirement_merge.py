@@ -26,6 +26,7 @@ from agent.rules import (
     SINGLE_INSTANCE_REQUIREMENT_ITEMS,
     SYSTEM_DECISION_CONSOLIDATED_SOURCES,
     SYSTEM_DECISION_MERGED_QUANTITY_PREFIX,
+    SYSTEM_DECISION_PARENT_REVIEWED_DUPLICATE_SOURCES,
     SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX,
     SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX,
     SYSTEM_DECISION_RECONCILED_BRAND,
@@ -1047,6 +1048,15 @@ def consolidate_requirements(
                 )
             )
         )
+        if decision_id in active_identity_choices:
+            system_decisions = tuple(
+                dict.fromkeys(
+                    (
+                        *system_decisions,
+                        SYSTEM_DECISION_PARENT_REVIEWED_DUPLICATE_SOURCES,
+                    )
+                )
+            )
         if selected_identity != default_identity:
             system_decisions = tuple(
                 decision
