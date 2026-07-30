@@ -4441,3 +4441,52 @@ own changed source remains intentionally unimplemented pending approval.
   for student B, including the mounted row widget values.
 - A shared ambiguity involving A and B is reconsidered when B changes, while an
   unrelated edited ambiguity for A remains accepted and unchanged.
+
+## 2026-07-30 — Mutable labels are part of Streamlit widget identity
+
+### Finding
+
+Streamlit 1.60 does not treat a supplied key as the complete identity for every
+component. Stateful expanders and popovers include their label in the internal
+identity. If that label contains mutable data, changing the data remounts the
+component and can silently reset its tracked open state even though its explicit
+key did not change.
+
+This is a Streamlit widget-identity finding, separate from the
+production-shaped-test series. Conventional inputs and buttons in this app use
+their explicit key as the main identity, so changing their displayed label does
+not reset their value. The audit did identify two additional stateful source
+expanders whose labels include mutable list counts; their possible open-state
+reset remains an unmodified exposure pending a separate decision.
+
+### Verification boundary
+
+The audit inspected every widget call in `app.py`, including widgets rendered
+through columns and containers, and checked Streamlit 1.60's identity settings
+for buttons, inputs, expanders, and popovers. No audited widget was changed as
+part of the inventory.
+
+## 2026-07-30 — Changed list sources now invalidate choices visibly
+
+### Objective
+
+Tell a parent when a genuine source-row change makes an earlier Personalize
+choice no longer applicable.
+
+### Work completed
+
+- Compare refreshed source-derived rows with their stored original rows.
+- Preserve edits on unchanged rows, including rows for the same student whose
+  other list content changed.
+- Record a notice only when the changed row had a confirmed or edited parent
+  choice.
+- Show the notice at the top of Personalize, before the ordinary screen
+  guidance and decision content.
+
+### Parent-facing wording
+
+`The source line for {item} on {student}'s list changed, so your earlier
+choice no longer applies. Please review it again.`
+
+This copy contains no hedge because both the source change and invalidated
+choice are deterministic state comparisons, not an inference.

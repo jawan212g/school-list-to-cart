@@ -210,6 +210,9 @@ PERSONALIZE_ORIGINAL_ITEMS_KEY = "personalize_original_review_items"
 PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY = (
     "personalize_review_source_fingerprints"
 )
+PERSONALIZE_SOURCE_CHANGE_NOTICES_KEY = (
+    "personalize_source_change_notices"
+)
 WORK_EPISODE_COUNTER_KEY = "working_progress_episode_counter"
 WORK_EPISODE_ACTIVE_KEY = "working_progress_active_episode"
 WORK_SCROLL_COMPLETED_KEY = "working_scroll_completed_episode"
@@ -3239,6 +3242,7 @@ def _initialize_state(st: Any) -> None:
         "requirement_merge_validation_errors": (),
         "review_items": (),
         PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY: {},
+        PERSONALIZE_SOURCE_CHANGE_NOTICES_KEY: (),
         "organized_list_confirmed": False,
         "allow_unresolved_items": False,
         "list_identity_confirmed": False,
@@ -7573,33 +7577,61 @@ def _refresh_personalize_review_cache(
     prior_source_by_id = {
         item.review_id: item for item in prior_source_items
     }
+    fresh_source_by_id = {
+        item.review_id: item for item in fresh_source_items
+    }
+    prior_originals = dict(
+        state.get(PERSONALIZE_ORIGINAL_ITEMS_KEY, {})
+    )
+    changed_prior_source_row_ids = {
+        item.review_id
+        for item in prior_source_items
+        if (
+            item.child_id in changed_child_ids
+            and (
+                item.review_id not in fresh_source_by_id
+                or item.review_id not in prior_originals
+                or (
+                    fresh_source_by_id[item.review_id].model_dump(
+                        mode="json"
+                    )
+                    != prior_originals[item.review_id].model_dump(
+                        mode="json"
+                    )
+                )
+            )
+        )
+    }
+    changed_fresh_source_row_ids = {
+        item.review_id
+        for item in fresh_source_items
+        if (
+            item.child_id in changed_child_ids
+            and (
+                item.review_id not in prior_source_by_id
+                or item.review_id not in prior_originals
+                or (
+                    item.model_dump(mode="json")
+                    != prior_originals[item.review_id].model_dump(
+                        mode="json"
+                    )
+                )
+            )
+        )
+    }
     prior_all_items = (*prior_source_items, *parent_items)
     fresh_all_items = (*fresh_source_items, *parent_items)
-    prior_all_by_id = {
-        item.review_id: item for item in prior_all_items
-    }
-    fresh_all_by_id = {
-        item.review_id: item for item in fresh_all_items
-    }
     prior_groups = review_flag_groups(prior_all_items)
     fresh_groups = review_flag_groups(fresh_all_items)
     affected_prior_groups = tuple(
         group
         for group in prior_groups
-        if any(
-            prior_all_by_id[row_id].child_id in changed_child_ids
-            for row_id in group.row_ids
-            if row_id in prior_all_by_id
-        )
+        if not changed_prior_source_row_ids.isdisjoint(group.row_ids)
     )
     affected_fresh_groups = tuple(
         group
         for group in fresh_groups
-        if any(
-            fresh_all_by_id[row_id].child_id in changed_child_ids
-            for row_id in group.row_ids
-            if row_id in fresh_all_by_id
-        )
+        if not changed_fresh_source_row_ids.isdisjoint(group.row_ids)
     )
     affected_prior_row_ids = {
         row_id
@@ -7615,7 +7647,7 @@ def _refresh_personalize_review_cache(
         (
             fresh_item
             if (
-                fresh_item.child_id in changed_child_ids
+                fresh_item.review_id in changed_fresh_source_row_ids
                 or fresh_item.review_id in affected_prior_row_ids
                 or fresh_item.review_id in affected_fresh_row_ids
             )
@@ -7630,7 +7662,7 @@ def _refresh_personalize_review_cache(
         item
         for item in prior_source_items
         if (
-            item.child_id in changed_child_ids
+            item.review_id in changed_prior_source_row_ids
             or item.review_id in affected_prior_row_ids
             or item.review_id not in refreshed_ids
         )
@@ -7654,6 +7686,68 @@ def _refresh_personalize_review_cache(
     affected_prior_group_ids = {
         group.group_id for group in affected_prior_groups
     }
+    selected_prior_group_ids = frozenset(
+        state.get(PERSONALIZE_CONFIRMED_GROUP_IDS_KEY, ())
+    ) | frozenset(
+        state.get(PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY, ())
+    )
+    prior_choice_row_ids = {
+        row_id
+        for group in prior_groups
+        if group.group_id in selected_prior_group_ids
+        for row_id in group.row_ids
+    }
+    prior_choice_row_ids.update(
+        item.review_id
+        for item in prior_source_items
+        if (
+            item.review_id in prior_originals
+            and item.model_dump(mode="json")
+            != prior_originals[item.review_id].model_dump(mode="json")
+        )
+    )
+    changed_choices = tuple(
+        item
+        for item in prior_source_items
+        if (
+            item.review_id in changed_prior_source_row_ids
+            and item.review_id in prior_choice_row_ids
+        )
+    )
+    if changed_choices:
+        intake = state.get("intake")
+        children = (
+            tuple(intake.get("children", ()))
+            if isinstance(intake, Mapping)
+            else ()
+        )
+        child_labels = {
+            str(child.get("child_id", "")): str(
+                child.get("label", "Student")
+            )
+            for child in children
+            if isinstance(child, Mapping)
+        }
+        existing_notices = tuple(
+            str(notice)
+            for notice in state.get(
+                PERSONALIZE_SOURCE_CHANGE_NOTICES_KEY,
+                (),
+            )
+        )
+        new_notices = tuple(
+            (
+                f"The source line for "
+                f"{_item_display_name(item.item_name).lower()} on "
+                f"{child_labels.get(item.child_id, 'this student')}'s list "
+                "changed, so your earlier choice no longer applies. Please "
+                "review it again."
+            )
+            for item in changed_choices
+        )
+        state[PERSONALIZE_SOURCE_CHANGE_NOTICES_KEY] = tuple(
+            dict.fromkeys((*existing_notices, *new_notices))
+        )
 
     def remap_group_ids(state_key: str) -> frozenset[str]:
         prior_selected = frozenset(state.get(state_key, ()))
@@ -7671,14 +7765,11 @@ def _refresh_personalize_review_cache(
                 remapped.add(fresh_group.group_id)
         return frozenset(remapped)
 
-    prior_originals = dict(
-        state.get(PERSONALIZE_ORIGINAL_ITEMS_KEY, {})
-    )
     rebuilt_row_ids = {
         item.review_id
         for item in refreshed_source_items
         if (
-            item.child_id in changed_child_ids
+            item.review_id in changed_fresh_source_row_ids
             or item.review_id in affected_prior_row_ids
             or item.review_id in affected_fresh_row_ids
         )
@@ -11956,6 +12047,11 @@ def _render_review(st: Any) -> None:
                 f"{child_labels.get(child_id, child_id)}: {error}"
             )
         )
+    for notice in st.session_state.get(
+        PERSONALIZE_SOURCE_CHANGE_NOTICES_KEY,
+        (),
+    ):
+        st.warning(escape_streamlit_dollars(str(notice)))
     st.caption(
         "Products and prices come next, after you choose what belongs in the "
         "cart."

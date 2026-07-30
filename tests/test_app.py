@@ -6470,6 +6470,96 @@ def test_student_refresh_preserves_another_students_parent_edits() -> None:
     assert refreshed_folders.required_quantity == 4
 
 
+def test_changed_source_warns_before_discarding_parent_choice() -> None:
+    """A source change names the Personalize choice that no longer applies."""
+
+    earlier = {
+        "child-1": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="pencils",
+                    child_id="child-1",
+                    raw_text="12 pencils",
+                    canonical_item="pencils",
+                    quantity=12,
+                    extraction_confidence=1.0,
+                ),
+                Requirement(
+                    req_id="folders",
+                    child_id="child-1",
+                    raw_text="2 folders",
+                    canonical_item="folders",
+                    quantity=2,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+    }
+    initial_rows = organize_extractions(earlier)
+    originals = {
+        row.review_id: row.model_copy(deep=True)
+        for row in initial_rows
+    }
+    edited_rows = tuple(
+        row.model_copy(update={"required_quantity": 8})
+        if row.review_id == "child-1:pencils"
+        else row.model_copy(update={"required_quantity": 1})
+        if row.review_id == "child-1:folders"
+        else row
+        for row in initial_rows
+    )
+    state: dict[str, object] = {
+        "intake": {
+            "children": (
+                {
+                    "child_id": "child-1",
+                    "label": "Maya",
+                },
+            )
+        },
+        "review_items": edited_rows,
+        "parent_added_review_items": (),
+        app.PERSONALIZE_ORIGINAL_ITEMS_KEY: originals,
+        app.PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY: (
+            app._extraction_envelope_fingerprints(earlier)
+        ),
+    }
+    updated = {
+        "child-1": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="pencils",
+                    child_id="child-1",
+                    raw_text="12 pencils",
+                    canonical_item="pencils",
+                    quantity=12,
+                    extraction_confidence=1.0,
+                ),
+                Requirement(
+                    req_id="folders",
+                    child_id="child-1",
+                    raw_text="4 folders",
+                    canonical_item="folders",
+                    quantity=4,
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+    }
+
+    assert app._refresh_personalize_review_cache(state, updated)
+
+    refreshed_rows = {
+        row.review_id: row for row in state["review_items"]
+    }
+    assert refreshed_rows["child-1:pencils"].required_quantity == 8
+    assert refreshed_rows["child-1:folders"].required_quantity == 4
+    assert state[app.PERSONALIZE_SOURCE_CHANGE_NOTICES_KEY] == (
+        "The source line for folders on Maya's list changed, so your "
+        "earlier choice no longer applies. Please review it again.",
+    )
+
+
 def test_changed_shared_group_is_reconsidered_without_clearing_others() -> None:
     """Only a shared decision touched by a changed student is reset."""
 
