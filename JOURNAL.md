@@ -3468,3 +3468,36 @@ accept-or-edit decision.
 - Streamlit is not installed on this Windows ARM64 environment, so final visual
   alignment and wrapping still require inspection after deployment. No local
   Streamlit run was attempted.
+
+## 2026-07-29 - Budget choice display order
+
+### Objective
+
+Place the per-student or per-classroom budget choice before the combined-budget
+choice without changing budget behavior.
+
+### Work completed
+
+- Reordered the multi-entry Budget radio options to show per-entry budget,
+  combined budget, then no set budget.
+- Kept the combined budget as the existing default selection and preserved all
+  amount seeding, state mapping, and interpretation logic.
+- Updated the production Budget-screen tests to assert the new visual order and
+  the unchanged selected mode.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Budget-screen tests: `py -3.12-arm64 -m pytest -q tests/test_app.py -k
+  "budget_screen"` -> 5 passed, 106 deselected.
+
+### Problems or limitations
+
+- Streamlit is not installed on this Windows ARM64 environment, so the radio
+  order was verified through the production screen renderer rather than a local
+  visual run.

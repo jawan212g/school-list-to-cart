@@ -4245,7 +4245,7 @@ def resolve_budget_mode_control(
     combined_mode = "One combined budget"
     per_entry_mode = "A budget for each student or classroom"
     if len(entries) != 1:
-        options = (combined_mode, per_entry_mode, NO_SET_BUDGET_LABEL)
+        options = (per_entry_mode, combined_mode, NO_SET_BUDGET_LABEL)
         selected = str(state.get("budget_mode_label", combined_mode))
         if selected not in options:
             selected = combined_mode

@@ -1556,8 +1556,8 @@ def test_budget_screen_renders_entry_aware_mode_labels() -> None:
 
     assert rendered_options == [
         (
-            "One combined budget",
             "A budget for each student or classroom",
+            "One combined budget",
             "No set budget",
         )
     ]
@@ -1648,8 +1648,8 @@ def test_budget_screen_maps_entry_count_changes_without_losing_amount() -> None:
     rendered_options.clear()
     app._render_budget_step(BudgetStreamlit())
     assert rendered_options[0] == (
-        "One combined budget",
         "A budget for each student or classroom",
+        "One combined budget",
         "No set budget",
     )
     assert BudgetStreamlit.session_state["budget_mode_label"] == (
