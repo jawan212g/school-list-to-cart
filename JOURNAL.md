@@ -4730,3 +4730,39 @@ Streamlit is unavailable on this ARM64 machine.
 
 No model call, matching behavior, money path, optimizer calculation, approval
 condition, or business threshold changed.
+
+## 2026-07-30 — Forward navigation reaches the visible application title
+
+### Objective
+
+Make every successful bottom-right Continue transition return to the true top
+of the Streamlit page so the Ready, Set, School title is visible.
+
+### Finding
+
+The existing one-time transition request was working, but its browser
+enhancement scrolled the window rather than Streamlit's nested main application
+container. Smooth scrolling could therefore leave the title above the visible
+viewport even though the next task moved into view.
+
+### Work completed
+
+- Kept the existing numbered, once-per-transition session-state guard.
+- Updated the shared browser enhancement to target Streamlit's main scrolling
+  container, the document scrolling element, and the host window.
+- Made the navigation jump immediate and applied it after two animation frames
+  so the new screen layout is present before scrolling.
+- Retained failure isolation: if browser scripting is blocked, navigation still
+  completes and only the optional scrolling enhancement is lost.
+
+### Testing and limitation
+
+The ARM64 suite passes. A source-level regression verifies that the shared
+enhancement targets Streamlit's main container and the application title.
+AppTest cannot execute browser JavaScript or observe the real scroll position,
+so the final visual behavior still requires deployed-browser confirmation.
+
+### Architecture
+
+No extraction, matching, pricing, optimizer, gate, or business-threshold
+behavior changed.

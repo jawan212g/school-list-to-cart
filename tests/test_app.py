@@ -2020,6 +2020,20 @@ def test_landing_keeps_context_in_one_collapsed_explainer() -> None:
     assert not hasattr(app, "_render_intake_walkthrough")
 
 
+def test_forward_scroll_targets_streamlit_page_top_and_app_title() -> None:
+    """Successful transitions target the real Streamlit scroller and title."""
+
+    script = app._page_top_scroll_script()
+
+    assert 'section[data-testid="stMain"]' in script
+    assert '[data-testid="stAppViewContainer"]' in script
+    assert 'querySelector(".rss-title")' in script
+    assert "main.scrollTop = 0" in script
+    assert "scrollingElement.scrollTop = 0" in script
+    assert 'behavior: "auto"' in script
+    assert "window.parent" in script
+
+
 def test_decision_log_copy_uses_student_terminology() -> None:
     """Decision explanations shown or exported never expose Child/Entry copy."""
 

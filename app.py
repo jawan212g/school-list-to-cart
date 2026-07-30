@@ -740,19 +740,42 @@ def _page_top_scroll_script() -> str:
         <script>
         (() => {
           try {
-            const reduceMotion =
-              window.matchMedia &&
-              window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-            window.requestAnimationFrame(() => {
+            const hostWindow =
+              window.parent && window.parent !== window
+                ? window.parent
+                : window;
+            const hostDocument = hostWindow.document;
+            const scrollToAppTop = () => {
               try {
-                window.scrollTo({
-                  top: 0,
-                  left: 0,
-                  behavior: reduceMotion ? "auto" : "smooth"
-                });
+                const main =
+                  hostDocument.querySelector(
+                    'section[data-testid="stMain"]'
+                  ) ||
+                  hostDocument.querySelector('[data-testid="stAppViewContainer"]');
+                const title = hostDocument.querySelector(".rss-title");
+                if (main) {
+                  if (typeof main.scrollTo === "function") {
+                    main.scrollTo({top: 0, left: 0, behavior: "auto"});
+                  }
+                  main.scrollTop = 0;
+                }
+                const scrollingElement = hostDocument.scrollingElement;
+                if (scrollingElement) {
+                  scrollingElement.scrollTop = 0;
+                  scrollingElement.scrollLeft = 0;
+                }
+                hostDocument.documentElement.scrollTop = 0;
+                hostDocument.body.scrollTop = 0;
+                hostWindow.scrollTo({top: 0, left: 0, behavior: "auto"});
+                if (title && title.getBoundingClientRect().top < 0) {
+                  title.scrollIntoView({block: "start", behavior: "auto"});
+                }
               } catch (_error) {
                 // Scrolling is an enhancement; navigation remains available.
               }
+            };
+            hostWindow.requestAnimationFrame(() => {
+              hostWindow.requestAnimationFrame(scrollToAppTop);
             });
           } catch (_error) {
             // A blocked or unavailable browser API must not affect the app.
