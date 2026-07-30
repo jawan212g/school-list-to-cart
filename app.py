@@ -186,6 +186,13 @@ DEFAULT_BUDGET_TEXT = (
     f"{STARTING_BUDGET_CENTS_PER_STUDENT // CENTS_PER_DOLLAR}."
     f"{STARTING_BUDGET_CENTS_PER_STUDENT % CENTS_PER_DOLLAR:02d}"
 )
+COMBINED_BUDGET_HELP = (
+    "Enter the total you want to spend, for example 75 or 85.50."
+)
+PER_ENTRY_BUDGET_HELP = (
+    "Enter the amount you want to spend for this student or classroom, "
+    "for example 75 or 85.50."
+)
 DEFAULT_RADIUS_MILES = 10.0
 NO_SET_BUDGET_LABEL = "No set budget"
 PERSONALIZE_SELECTED_VIEW_KEY = "personalize_selected_view"
@@ -5096,6 +5103,26 @@ def _render_student_step(st: Any) -> None:
     )
 
 
+def _render_budget_amount_input(
+    st: Any,
+    label: str,
+    widget_key: str,
+    state_key: str,
+    help_text: str,
+) -> str:
+    """Render one FR-03 amount field with the shared budget help popover."""
+
+    return str(
+        st.text_input(
+            label,
+            key=widget_key,
+            on_change=commit_intake_widget_value,
+            args=(state_key,),
+            help=help_text,
+        )
+    )
+
+
 def _render_budget_step(st: Any) -> None:
     """Render FR-03 budget entry with E-37 validation on exit."""
 
@@ -5160,16 +5187,14 @@ def _render_budget_step(st: Any) -> None:
             "combined_budget_text",
             DEFAULT_BUDGET_TEXT,
         )
-        combined_budget = st.text_input(
+        combined_budget = _render_budget_amount_input(
+            st,
             escape_streamlit_dollars(
                 f"{combined_field_label} (\\$)"
             ),
-            key=combined_budget_widget_key,
-            on_change=commit_intake_widget_value,
-            args=("combined_budget_text",),
-            help=(
-                "Enter the total you want to spend, for example 75 or 85.50."
-            ),
+            combined_budget_widget_key,
+            "combined_budget_text",
+            COMBINED_BUDGET_HELP,
         )
         st.session_state["combined_budget_text"] = combined_budget
         if validation_attempted and "combined_budget_text" in budget_errors:
@@ -5185,13 +5210,14 @@ def _render_budget_step(st: Any) -> None:
                 budget_key,
                 DEFAULT_BUDGET_TEXT,
             )
-            budget_text = st.text_input(
+            budget_text = _render_budget_amount_input(
+                st,
                 escape_streamlit_dollars(
                     f"{label} budget (\\$)"
                 ),
-                key=budget_widget_key,
-                on_change=commit_intake_widget_value,
-                args=(budget_key,),
+                budget_widget_key,
+                budget_key,
+                PER_ENTRY_BUDGET_HELP,
             )
             st.session_state[budget_key] = budget_text
             if validation_attempted and budget_key in budget_errors:

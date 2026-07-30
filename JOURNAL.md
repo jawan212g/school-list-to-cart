@@ -3620,3 +3620,60 @@ existing internal `landed_cost` identifiers and every calculation unchanged.
   without freezing confirmed extractions and suitability decisions.
 - Streamlit is not installed locally on Windows ARM64, so no local Streamlit
   run was attempted.
+
+## 2026-07-29 - Per-entry budget help
+
+### Objective
+
+Give every per-student and per-classroom budget input the same help-popover
+treatment as the combined-budget input, with copy scoped to that entry.
+
+### Work completed
+
+- Moved the combined-budget help sentence into a named copy constant and added
+  the parallel per-entry sentence beside it.
+- Routed both combined and per-entry amount fields through one shared
+  `_render_budget_amount_input` component, so Streamlit creates the same help
+  icon for both modes without duplicated widget markup.
+- Extended production Budget-screen tests to confirm every rendered amount
+  field receives the correct help copy.
+- Updated the intake copy audit that previously expected the combined sentence
+  to remain inline in `_render_budget_step`.
+
+### Decisions made
+
+- The per-entry copy mirrors the combined sentence and changes only its scope:
+  it names one student or classroom rather than the total across the session.
+- No budget value, allocation, rounding, validation, state, or business-rule
+  behavior was changed.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused Budget-screen tests:
+  `py -3.12-arm64 -m pytest -q tests/test_app.py -k
+  "budget_step_renders_one_field or budget_screen_scales_untouched or
+  intake_uses_guided_student_language"` -> 3 passed, 109 deselected in
+  1.21 seconds.
+- Full suite: `py -3.12-arm64 -m pytest -q` -> 419 passed, 1 skipped in
+  3.55 seconds.
+
+### Problems or limitations
+
+- Streamlit is not installed locally on Windows ARM64, so the help icons were
+  verified through the production renderer's `help` arguments rather than a
+  local visual run.
+
+### Remaining work
+
+- None for this scoped copy/UI change.
+
+### Recommended next step
+
+- Confirm the two popovers appear side by side as intended in the deployed
+  Streamlit application.

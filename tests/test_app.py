@@ -1156,7 +1156,7 @@ def test_individual_budgets_include_students_and_classrooms() -> None:
 def test_budget_step_renders_one_field_for_every_intake_entry() -> None:
     """FR-03/FR-05: mixed entry types produce two visible budget widgets."""
 
-    rendered_fields: list[tuple[str, str]] = []
+    rendered_fields: list[tuple[str, str, object]] = []
 
     class ButtonColumn:
         @staticmethod
@@ -1202,8 +1202,7 @@ def test_budget_step_renders_one_field_for_every_intake_entry() -> None:
             key: str,
             **kwargs: object,
         ) -> str:
-            del kwargs
-            rendered_fields.append((label, key))
+            rendered_fields.append((label, key, kwargs.get("help")))
             return str(cls.session_state[key])
 
         @staticmethod
@@ -1221,7 +1220,7 @@ def test_budget_step_renders_one_field_for_every_intake_entry() -> None:
 
     app._render_budget_step(BudgetStreamlit())
 
-    assert tuple(key for _, key in rendered_fields) == (
+    assert tuple(key for _, key, _ in rendered_fields) == (
         app.intake_widget_key("budget_0"),
         app.intake_widget_key("budget_1"),
     )
@@ -1229,6 +1228,10 @@ def test_budget_step_renders_one_field_for_every_intake_entry() -> None:
     assert BudgetStreamlit.session_state["budget_1"] == "1,500.00"
     assert "Maya budget" in rendered_fields[0][0]
     assert "Ms. Rivera budget" in rendered_fields[1][0]
+    assert tuple(help_text for _, _, help_text in rendered_fields) == (
+        app.PER_ENTRY_BUDGET_HELP,
+        app.PER_ENTRY_BUDGET_HELP,
+    )
     assert app.budget_entry_fields(
         app._intake_students_from_state(
             BudgetStreamlit.session_state,
@@ -1242,6 +1245,8 @@ def test_budget_step_renders_one_field_for_every_intake_entry() -> None:
 
 def test_budget_screen_scales_untouched_starting_values_by_student_count() -> None:
     """BR-71: the production Budget screen scales only untouched defaults."""
+
+    rendered_help: list[object] = []
 
     class ButtonColumn:
         @staticmethod
@@ -1274,7 +1279,8 @@ def test_budget_screen_scales_untouched_starting_values_by_student_count() -> No
             key: str,
             **kwargs: object,
         ) -> str:
-            del label, kwargs
+            del label
+            rendered_help.append(kwargs.get("help"))
             return str(cls.session_state[key])
 
         @staticmethod
@@ -1363,6 +1369,14 @@ def test_budget_screen_scales_untouched_starting_values_by_student_count() -> No
     app._render_budget_step(BudgetStreamlit())
     assert BudgetStreamlit.session_state["budget_0"] == "75.00"
     assert BudgetStreamlit.session_state["budget_1"] == "750.00"
+    assert rendered_help == [
+        app.COMBINED_BUDGET_HELP,
+        app.COMBINED_BUDGET_HELP,
+        app.COMBINED_BUDGET_HELP,
+        app.COMBINED_BUDGET_HELP,
+        app.PER_ENTRY_BUDGET_HELP,
+        app.PER_ENTRY_BUDGET_HELP,
+    ]
 
 
 def test_budget_screen_recalculates_defaults_but_preserves_parent_edits() -> None:
@@ -1810,10 +1824,15 @@ def test_intake_uses_guided_student_language_and_debug_only_demo_mode() -> None:
     assert app.NO_SET_BUDGET_LABEL == "No set budget"
     assert "budget_validation_attempted" in budget_source
     assert "disabled=" not in budget_source
-    assert (
+    assert app.COMBINED_BUDGET_HELP == (
         "Enter the total you want to spend, for example 75 or 85.50."
-        in budget_source
     )
+    assert app.PER_ENTRY_BUDGET_HELP == (
+        "Enter the amount you want to spend for this student or classroom, "
+        "for example 75 or 85.50."
+    )
+    assert "COMBINED_BUDGET_HELP" in budget_source
+    assert "PER_ENTRY_BUDGET_HELP" in budget_source
     assert "tight budget" not in budget_source
     assert "forward.button" in budget_source
     assert "use_container_width=True" in budget_source
