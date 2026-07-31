@@ -5589,3 +5589,46 @@ changing matching or gate behavior.
 - Second x86 evidence: run `30658924071`, the test remained on Intake and never
   invoked the cart attempt.
 - Full Windows ARM64 suite after the fixture correction: 469 passed, 1 skipped.
+
+## 2026-07-31 — Deferred matching-batch recovery and recording path
+
+### Recording-path clarification
+
+- The exact frozen Maple results — $109.83 with zero interrupts and $109.18
+  with one major-substitution approval after stocking out `VD-GLU-VB-006` —
+  use frozen confirmed extraction envelopes plus `StructuredSuitabilityJudge`
+  in the test harness.
+- The deployed application has no mode that combines live model-assisted
+  extraction with deterministic matching only.
+- The debug-only offline demo switch is not that mode: it replaces document
+  structure detection and extraction as well as matching. It therefore does
+  not demonstrate the language model reading a real list and does not preserve
+  the frozen Maple numbers.
+- A recording that needs model-assisted reading must use the live provider path,
+  now protected by BR-74's 90-second matching-request ceiling.
+
+### Deferred future work — matching transport fallback
+
+- No fallback behavior was implemented in this pass.
+- Recommended design: retain every successfully completed semantic-matching
+  batch; if one batch times out or has a connection failure, run the existing
+  deterministic structured suitability judge only for that failed batch; mark
+  the affected needs as fallback-derived; and route those affected needs to one
+  grouped low-confidence review rather than silently accepting them or calling
+  them unavailable.
+- Retry should resume from the saved confirmed requirements, parent decisions,
+  and successful matching batches. It should not repeat extraction, review, or
+  already-completed matching work.
+- The live failure screen had reported progress at 19 of 26 item types across
+  four concurrent matching batches. Because completed matching results were not
+  persisted, retry discarded that completed work and restarted matching from
+  the confirmed requirements.
+
+### Files changed
+
+- `JOURNAL.md`
+
+### Testing performed
+
+- Documentation-only clarification; no application behavior changed and no test
+  suite was run for this entry.
