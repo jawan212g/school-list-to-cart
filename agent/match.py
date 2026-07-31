@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,13 +33,22 @@ from agent.rules import (
     MAXIMUM_MATCH_CONFIDENCE,
     MINIMUM_MATCH_CONFIDENCE,
     MODEL_CALL_MAX_RETRIES,
+    MATCHING_MODEL_TIMEOUT_SECONDS,
     MODEL_MAX_CONCURRENCY,
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
     SUBSTITUTION_NONE,
     pack_count_difference_is_major,
 )
+from agent.telemetry import (
+    ElapsedTimer,
+    log_operation_failure,
+    log_operation_success,
+)
 from data.loader import Offer, Store
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 SubstitutionClassification = Literal["none", "minor", "major"]
@@ -264,6 +274,7 @@ class OpenAISuitabilityJudge:
                         f"{MATCH_DATA_END}"
                     ),
                     schema=SuitabilityEnvelope,
+                    timeout_seconds=MATCHING_MODEL_TIMEOUT_SECONDS,
                 )
             except (StructuredOutputError, ValidationError):
                 if validation_attempt == MODEL_CALL_MAX_RETRIES:
@@ -284,6 +295,13 @@ class OpenAISuitabilityJudge:
         for case in cases:
             cases_by_need.setdefault(case.need_key, []).append(case)
         need_groups = tuple(cases_by_need.values())
+        if self._progress_callback is not None:
+            self._progress_callback(
+                "matching",
+                0,
+                len(need_groups),
+                f"Matching 0 of {len(need_groups)} item types",
+            )
         batch_count = min(len(need_groups), MODEL_MAX_CONCURRENCY)
         batches: list[list[SuitabilityCase]] = [
             [] for _ in range(batch_count)
@@ -298,7 +316,7 @@ class OpenAISuitabilityJudge:
         completed_needs = 0
         with ThreadPoolExecutor(max_workers=batch_count) as executor:
             futures = {
-                executor.submit(self._call_batch, batch): index
+                executor.submit(self._timed_call_batch, batch, index): index
                 for index, batch in enumerate(batches)
                 if batch
             }
@@ -317,6 +335,39 @@ class OpenAISuitabilityJudge:
                         ),
                     )
         return tuple(decisions)
+
+    def _timed_call_batch(
+        self,
+        cases: Sequence[SuitabilityCase],
+        batch_index: int,
+    ) -> tuple[SuitabilityDecision, ...]:
+        """Log one model batch's elapsed time without changing its result."""
+
+        timer = ElapsedTimer()
+        detail = (
+            f"batch={batch_index + 1}, "
+            f"needs={len({case.need_key for case in cases})}, "
+            f"candidates={len(cases)}"
+        )
+        try:
+            decisions = self._call_batch(cases)
+        except Exception:
+            log_operation_failure(
+                LOGGER,
+                "Semantic matching batch",
+                timer,
+                limit_seconds=MATCHING_MODEL_TIMEOUT_SECONDS,
+                detail=detail,
+            )
+            raise
+        log_operation_success(
+            LOGGER,
+            "Semantic matching batch",
+            timer,
+            limit_seconds=MATCHING_MODEL_TIMEOUT_SECONDS,
+            detail=detail,
+        )
+        return decisions
 
 
 @dataclass(frozen=True)

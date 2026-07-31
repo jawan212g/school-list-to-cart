@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from itertools import combinations
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -63,6 +64,9 @@ from agent.requirement_merge import (
 )
 from agent.schema import ExtractionEnvelope, Requirement
 from data.loader import Offer, Store, load_catalog, load_stores
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 BudgetMode = Literal["combined", "per_child", "none"]
@@ -471,6 +475,10 @@ def run_pipeline(
             try:
                 completed_envelopes[list_index] = future.result()
             except Exception as error:
+                LOGGER.exception(
+                    "List extraction failed for %s during pipeline execution",
+                    list_input.child_id,
+                )
                 extraction_failures[list_input.child_id] = (
                     f"{type(error).__name__}: {error}"
                 )
@@ -498,6 +506,10 @@ def run_pipeline(
                 completed_envelopes[list_index] = extract_one(list_input)
                 extraction_failures.pop(list_input.child_id, None)
             except Exception as error:
+                LOGGER.exception(
+                    "Sequential list-extraction retry failed for %s",
+                    list_input.child_id,
+                )
                 extraction_failures[list_input.child_id] = (
                     f"{type(error).__name__}: {error}"
                 )
@@ -661,13 +673,6 @@ def run_pipeline(
         normalization.budget_requirements,
         student_counts_by_child=session.student_counts,
     )
-    if progress_callback is not None:
-        progress_callback(
-            "matching",
-            0,
-            len(unit_needs),
-            f"Matching 0 of {len(unit_needs)} item types",
-        )
     matches = match_offers(
         unit_needs,
         active_offers,

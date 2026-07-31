@@ -95,6 +95,95 @@ app.main()
     return test_app
 
 
+def _run_retryable_cart_failure_screen() -> AppTest:
+    """Mount the real Working screen with one recoverable cart failure."""
+
+    test_app = AppTest.from_string(
+        """
+import sys
+from pathlib import Path
+
+import streamlit as st
+import app
+from agent.pipeline import ListInput
+
+tests_path = str(Path.cwd() / "tests")
+if tests_path not in sys.path:
+    sys.path.insert(0, tests_path)
+from conftest import load_frozen_maple_fixture
+from test_maple_cart import _run_maple
+
+app._initialize_state(st)
+fixture = load_frozen_maple_fixture()
+completed_result = _run_maple(
+    fixture.extractions,
+    fixture.judge,
+    budget_cents=12_000,
+)
+
+def fail_once_then_complete(*args, **kwargs):
+    del args, kwargs
+    attempt = int(st.session_state.get("test_cart_attempts", 0)) + 1
+    st.session_state["test_cart_attempts"] = attempt
+    if attempt == 1:
+        raise TimeoutError("matching request timed out")
+    return completed_result
+
+app._run_pipeline_from_cached_extractions = fail_once_then_complete
+st.session_state["intake"] = {
+    "session_id": "retry-app-test",
+    "children": (
+        {
+            "child_id": "grade-2",
+            "label": "Grade 2",
+            "grade": "Grade 2",
+            "student_count": 1,
+        },
+        {
+            "child_id": "grade-5",
+            "label": "Grade 5",
+            "grade": "Grade 5",
+            "student_count": 1,
+        },
+    ),
+    "budget_total": 12_000,
+    "budget_mode": "combined",
+    "shopping_mode": "budget",
+    "store_radius_miles": 10.0,
+    "allowed_stores": None,
+    "fulfillment_pref": "either",
+    "tax_basis_points": 700,
+    "max_stores": None,
+    "budget_allocations": {},
+    "demo_mode": False,
+}
+st.session_state["list_inputs"] = (
+    ListInput(child_id="grade-2", source="confirmed grade 2"),
+    ListInput(child_id="grade-5", source="confirmed grade 5"),
+)
+st.session_state["document_structures"] = {}
+st.session_state["document_selections"] = {}
+st.session_state["classroom_quantity_scopes"] = {}
+st.session_state["structure_errors"] = {}
+st.session_state["structure_cache_ready"] = True
+st.session_state["unmerged_extracted_lists"] = fixture.extractions
+st.session_state["extracted_lists"] = fixture.extractions
+st.session_state["extraction_errors"] = {}
+st.session_state["extraction_cache_ready"] = True
+st.session_state["requirement_merge_result"] = None
+st.session_state["requirement_merge_resolved"] = True
+st.session_state["list_identity_confirmed"] = True
+st.session_state["organized_list_confirmed"] = True
+st.session_state["result"] = None
+st.session_state["screen"] = "working"
+app.main()
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
 def _run_shopping_plan_screen() -> AppTest:
     """Mount the real plan screen with the frozen Maple pipeline result."""
 
@@ -404,6 +493,28 @@ def test_working_progress_scroll_is_marked_once_per_episode() -> None:
     )
     assert test_app.session_state[app.WORK_EPISODE_ACTIVE_KEY] == 2
     assert test_app.session_state[app.WORK_SCROLL_COMPLETED_KEY] == 2
+
+
+def test_cart_build_retry_resumes_from_confirmed_requirements() -> None:
+    """The real Working screen retries without returning through extraction."""
+
+    test_app = _run_retryable_cart_failure_screen()
+
+    assert _session_value(test_app, "test_cart_attempts") == 1
+    assert _session_value(test_app, "extraction_cache_ready") is True
+    assert _session_value(test_app, "organized_list_confirmed") is True
+    retry = next(
+        button for button in test_app.button if button.label == "Try again"
+    )
+
+    retry.click().run()
+    _assert_no_exception(test_app)
+
+    assert _session_value(test_app, "test_cart_attempts") == 2
+    assert _session_value(test_app, "extraction_cache_ready") is True
+    assert _session_value(test_app, "organized_list_confirmed") is True
+    assert _session_value(test_app, "result") is not None
+    assert _session_value(test_app, "screen") == "summary"
 
 
 def _run_personalize_screen() -> AppTest:

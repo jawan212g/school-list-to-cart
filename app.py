@@ -21,6 +21,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 import pypdfium2 as pdfium
+from openai import APITimeoutError
 
 from agent.aggregate import UnitNeed
 from agent.addons import (
@@ -200,6 +201,11 @@ MAX_CLASSROOM_STUDENTS = 100
 DEFAULT_BUDGET_TEXT = (
     f"{STARTING_BUDGET_CENTS_PER_STUDENT // CENTS_PER_DOLLAR}."
     f"{STARTING_BUDGET_CENTS_PER_STUDENT % CENTS_PER_DOLLAR:02d}"
+)
+from agent.telemetry import (
+    ElapsedTimer,
+    log_operation_failure,
+    log_operation_success,
 )
 COMBINED_BUDGET_HELP = (
     "Enter the total you want to spend, for example 75 or $85.50."
@@ -6528,6 +6534,10 @@ def _inspect_list_inputs(
                 for list_input in group:
                     completed[list_input.child_id] = structure
             except Exception as error:
+                LOGGER.exception(
+                    "Document-structure inspection failed for %s",
+                    ", ".join(item.child_id for item in group),
+                )
                 for list_input in group:
                     errors[list_input.child_id] = error
         for list_input in list_inputs:
@@ -6772,6 +6782,10 @@ def _extract_list_inputs(
                     extraction,
                 )
             except Exception as error:
+                LOGGER.exception(
+                    "List extraction failed for %s",
+                    list_input.child_id,
+                )
                 errors[list_input.child_id] = error
     if FAILED_DOCUMENT_SEQUENTIAL_FALLBACK and errors:
         failed_inputs = tuple(
@@ -6797,6 +6811,10 @@ def _extract_list_inputs(
                 )
                 errors.pop(list_input.child_id, None)
             except Exception as error:
+                LOGGER.exception(
+                    "Sequential list-extraction retry failed for %s",
+                    list_input.child_id,
+                )
                 errors[list_input.child_id] = error
     for list_input in list_inputs:
         extraction = completed.get(list_input.child_id)
@@ -14291,8 +14309,7 @@ def _render_working(st: Any) -> None:
         "Combining the lists before shopping",
         expanded=True,
     ) as status:
-        status.write("Combining shared items across the lists.")
-        last_detail = [""]
+        last_detail = ["Combining shared items across the lists"]
 
         def cart_progress(
             stage: str,
@@ -14312,6 +14329,7 @@ def _render_working(st: Any) -> None:
             frozenset(st.session_state["stockout_skus"]),
             st.session_state["price_overrides"],
         )
+        cart_timer = ElapsedTimer()
         try:
             result = _run_pipeline_from_cached_extractions(
                 _pipeline_session(intake),
@@ -14327,20 +14345,54 @@ def _render_working(st: Any) -> None:
                 progress_callback=cart_progress,
             )
         except Exception as error:
+            log_operation_failure(
+                LOGGER,
+                "Cart build",
+                cart_timer,
+                detail=(
+                    f"confirmed_lists={len(extractions)}, "
+                    f"requirements={sum(len(envelope.requirements) for envelope in extractions.values())}"
+                ),
+            )
             st.session_state["ui_error_active"] = True
             status.update(label="Cart build stopped", state="error")
             _render_work_progress(st, "Cart build stopped")
             st.error(
                 escape_streamlit_dollars(
-                    "The cart could not be built. Your setup and lists are "
-                    "still available. Technical detail: "
-                    f"{type(error).__name__}: {error}"
+                    (
+                        "Comparing products and stores took too long. Your "
+                        "setup, lists, and cart choices are saved. Try again "
+                        "to resume building the shopping plan."
+                    )
+                    if isinstance(error, APITimeoutError)
+                    else (
+                        "Something interrupted the cart build. Your setup, "
+                        "lists, and cart choices are saved. Try again to "
+                        "resume building the shopping plan."
+                    )
                 )
             )
-            if st.button("Return to lists"):
+            retry_column, return_column = st.columns(2)
+            if retry_column.button("Try again", type="primary"):
+                st.session_state["ui_error_active"] = False
+                st.session_state["progress_substep"] = (
+                    "comparing products, stores, and the budget"
+                )
+                st.session_state[WORK_EPISODE_ACTIVE_KEY] = None
+                st.rerun()
+            if return_column.button("Return to lists"):
                 navigate_back_to_screen(st.session_state, "lists")
                 st.rerun()
             return
+        log_operation_success(
+            LOGGER,
+            "Cart build",
+            cart_timer,
+            detail=(
+                f"confirmed_lists={len(extractions)}, "
+                f"requirements={sum(len(envelope.requirements) for envelope in extractions.values())}"
+            ),
+        )
         st.session_state["ui_error_active"] = bool(
             result.extraction_failures
         )

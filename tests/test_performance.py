@@ -1,7 +1,10 @@
 """Structural tests for bounded, concurrent model-facing work."""
 
 import json
+import logging
 from threading import Barrier, Lock
+
+import pytest
 
 from agent.aggregate import UnitNeed
 from agent.match import (
@@ -15,8 +18,8 @@ from agent.match import (
 )
 from agent.pipeline import ListInput, PipelineSession, run_pipeline
 from agent.rules import (
+    MATCHING_MODEL_TIMEOUT_SECONDS,
     MODEL_CALL_MAX_RETRIES,
-    MODEL_CALL_TIMEOUT_SECONDS,
 )
 from agent.schema import ExtractionEnvelope, Requirement
 from data.loader import Offer, Store
@@ -166,12 +169,32 @@ class _ConcurrentClient:
         return self
 
 
+class _TimeoutResponses:
+    def parse(self, **kwargs: object) -> object:
+        del kwargs
+        raise TimeoutError("matching batch exceeded its request limit")
+
+
+class _TimeoutClient:
+    def __init__(self) -> None:
+        self.responses = _TimeoutResponses()
+        self.options: list[dict[str, object]] = []
+
+    def with_options(self, **kwargs: object) -> "_TimeoutClient":
+        self.options.append(kwargs)
+        return self
+
+
 def test_matching_batches_overlap_and_apply_timeout_retry() -> None:
     """FR-17: model batches overlap and every call is bounded and retryable."""
 
     categories = ("pencils", "pens", "rulers", "erasers")
     client = _ConcurrentClient()
-    judge = OpenAISuitabilityJudge(client)  # type: ignore[arg-type]
+    progress: list[tuple[str, int, int, str]] = []
+    judge = OpenAISuitabilityJudge(  # type: ignore[arg-type]
+        client,
+        progress_callback=lambda *event: progress.append(event),
+    )
     decisions = judge.judge(
         tuple(
             SuitabilityCase(
@@ -188,8 +211,41 @@ def test_matching_batches_overlap_and_apply_timeout_retry() -> None:
     assert len(client.options) == 4
     assert all(
         options == {
-            "timeout": MODEL_CALL_TIMEOUT_SECONDS,
+            "timeout": MATCHING_MODEL_TIMEOUT_SECONDS,
             "max_retries": MODEL_CALL_MAX_RETRIES,
         }
         for options in client.options
     )
+    assert progress[0] == (
+        "matching",
+        0,
+        4,
+        "Matching 0 of 4 item types",
+    )
+    assert all(total == 4 for _, _, total, _ in progress)
+    assert MATCHING_MODEL_TIMEOUT_SECONDS == 90.0
+
+
+def test_matching_batch_failure_logs_elapsed_time_and_limit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A matching transport failure leaves timing evidence in service logs."""
+
+    client = _TimeoutClient()
+    judge = OpenAISuitabilityJudge(client)  # type: ignore[arg-type]
+
+    with caplog.at_level(logging.ERROR, logger="agent.match"):
+        with pytest.raises(TimeoutError, match="request limit"):
+            judge.judge(
+                (
+                    SuitabilityCase(
+                        need_key="req-timeout",
+                        unit_need=_need(1, "pencils"),
+                        offer=_offer("SKU-TIMEOUT", "pencils"),
+                    ),
+                )
+            )
+
+    assert "Semantic matching batch failed after" in caplog.text
+    assert "against a 90.0-second request limit" in caplog.text
+    assert "needs=1" in caplog.text

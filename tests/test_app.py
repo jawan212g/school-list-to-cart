@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -8625,3 +8626,159 @@ def test_working_screen_reuses_cached_pipeline_result(
     assert st.session_state["result"] is result
     assert st.session_state["screen"] == "summary"
     assert st.rerun_count == 1
+
+
+def test_cart_build_retry_reuses_confirmed_requirements(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A transport failure retries planning without extraction or review."""
+
+    completed_result = _real_pipeline_result("Grade 2")
+    attempts = 0
+    routed: list[PipelineResult] = []
+
+    def fail_once_then_complete(
+        *args: object,
+        **kwargs: object,
+    ) -> PipelineResult:
+        nonlocal attempts
+        del args, kwargs
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("matching request timed out")
+        return completed_result
+
+    monkeypatch.setattr(
+        app,
+        "_run_pipeline_from_cached_extractions",
+        fail_once_then_complete,
+    )
+    monkeypatch.setattr(
+        app,
+        "_route_pipeline_result",
+        lambda st, result, labels: routed.append(result),
+    )
+
+    class RetryWorkingScreen:
+        def __init__(self) -> None:
+            self.session_state = {
+                "intake": {
+                    "session_id": "retry-cart",
+                    "children": (
+                        {
+                            "child_id": "child-1",
+                            "label": "Grade 2",
+                            "grade": "Grade 2",
+                            "student_count": 1,
+                        },
+                    ),
+                    "budget_total": 1_000,
+                    "budget_mode": "combined",
+                    "shopping_mode": "budget",
+                    "store_radius_miles": 10.0,
+                    "allowed_stores": None,
+                    "fulfillment_pref": "pickup",
+                    "tax_basis_points": 0,
+                    "max_stores": None,
+                    "budget_allocations": {},
+                    "demo_mode": False,
+                },
+                "list_inputs": (
+                    ListInput(child_id="child-1", source="Grade list"),
+                ),
+                "document_structures": {},
+                "document_selections": {},
+                "classroom_quantity_scopes": {},
+                "structure_errors": {},
+                "structure_cache_ready": True,
+                "extracted_lists": completed_result.extractions,
+                "unmerged_extracted_lists": completed_result.extractions,
+                "extraction_errors": {},
+                "extraction_cache_ready": True,
+                "requirement_merge_result": None,
+                "requirement_merge_resolved": True,
+                "list_identity_confirmed": True,
+                "organized_list_confirmed": True,
+                "stockout_skus": frozenset(),
+                "price_overrides": {},
+                "result": None,
+                "screen": "working",
+                "ui_error_active": False,
+            }
+            self.retry_available = True
+            self.rerun_count = 0
+            self.errors: list[str] = []
+            self.button_labels: list[str] = []
+
+        def __enter__(self) -> "RetryWorkingScreen":
+            return self
+
+        def __exit__(
+            self,
+            exc_type: object,
+            exc_value: object,
+            traceback: object,
+        ) -> None:
+            return None
+
+        def header(self, value: str) -> None:
+            del value
+
+        def html(self, value: str, **kwargs: object) -> None:
+            del value, kwargs
+
+        def status(self, label: str, **kwargs: object) -> "RetryWorkingScreen":
+            del label, kwargs
+            return self
+
+        def write(self, value: str) -> None:
+            del value
+
+        def update(self, **kwargs: object) -> None:
+            del kwargs
+
+        def error(self, value: str) -> None:
+            self.errors.append(value)
+
+        def columns(self, count: int) -> tuple["RetryWorkingScreen", ...]:
+            return tuple(self for _ in range(count))
+
+        def button(self, label: str, **kwargs: object) -> bool:
+            del kwargs
+            self.button_labels.append(label)
+            if label == "Try again" and self.retry_available:
+                self.retry_available = False
+                return True
+            return False
+
+        def rerun(self) -> None:
+            self.rerun_count += 1
+
+    st = RetryWorkingScreen()
+    confirmed_before = st.session_state["extracted_lists"]
+
+    with caplog.at_level(logging.ERROR, logger="app"):
+        app._render_working(st)
+
+    assert attempts == 1
+    assert st.rerun_count == 1
+    assert st.errors == [
+        (
+            "Something interrupted the cart build. Your setup, lists, and "
+            "cart choices are saved. Try again to resume building the "
+            "shopping plan."
+        )
+    ]
+    assert st.button_labels == ["Try again", "Return to lists"]
+    assert "Cart build failed after" in caplog.text
+    assert "confirmed_lists=1" in caplog.text
+    assert st.session_state["extracted_lists"] is confirmed_before
+    assert st.session_state["organized_list_confirmed"] is True
+
+    app._render_working(st)
+
+    assert attempts == 2
+    assert routed == [completed_result]
+    assert st.session_state["extracted_lists"] is confirmed_before
+    assert st.session_state["organized_list_confirmed"] is True

@@ -66,6 +66,11 @@ INTERRUPT_TARGET_COUNT = 3  # BR-10: target approval-interrupt maximum.
 INTERRUPT_DESIGN_FAILURE_COUNT = 6  # BR-10: more than six is a failure.
 
 MODEL_CALL_TIMEOUT_SECONDS = 30.0  # Operational ceiling for one model request.
+MATCHING_MODEL_TIMEOUT_SECONDS = 90.0
+# BR-74: one semantic-matching request receives a 90-second ceiling. The
+# frozen Maple run completed in 19.808 seconds, while a live 30-second request
+# timed out after 19 of 26 item types; 90 seconds provides demo headroom while
+# remaining below the three-minute rendered-page vision allowance.
 VISION_MODEL_CALL_TIMEOUT_SECONDS = 180.0
 # BR-51: rendered-page vision extraction receives a three-minute ceiling.
 # The primary Machias demo document took 113.23 seconds at the prior

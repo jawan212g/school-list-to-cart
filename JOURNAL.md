@@ -5491,3 +5491,78 @@ The open-state and real callback lifecycle require the GitHub Actions x86 run.
 
 No extraction, matching, pricing, optimizer, gate, or business-threshold
 behavior changed.
+## 2026-07-31 — Matching timeout recovery and operational timing
+
+### Objective
+
+Prevent a live semantic-matching timeout from stranding a parent after
+Personalize, preserve completed work for retry, and leave enough timing evidence
+to diagnose the next service failure.
+
+### Diagnosis and decisions
+
+- The deployed cart failed with `APITimeoutError` after matching 19 of 26 item
+  types. Matching still used the general 30-second request ceiling even though
+  the frozen Maple capture required 19.808 seconds.
+- This is the third operation found running close to an operational ceiling:
+  text extraction previously reached the 60-second boundary, and Machias vision
+  extraction took 113.23 seconds against its former 120-second limit.
+- Added BR-74: semantic matching now receives a 90-second request ceiling. This
+  is about 4.5 times the frozen observed duration and remains below the
+  three-minute rendered-page vision allowance.
+- Verified that deterministic structured matching over the frozen confirmed
+  Maple envelopes preserves the $109.83 zero-interrupt baseline. Stocking out
+  `VD-GLU-VB-006` still produces $109.18 and one major-substitution approval.
+- The existing offline demo switch is not a model-reading fallback: it replaces
+  structure detection and extraction as well as matching. Its built-in two-list
+  cart is $69.49, and the glue-stick stockout does not trigger an approval.
+- Proposed, but did not implement, a timed-out-batch fallback: retain successful
+  model batches, use deterministic structured matching only for the failed
+  batch, and route those needs to grouped low-confidence review.
+
+### Work completed
+
+- Applied the matching-specific timeout to every structured suitability request.
+- Logged elapsed wall time, the configured limit, need count, and candidate count
+  for every matching batch on success and failure.
+- Logged whole-cart elapsed time and confirmed-input counts on success and
+  failure, with the active traceback on failure.
+- Added exception logging to the broad structure and extraction handlers that
+  preserve partial work.
+- Replaced the dead-end failure state with plain-language recovery text and a
+  `Try again` action. Retry reuses the confirmed extraction envelopes and parent
+  Personalize decisions; it does not repeat reading or review.
+- Removed the duplicated combining narration and made the opening and subsequent
+  matching progress totals come from the same grouped-needs count.
+
+### Files changed
+
+- `agent/rules.py`
+- `agent/match.py`
+- `agent/pipeline.py`
+- `agent/telemetry.py`
+- `app.py`
+- `tests/test_performance.py`
+- `tests/test_app.py`
+- `tests/test_streamlit_lifecycle.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused matching, pipeline, app, frozen Maple, and provider tests: 176 passed.
+- Full Windows ARM64 suite: 469 passed, 1 skipped.
+- The skipped module is the real Streamlit AppTest suite; its new retry test runs
+  on the x86 GitHub Actions runner.
+
+### Problems or limitations
+
+- Transport fallback for a timed-out matching batch remains unimplemented pending
+  approval. A transport timeout can still stop the current build, but the parent
+  can now retry without losing completed setup or review work.
+- Offline demo mode cannot simultaneously show model-assisted reading and provide
+  deterministic matching-only reliability; those concerns are currently coupled.
+
+### Recommended next step
+
+Review and approve or reject the timed-out-batch deterministic fallback before
+changing matching or gate behavior.
