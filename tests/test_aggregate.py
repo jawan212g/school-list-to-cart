@@ -1,5 +1,7 @@
 """Tests for cross-child and classroom quantity aggregation."""
 
+import pytest
+
 from agent.aggregate import aggregate_requirements
 from agent.normalize import normalize_requirements
 from agent.schema import Requirement
@@ -16,6 +18,7 @@ def test_classroom_student_count_multiplies_per_student_requirement() -> None:
                 raw_text="3 folders per student",
                 canonical_item="folders",
                 quantity=3,
+                supply_scope="individual",
                 extraction_confidence=1.0,
             )
         ]
@@ -57,22 +60,24 @@ def test_classroom_shared_item_is_not_multiplied() -> None:
     assert needs[0].allocated_to == {"classroom": 1}
 
 
-def test_classroom_unspecified_scope_keeps_individual_default() -> None:
-    """BR-33: unspecified scope conservatively retains prior scaling."""
+def test_classroom_unspecified_scope_cannot_reach_quantity_math() -> None:
+    """BR-33: a classroom requires the parent's quantity interpretation."""
 
-    needs = aggregate_requirements(
-        (
-            Requirement(
-                req_id="folders",
-                child_id="classroom",
-                raw_text="2 folders",
-                canonical_item="folders",
-                quantity=2,
-                supply_scope="unspecified",
-                extraction_confidence=1.0,
+    with pytest.raises(
+        ValueError,
+        match="Choose whether classroom quantities apply",
+    ):
+        aggregate_requirements(
+            (
+                Requirement(
+                    req_id="folders",
+                    child_id="classroom",
+                    raw_text="2 folders",
+                    canonical_item="folders",
+                    quantity=2,
+                    supply_scope="unspecified",
+                    extraction_confidence=1.0,
+                ),
             ),
-        ),
-        student_counts_by_child={"classroom": 20},
-    )
-
-    assert needs[0].quantity == 40
+            student_counts_by_child={"classroom": 20},
+        )

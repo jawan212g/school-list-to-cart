@@ -107,6 +107,9 @@ from agent.rules import (
     CONFLICT_IDENTITY_DIFFERENT,
     CONFLICT_IDENTITY_SAME,
     CATALOG_UNAVAILABLE_SOURCE_IDENTITY_FIELDS,
+    CLASSROOM_INDIVIDUAL_SCOPE,
+    CLASSROOM_QUANTITY_SCOPES,
+    CLASSROOM_SHARED_SCOPE,
     EXCLUDED_REQUIREMENT_QUANTITY,
     FAILED_DOCUMENT_SEQUENTIAL_FALLBACK,
     MAX_CHILDREN_PER_SESSION,
@@ -3369,6 +3372,7 @@ def _initialize_state(st: Any) -> None:
         "list_inputs": (),
         "document_structures": {},
         "document_selections": {},
+        "classroom_quantity_scopes": {},
         "source_reference_cache": {},
         "structure_errors": {},
         "structure_cache_ready": False,
@@ -4369,6 +4373,7 @@ def clear_inactive_intake_entries(
         for mapping_key in (
             "document_structures",
             "document_selections",
+            "classroom_quantity_scopes",
             "structure_errors",
             "extracted_lists",
             "unmerged_extracted_lists",
@@ -6247,6 +6252,7 @@ def _render_lists(st: Any) -> None:
         if replacement_child_id is None:
             st.session_state["document_structures"] = {}
             st.session_state["document_selections"] = {}
+            st.session_state["classroom_quantity_scopes"] = {}
             st.session_state["source_reference_cache"] = {}
             st.session_state["structure_errors"] = {}
         st.session_state["structure_cache_ready"] = False
@@ -6541,6 +6547,7 @@ def _extract_list_inputs(
     *,
     extractor: Callable[..., ExtractionEnvelope] = extract_document,
     selections: Mapping[str, DocumentSelection] | None = None,
+    classroom_quantity_scopes: Mapping[str, str] | None = None,
     progress_callback: (
         Callable[[str, int, int, str], None] | None
     ) = None,
@@ -6554,6 +6561,7 @@ def _extract_list_inputs(
     errors: dict[str, Exception] = {}
     completed: dict[str, ExtractionEnvelope] = {}
     active_selections = selections or {}
+    active_classroom_scopes = classroom_quantity_scopes or {}
 
     def extract_one(list_input: ListInput) -> ExtractionEnvelope:
         options: dict[str, Any] = {
@@ -6575,12 +6583,27 @@ def _extract_list_inputs(
         extraction: ExtractionEnvelope,
     ) -> ExtractionEnvelope:
         def stamp_requirement(requirement: Any) -> Any:
+            classroom_scope = active_classroom_scopes.get(
+                list_input.child_id
+            )
+            if (
+                classroom_scope is not None
+                and classroom_scope not in CLASSROOM_QUANTITY_SCOPES
+            ):
+                raise ValueError(
+                    "Unknown classroom quantity interpretation."
+                )
             stamped = requirement.model_copy(
                 update={
                     "source_document": list_input.resolved_document_name,
                     "source_page": list_input.resolved_source_page(
                         requirement.raw_text,
                         requirement.source_page,
+                    ),
+                    "supply_scope": (
+                        classroom_scope
+                        if classroom_scope is not None
+                        else requirement.supply_scope
                     ),
                 }
             )
@@ -10975,6 +10998,7 @@ def _prepare_student_list_replacement(
     for mapping_key in (
         "document_structures",
         "document_selections",
+        "classroom_quantity_scopes",
         "structure_errors",
         "extracted_lists",
         "unmerged_extracted_lists",
@@ -11028,6 +11052,75 @@ def _apply_section_proceed_action(
         navigate_back_to_screen(state, "intake")
 
 
+def _is_classroom_entry(child: Mapping[str, Any]) -> bool:
+    """Return whether one intake entry represents a classroom (FR-05)."""
+
+    return str(child.get("entity_type", "")).casefold() == "classroom"
+
+
+def _classroom_scope_screen_needed(
+    children: Sequence[Mapping[str, Any]],
+    structure_child_ids: Iterable[str],
+    saved_scopes: Mapping[str, str],
+) -> bool:
+    """Require BR-33's classroom interpretation before extraction."""
+
+    available_child_ids = set(structure_child_ids)
+    return any(
+        _is_classroom_entry(child)
+        and str(child["child_id"]) in available_child_ids
+        and saved_scopes.get(str(child["child_id"]))
+        not in CLASSROOM_QUANTITY_SCOPES
+        for child in children
+    )
+
+
+def _render_classroom_quantity_scope_question(
+    st: Any,
+    child: Mapping[str, Any],
+    *,
+    key_prefix: str,
+    saved_scope: str | None,
+) -> str:
+    """Render BR-33's required parent choice and return its widget key."""
+
+    widget_key = f"{key_prefix}:classroom-quantity-scope"
+    if (
+        widget_key not in st.session_state
+        and saved_scope in CLASSROOM_QUANTITY_SCOPES
+    ):
+        st.session_state[widget_key] = saved_scope
+    student_count = int(child.get("student_count", 1))
+    scope_labels = {
+        CLASSROOM_INDIVIDUAL_SCOPE: (
+            "Each student needs the listed amount"
+        ),
+        CLASSROOM_SHARED_SCOPE: (
+            "These are totals for the whole classroom"
+        ),
+    }
+    st.markdown("#### How should these quantities apply?")
+    st.radio(
+        (
+            f"Choose how to use the quantities for {child['label']} "
+            "(required)"
+        ),
+        CLASSROOM_QUANTITY_SCOPES,
+        index=None,
+        format_func=lambda scope: scope_labels[scope],
+        captions=(
+            (
+                "We'll multiply each quantity by the "
+                f"{student_count} students in this classroom."
+            ),
+            "We'll use the quantities exactly as written.",
+        ),
+        key=widget_key,
+        label_visibility="collapsed",
+    )
+    return widget_key
+
+
 def _render_sections(st: Any) -> None:
     """State deterministic scope and ask only unresolved section questions."""
 
@@ -11048,6 +11141,9 @@ def _render_sections(st: Any) -> None:
         for list_input in st.session_state["list_inputs"]
     }
     selections = dict(st.session_state["document_selections"])
+    classroom_scopes = dict(
+        st.session_state.get("classroom_quantity_scopes", {})
+    )
     resolutions = {
         child_id: resolve_document_sections(
             structure,
@@ -11055,12 +11151,19 @@ def _render_sections(st: Any) -> None:
         )
         for child_id, structure in structures.items()
     }
-    if not any(
+    if not (
+        any(
         section_resolution_needs_parent_screen(
             resolution,
             has_saved_selection=child_id in selections,
         )
         for child_id, resolution in resolutions.items()
+        )
+        or _classroom_scope_screen_needed(
+            intake["children"],
+            structures,
+            classroom_scopes,
+        )
     ):
         st.session_state["screen"] = "working"
         st.rerun()
@@ -11086,6 +11189,7 @@ def _render_sections(st: Any) -> None:
 
     choices: dict[str, ResolvedSectionChoice] = {}
     blocked_actions: dict[str, str] = {}
+    classroom_scope_widget_keys: dict[str, str] = {}
     for child_id, structure in structures.items():
         child = child_by_id[child_id]
         list_input = input_by_child[child_id]
@@ -11130,6 +11234,23 @@ def _render_sections(st: Any) -> None:
                     list_input,
                     key_prefix=f"whole-document-source:{child_id}",
                 )
+                if _is_classroom_entry(child):
+                    classroom_scope_widget_keys[child_id] = (
+                        _render_classroom_quantity_scope_question(
+                            st,
+                            child,
+                            key_prefix=(
+                                "whole-document-scope:"
+                                f"{child_id}:"
+                                f"{_document_scope_fingerprint(
+                                    list_input,
+                                    structure,
+                                    grade,
+                                )}"
+                            ),
+                            saved_scope=classroom_scopes.get(child_id),
+                        )
+                    )
             continue
         current = selections.get(child_id)
         initial_ids = (
@@ -11294,6 +11415,16 @@ def _render_sections(st: Any) -> None:
                         )
                     )
 
+                if _is_classroom_entry(child):
+                    classroom_scope_widget_keys[child_id] = (
+                        _render_classroom_quantity_scope_question(
+                            st,
+                            child,
+                            key_prefix=key_prefix,
+                            saved_scope=classroom_scopes.get(child_id),
+                        )
+                    )
+
             override_toggle_key = f"{key_prefix}:override-enabled"
             if possible_sections:
                 st.markdown(
@@ -11418,6 +11549,22 @@ def _render_sections(st: Any) -> None:
             navigate_intake_step(st.session_state, 1)
             navigate_back_to_screen(st.session_state, "intake")
             st.rerun()
+        missing_scope_labels = tuple(
+            str(child_by_id[child_id]["label"])
+            for child_id, widget_key in classroom_scope_widget_keys.items()
+            if st.session_state.get(widget_key)
+            not in CLASSROOM_QUANTITY_SCOPES
+        )
+        if missing_scope_labels:
+            st.session_state["ui_error_active"] = True
+            st.error(
+                escape_streamlit_dollars(
+                    "Choose how the quantities apply for "
+                    + _join_names(missing_scope_labels)
+                    + " before continuing."
+                )
+            )
+            return
         try:
             for child_id, choice in choices.items():
                 selections[child_id] = choice_to_document_selection(
@@ -11429,6 +11576,14 @@ def _render_sections(st: Any) -> None:
             st.error(escape_streamlit_dollars(str(error)))
             return
         st.session_state["document_selections"] = selections
+        st.session_state["classroom_quantity_scopes"] = {
+            **classroom_scopes,
+            **{
+                child_id: str(st.session_state[widget_key])
+                for child_id, widget_key
+                in classroom_scope_widget_keys.items()
+            },
+        }
         st.session_state["extraction_cache_ready"] = False
         st.session_state["unmerged_extracted_lists"] = {}
         st.session_state["requirement_merge_result"] = None
@@ -13592,6 +13747,7 @@ def _render_working(st: Any) -> None:
 
     st.session_state.setdefault("document_structures", {})
     st.session_state.setdefault("document_selections", {})
+    st.session_state.setdefault("classroom_quantity_scopes", {})
     st.session_state.setdefault("structure_errors", {})
     st.session_state.setdefault("structure_cache_ready", False)
 
@@ -13684,21 +13840,29 @@ def _render_working(st: Any) -> None:
 
     structures = st.session_state["document_structures"]
     selections = st.session_state["document_selections"]
-    needs_section_choice = any(
-        section_resolution_needs_parent_screen(
-            resolve_document_sections(
-                structure,
-                str(
-                    next(
-                        child["grade"]
-                        for child in intake["children"]
-                        if str(child["child_id"]) == child_id
-                    )
+    classroom_scopes = st.session_state["classroom_quantity_scopes"]
+    needs_section_choice = (
+        any(
+            section_resolution_needs_parent_screen(
+                resolve_document_sections(
+                    structure,
+                    str(
+                        next(
+                            child["grade"]
+                            for child in intake["children"]
+                            if str(child["child_id"]) == child_id
+                        )
+                    ),
                 ),
-            ),
-            has_saved_selection=child_id in selections,
+                has_saved_selection=child_id in selections,
+            )
+            for child_id, structure in structures.items()
         )
-        for child_id, structure in structures.items()
+        or _classroom_scope_screen_needed(
+            intake["children"],
+            structures,
+            classroom_scopes,
+        )
     )
     if needs_section_choice:
         st.session_state["progress_substep"] = (
@@ -13745,6 +13909,7 @@ def _render_working(st: Any) -> None:
                     else extract_document
                 ),
                 selections=selections,
+                classroom_quantity_scopes=classroom_scopes,
                 progress_callback=extraction_progress,
             )
             extractions = {

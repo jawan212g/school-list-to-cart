@@ -4944,6 +4944,45 @@ verification remains required.
 No extraction, matching, pricing, optimizer, gate, or business-threshold
 behavior changed.
 
+## 2026-07-31 — Classroom list quantity interpretation is parent-confirmed
+
+### Diagnosis
+
+Classroom entries carried a student count, and deterministic aggregation already
+multiplied requirements unless extraction labeled an item as shared. The Lists
+flow never asked the parent whether a classroom list stated per-student amounts
+or whole-class totals. Auto-selected grade sections and documents without grade
+headings could also bypass the section screen entirely.
+
+### Resolution
+
+- Amended BR-33 so every classroom list requires one explicit parent choice on
+  the section-selection screen: quantities for each student, or totals for the
+  whole classroom.
+- Made the choice mandatory with no preselected answer, including for ungraded
+  lists and automatically matched grade sections.
+- Stored the answer per classroom entry and applied it deterministically to the
+  extracted requirements before normalization and aggregation.
+- Per-student quantities multiply by the classroom count; whole-class totals
+  remain exactly as written.
+- Replacing or removing a classroom list removes only that list's saved
+  interpretation.
+- Added a deterministic guard so an unspecified classroom scope cannot enter
+  quantity aggregation when the classroom count is greater than one.
+
+### Verification boundary
+
+The ARM64 suite covers the extraction-to-aggregation result and the deterministic
+guard. The required Streamlit radio lifecycle is covered by a production-shaped
+AppTest that runs only on the x86 GitHub Actions runner.
+
+### Architecture
+
+The model still only reads the list. The parent supplies the classroom scope,
+and deterministic code applies the student-count multiplication. No model call,
+matching behavior, money path, optimizer behavior, gate condition, or pricing
+rule changed.
+
 ## 2026-07-30 — Duplicate exclusion uses one authoritative quantity state
 
 ### Defect

@@ -12,9 +12,13 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 import app
-from agent.aggregate import UnitNeed
+from agent.aggregate import UnitNeed, aggregate_requirements
 from agent.match import StructuredSuitabilityJudge
-from agent.normalize import NormalizationResult, NormalizedRequirement
+from agent.normalize import (
+    NormalizationResult,
+    NormalizedRequirement,
+    normalize_requirements,
+)
 from agent.pipeline import ListInput, PipelineResult, PipelineSession, run_pipeline
 from agent.requirement_merge import (
     consolidate_extractions,
@@ -869,6 +873,10 @@ def test_removing_entry_clears_only_its_budget_and_list() -> None:
             "child-1": maya_selection,
             "child-2": noah_selection,
         },
+        "classroom_quantity_scopes": {
+            "child-1": "individual",
+            "child-2": "shared",
+        },
     }
 
     notices = app.clear_inactive_intake_entries(state, 1)
@@ -888,6 +896,9 @@ def test_removing_entry_clears_only_its_budget_and_list() -> None:
     assert state["list_inputs"] == (maya_list,)
     assert state["document_selections"] == {
         "child-1": maya_selection,
+    }
+    assert state["classroom_quantity_scopes"] == {
+        "child-1": "individual",
     }
     assert state["max_stage_reached"] == 1
     assert state["max_intake_step_reached"] == 1
@@ -5061,6 +5072,57 @@ def test_grade_section_defaults_and_selection_reach_real_extractor_contract() ->
         extractions["child-1"].requirements[0].source_document
         == "district-list.txt"
     )
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected_quantity"),
+    (("individual", 40), ("shared", 2)),
+)
+def test_classroom_scope_from_section_screen_controls_quantity_math(
+    scope: str,
+    expected_quantity: int,
+) -> None:
+    """BR-33: the parent choice overrides model scope before aggregation."""
+
+    def extractor(
+        source: str,
+        **options: object,
+    ) -> ExtractionEnvelope:
+        del source, options
+        return ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="folders",
+                    child_id="classroom-1",
+                    raw_text="2 folders",
+                    canonical_item="folders",
+                    quantity=2,
+                    supply_scope="unspecified",
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+
+    extractions, errors = app._extract_list_inputs(
+        (
+            ListInput(
+                child_id="classroom-1",
+                source="2 folders",
+                document_name="Grade 3 supplies.txt",
+            ),
+        ),
+        extractor=extractor,
+        classroom_quantity_scopes={"classroom-1": scope},
+    )
+    requirements = extractions["classroom-1"].requirements
+    needs = aggregate_requirements(
+        normalize_requirements(requirements).budget_requirements,
+        student_counts_by_child={"classroom-1": 20},
+    )
+
+    assert errors == {}
+    assert requirements[0].supply_scope == scope
+    assert needs[0].quantity == expected_quantity
 
 
 def test_section_picker_uses_only_section_choices_when_details_add_nothing() -> None:

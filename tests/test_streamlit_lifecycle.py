@@ -177,6 +177,142 @@ if st.session_state.get("screen") == "sections":
     return test_app
 
 
+def _run_classroom_section_screen(
+    *,
+    sections: bool = True,
+) -> AppTest:
+    """Mount the real section screen for one production-shaped classroom."""
+
+    section_source = (
+        """
+                DocumentSection(
+                    section_id="grade-3",
+                    label="3rd Grade",
+                    grades=("Grade 3",),
+                    page_numbers=(1,),
+                    language="English",
+                    source_line="3rd Grade",
+                ),
+        """
+        if sections
+        else ""
+    )
+    test_app = AppTest.from_string(
+        f"""
+import streamlit as st
+import app
+from agent.pipeline import ListInput
+from agent.schema import DocumentSection, DocumentStructureEnvelope
+
+st.session_state.setdefault(
+    "intake",
+    {{
+        "children": (
+            {{
+                "child_id": "classroom-1",
+                "label": "Ms. Q's class",
+                "grade": "Grade 3",
+                "entity_type": "classroom",
+                "student_count": 20,
+            }},
+        )
+    }},
+)
+st.session_state.setdefault(
+    "document_structures",
+    {{
+        "classroom-1": DocumentStructureEnvelope(
+            document_title="Grade 3 supplies",
+            languages=("English",),
+            primary_language="English",
+            sections=(
+                {section_source}
+            ),
+        )
+    }},
+)
+st.session_state.setdefault(
+    "list_inputs",
+    (
+        ListInput(
+            child_id="classroom-1",
+            source="2 folders",
+            mime_type="text/plain",
+            document_name="Ms. Q's supply list",
+        ),
+    ),
+)
+st.session_state.setdefault("document_selections", {{}})
+st.session_state.setdefault("classroom_quantity_scopes", {{}})
+st.session_state.setdefault("structure_errors", {{}})
+st.session_state.setdefault("screen", "sections")
+st.session_state.setdefault("organized_list_confirmed", False)
+st.session_state.setdefault("extraction_cache_ready", False)
+if st.session_state.get("screen") == "sections":
+    app._render_sections(st)
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
+def test_classroom_section_scope_is_mandatory_and_saved() -> None:
+    """BR-33: the real section screen cannot continue without a class scope."""
+
+    test_app = _run_classroom_section_screen()
+    scope = next(
+        radio
+        for radio in test_app.radio
+        if radio.label
+        == "Choose how to use the quantities for Ms. Q's class (required)"
+    )
+    assert scope.value is None
+    assert tuple(scope.options) == (
+        "Each student needs the listed amount",
+        "These are totals for the whole classroom",
+    )
+
+    _click_label(test_app, "Continue with these sections")
+    _assert_no_exception(test_app)
+    assert test_app.session_state["screen"] == "sections"
+    assert any(
+        "Choose how the quantities apply" in str(error.value)
+        for error in test_app.error
+    )
+
+    scope = next(
+        radio
+        for radio in test_app.radio
+        if radio.label
+        == "Choose how to use the quantities for Ms. Q's class (required)"
+    )
+    scope.set_value("Each student needs the listed amount").run()
+    _click_label(test_app, "Continue with these sections")
+    _assert_no_exception(test_app)
+    assert test_app.session_state["screen"] == "working"
+    assert (
+        test_app.session_state["classroom_quantity_scopes"]["classroom-1"]
+        == "individual"
+    )
+
+
+def test_ungraded_classroom_list_still_requires_quantity_scope() -> None:
+    """BR-33/BR-59: a whole-list read still asks how class quantities apply."""
+
+    test_app = _run_classroom_section_screen(sections=False)
+
+    assert any(
+        radio.label
+        == "Choose how to use the quantities for Ms. Q's class (required)"
+        for radio in test_app.radio
+    )
+    assert any(
+        "We'll read this list." in str(item.value)
+        for item in test_app.markdown
+    )
+
+
 def test_working_progress_scroll_is_marked_once_per_episode() -> None:
     """Working-screen reruns keep one scroll marker until a new episode."""
 

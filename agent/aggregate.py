@@ -11,6 +11,7 @@ from agent.normalize import NormalizedRequirement
 from agent.rules import (
     CATEGORY_IMPLIED_ATTRIBUTE_TERMS,
     CATEGORY_IMPLIED_EXCLUSION_TERMS,
+    CLASSROOM_INDIVIDUAL_SCOPE,
     CLASSROOM_SHARED_SCOPE,
 )
 from agent.schema import Requirement
@@ -187,6 +188,18 @@ def aggregate_requirements(
         student_count = student_counts.get(requirement.child_id, 1)
         if student_count <= 0:
             raise ValueError("Classroom student counts must be positive")
+        if (
+            student_count > 1
+            and requirement.supply_scope
+            not in {
+                CLASSROOM_INDIVIDUAL_SCOPE,
+                CLASSROOM_SHARED_SCOPE,
+            }
+        ):
+            raise ValueError(
+                "Choose whether classroom quantities apply to each student "
+                "or to the whole class before building the cart."
+            )
         if requirement.supply_scope != CLASSROOM_SHARED_SCOPE:
             quantity *= student_count
 

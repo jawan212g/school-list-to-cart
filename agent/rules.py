@@ -772,9 +772,15 @@ def personalize_same_product_override_rationale(
 # differs.
 
 CLASSROOM_SHARED_SCOPE = "shared"
-CLASSROOM_UNSPECIFIED_SCOPE_DEFAULT = "individual"
-# BR-33: classroom-group individual items scale by student count; shared items
-# do not. An unspecified scope retains the conservative individual-item default.
+CLASSROOM_INDIVIDUAL_SCOPE = "individual"
+CLASSROOM_QUANTITY_SCOPES = (
+    CLASSROOM_INDIVIDUAL_SCOPE,
+    CLASSROOM_SHARED_SCOPE,
+)
+# BR-33 amended: before extraction, every classroom list requires the parent
+# to choose whether its quantities apply to each student or to the whole class.
+# Per-student quantities scale by the classroom count; whole-class quantities
+# remain exactly as written. An unspecified classroom scope may not proceed.
 
 ITEM_FULFILLMENT_PREFERENCE_DEFAULT = "minimum_cost_at_least"
 ITEM_FULFILLMENT_PREFERENCES = (
