@@ -1465,6 +1465,42 @@ def test_partial_personalize_actions_leave_the_same_decision_visible_to_gate() -
     )
 
 
+def test_parent_edit_and_gate_share_the_same_resolved_decision_set() -> None:
+    """BR-52: a submitted parent edit is not reclassified as pending."""
+
+    test_app = _run_personalize_two_decision_screen()
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    navigation.set_value("child-1").run()
+    _assert_no_exception(test_app)
+
+    _click_label(test_app, "Change item or quantity")
+    _click_label(test_app, "Send selection to cart")
+
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    navigation.set_value("summary").run()
+    _assert_no_exception(test_app)
+    assert any(
+        markdown.value == "**1**  \nNeeds a decision"
+        for markdown in test_app.markdown
+    )
+
+    _click_label(test_app, "Use these choices and build my shopping plan")
+    warning_text = " ".join(
+        str(item.value)
+        for item in (*test_app.warning, *test_app.markdown)
+    ).casefold()
+    assert "sticky notes" in warning_text
+    assert "pencils" not in warning_text
+
+
 def test_personalize_remove_action_uses_distinct_removed_group() -> None:
     """FR-12: removal is explicit and remains distinct from already-owned."""
 
