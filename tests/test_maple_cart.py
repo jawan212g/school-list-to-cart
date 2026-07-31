@@ -298,6 +298,9 @@ def test_stockout_replans_the_current_budget_adjusted_maple_plan(
         for presentation in presentations
         if presentation.interrupt.kind != "budget_exceeded"
     }
+    selected_optional_ids = tuple(
+        item.requirement_id for item in result.addon_proposal.items[:1]
+    )
     state = {
         "stockout_skus": frozenset(),
         "price_overrides": {},
@@ -306,7 +309,9 @@ def test_stockout_replans_the_current_budget_adjusted_maple_plan(
         "approval_generation": 1,
         "replan_omitted_source_ids": frozenset(),
         "replan_forced_skus": {},
-        "addon_evaluation": None,
+        "addon_evaluation": SimpleNamespace(
+            selected_requirement_ids=selected_optional_ids
+        ),
     }
     st = SimpleNamespace(session_state=state)
 
@@ -334,4 +339,8 @@ def test_stockout_replans_the_current_budget_adjusted_maple_plan(
         action_id for action_id in action_ids if action_id != stocked_out_action
     )
     assert st.session_state["approval_outcomes"] == outcomes
+    assert (
+        st.session_state["replan_selected_addon_ids"]
+        == selected_optional_ids
+    )
     assert "went out of stock" in st.session_state["catalog_change_notice"]
