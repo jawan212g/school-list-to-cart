@@ -5967,3 +5967,7 @@ low-confidence catalog-match decision remains.
   as decision-card headings, while pencils render as a settled-row expander.
   The browser test now reads each item from the production surface where it is
   actually displayed instead of assuming every item is an expander.
+- The next render showed the existing package assumptions in those headings:
+  `5 packs of 4 glue sticks` and `10 packs of 3 sticky notes`. The regression
+  now asserts those production phrases rather than incorrectly expecting the
+  brand name where the formatter displays package contents.

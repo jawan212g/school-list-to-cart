@@ -1736,9 +1736,9 @@ def test_classroom_personalize_shows_per_student_quantities_as_class_totals() ->
         for element in collection
     )
 
-    assert "5 packs of Elmer's glue sticks" in rendered_text
+    assert "5 packs of 4 glue sticks" in rendered_text
     assert "50 pencils" in labels
-    assert "10 packs of Post-It sticky notes" in rendered_text
+    assert "10 packs of 3 sticky notes" in rendered_text
 
     pencil_row = next(
         expander for expander in test_app.expander
