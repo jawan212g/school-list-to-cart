@@ -428,6 +428,95 @@ app._render_review(st)
     return test_app
 
 
+def _run_personalize_student_and_classroom_decision_screen() -> AppTest:
+    """Mount the production Personalize path with two real entry types."""
+
+    test_app = AppTest.from_string(
+        """
+import streamlit as st
+import app
+from agent.review import organize_extractions
+from agent.schema import ExtractionEnvelope, Requirement
+
+children = (
+    {
+        "child_id": "student-1",
+        "label": "Maya",
+        "grade": "Grade 2",
+        "entity_type": "student",
+    },
+    {
+        "child_id": "classroom-1",
+        "label": "Mr. G's class",
+        "grade": "Grade 5",
+        "entity_type": "classroom",
+        "student_count": 20,
+    },
+)
+extracted_lists = {
+    "student-1": ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="maya-pencils",
+                child_id="student-1",
+                raw_text="24 pencils",
+                canonical_item="pencils",
+                quantity=24,
+                extraction_confidence=0.6,
+            ),
+            Requirement(
+                req_id="maya-sticky-notes",
+                child_id="student-1",
+                raw_text="2 packs of sticky notes",
+                canonical_item="sticky_notes",
+                quantity=2,
+                unit_type="pack",
+                package_quantity_state="specified",
+                extraction_confidence=0.6,
+            ),
+        )
+    ),
+    "classroom-1": ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="class-pens",
+                child_id="classroom-1",
+                raw_text="20 packs of pens",
+                canonical_item="pens",
+                quantity=20,
+                unit_type="pack",
+                package_quantity_state="specified",
+                extraction_confidence=0.6,
+            ),
+            Requirement(
+                req_id="class-folders",
+                child_id="classroom-1",
+                raw_text="40 folders",
+                canonical_item="folders",
+                quantity=40,
+                extraction_confidence=0.6,
+            ),
+        )
+    ),
+}
+st.session_state.setdefault("intake", {"children": children})
+st.session_state.setdefault("extracted_lists", extracted_lists)
+st.session_state.setdefault(
+    "review_items",
+    organize_extractions(dict(st.session_state["extracted_lists"])),
+)
+st.session_state.setdefault("parent_added_review_items", ())
+st.session_state.setdefault("extraction_errors", {})
+st.session_state.setdefault("list_inputs", ())
+st.session_state.setdefault(app.PERSONALIZE_SELECTED_VIEW_KEY, "summary")
+app._render_review(st)
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
 def _run_personalize_package_decision_screen() -> AppTest:
     """Mount the production Personalize path with one missing pack count."""
 
@@ -1358,6 +1447,74 @@ def test_personalize_edit_survives_summary_round_trip_without_button_crash() -> 
         if button.label == "Approve all AI recommendations"
     )
     assert reopened_bulk_key != first_bulk_key
+
+
+@pytest.mark.parametrize(
+    ("entry_label", "entry_id"),
+    (
+        ("Maya", "student-1"),
+        ("Mr. G's class", "classroom-1"),
+    ),
+)
+def test_personalize_accept_keeps_the_open_entry_and_records_the_choice(
+    entry_label: str,
+    entry_id: str,
+) -> None:
+    """FR-12: approval acts in place for both students and classrooms."""
+
+    test_app = _run_personalize_student_and_classroom_decision_screen()
+    _click_label(test_app, f"Open {entry_label}")
+    assert (
+        test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY]
+        == entry_id
+    )
+
+    before = frozenset(
+        test_app.session_state.get(
+            app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY,
+            (),
+        )
+    )
+    _click_label(test_app, "Approve this recommendation")
+    _assert_no_exception(test_app)
+
+    after = frozenset(
+        test_app.session_state.get(
+            app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY,
+            (),
+        )
+    )
+    assert test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY] == entry_id
+    assert len(after - before) == 1
+    assert any(
+        markdown.value == "**1**  \nNeeds a decision"
+        for markdown in test_app.markdown
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry_label", "entry_id"),
+    (
+        ("Maya", "student-1"),
+        ("Mr. G's class", "classroom-1"),
+    ),
+)
+def test_personalize_edit_opens_in_place_before_the_parent_submits(
+    entry_label: str,
+    entry_id: str,
+) -> None:
+    """FR-12: editing opens on the current entry instead of returning to Summary."""
+
+    test_app = _run_personalize_student_and_classroom_decision_screen()
+    _click_label(test_app, f"Open {entry_label}")
+    _click_label(test_app, "Change item or quantity")
+    _assert_no_exception(test_app)
+
+    assert test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY] == entry_id
+    assert any(
+        button.label == "Send selection to cart"
+        for button in test_app.button
+    )
 
 
 def test_unresolved_open_student_button_survives_a_view_round_trip() -> None:
