@@ -3625,6 +3625,7 @@ class SourceReference:
     rendered_page: bytes | None
     text_page: str | None
     mime_type: str | None
+    input_kind: str = "uploaded"
 
 
 def _pasted_source_page_texts(text: str) -> tuple[str, ...]:
@@ -3717,7 +3718,12 @@ def build_source_reference(
         source_line,
         page_number,
     )
-    if list_input.source_page_texts:
+    if list_input.input_kind == "pasted":
+        text_page = str(list_input.source)
+        resolved_page_number = (
+            resolved_page_number or NONPAGINATED_SOURCE_PAGE
+        )
+    elif list_input.source_page_texts:
         resolved_page_number = (
             resolved_page_number or NONPAGINATED_SOURCE_PAGE
         )
@@ -3770,15 +3776,17 @@ def build_source_reference(
         rendered_page=rendered_page,
         text_page=text_page,
         mime_type=list_input.mime_type,
+        input_kind=list_input.input_kind,
     )
 
 
 def _source_reference_cache_key(
     list_input: ListInput,
     page_number: int | None,
-) -> tuple[str, str, int, int | None]:
+) -> tuple[str, str, str, int, int | None]:
     return (
         list_input.child_id,
+        list_input.input_kind,
         list_input.resolved_document_name,
         hash(list_input.source),
         page_number,
@@ -3802,12 +3810,14 @@ def _source_document_button_label(document_name: str) -> str:
 def _source_reference_hover_text(reference: SourceReference) -> str:
     """Expose BR-41's full document and page despite label truncation."""
 
+    if getattr(reference, "input_kind", "uploaded") == "pasted":
+        return "What you typed"
     page_text = (
         f" · page {reference.page_number}"
         if reference.page_number is not None
         else ""
     )
-    return f"View source · {reference.document_name}{page_text}"
+    return f"View file · {reference.document_name}{page_text}"
 
 
 def _render_source_reference(
@@ -3844,18 +3854,23 @@ def _render_source_reference(
         cache[cache_key] = reference
     elif reference.source_line != source_line:
         reference = replace(reference, source_line=source_line)
+    is_typed_entry = list_input.input_kind == "pasted"
     page_text = (
         f" · page {reference.page_number}"
-        if reference.page_number is not None
+        if reference.page_number is not None and not is_typed_entry
         else ""
     )
     button_document_name = _source_document_button_label(
         reference.document_name
     )
     default_button_label = (
-        f"{button_document_name}{page_text}"
-        if under_source_header
-        else f"View source · {button_document_name}{page_text}"
+        "What you typed"
+        if is_typed_entry
+        else (
+            f"{button_document_name}{page_text}"
+            if under_source_header
+            else f"View file · {button_document_name}{page_text}"
+        )
     )
     with st.popover(
         (
@@ -3875,6 +3890,13 @@ def _render_source_reference_content(
 ) -> None:
     """Render one retained source page inside an existing disclosure."""
 
+    if getattr(reference, "input_kind", "uploaded") == "pasted":
+        st.code(
+            reference.text_page or "",
+            language=None,
+            wrap_lines=False,
+        )
+        return
     page_text = (
         f" · page {reference.page_number}"
         if reference.page_number is not None
@@ -3886,13 +3908,13 @@ def _render_source_reference_content(
     ):
         st.caption(
             escape_streamlit_dollars(
-                f"Cited line on this page: {reference.source_line}"
+                f"From the list: {reference.source_line}"
             )
         )
     else:
         st.caption(
             escape_streamlit_dollars(
-                f"Source document: {reference.document_name}{page_text}"
+                f"File: {reference.document_name}{page_text}"
             )
         )
     if reference.rendered_page is not None:
@@ -3900,7 +3922,7 @@ def _render_source_reference_content(
             reference.rendered_page,
             caption=(
                 f"{reference.document_name}{page_text}. "
-                "Use the cited line above to locate the source."
+                "Look for the line shown above."
             ),
             use_container_width=True,
         )
@@ -5807,7 +5829,7 @@ def _build_individual_list_input(
         raise ValueError(f"{child['label']}: paste the supply list.")
     if len(pasted.encode("utf-8")) > MAX_UPLOAD_BYTES:
         raise ValueError(
-            f"{child['label']}: pasted text exceeds the size limit."
+            f"{child['label']}: what you typed exceeds the size limit."
         )
     return _build_pasted_list_input(
         child_id=str(child["child_id"]),
@@ -5851,7 +5873,7 @@ def _build_list_inputs(
         )
         if missing:
             raise ValueError(
-                "Saved lists are missing for: " + _join_names(missing) + "."
+                "Saved entries are missing for: " + _join_names(missing) + "."
             )
         return tuple(
             retained[str(child["child_id"])]
@@ -5888,7 +5910,7 @@ def _build_list_inputs(
             raise ValueError("Paste the shared district list.")
         if len(pasted.encode("utf-8")) > MAX_UPLOAD_BYTES:
             raise ValueError(
-                "The shared pasted list exceeds the size limit."
+                "What you typed exceeds the size limit."
             )
         shared_input = _build_pasted_list_input(
             child_id=str(children[0]["child_id"]),
@@ -5937,9 +5959,9 @@ def _render_lists(st: Any) -> None:
     children = intake["children"]
     st.header("Add the lists")
     st.write(
-        "Paste or upload the list for each student. If one district document "
+        "Paste or upload the list for each student. If one district list "
         "contains several grades, upload it once and choose a section for "
-        "each student. Every file is checked before items are extracted."
+        "each student. Every uploaded file is checked before it is read."
     )
     focused_child_id = st.session_state.pop(
         "list_focus_child_id",
@@ -5968,9 +5990,9 @@ def _render_lists(st: Any) -> None:
     if saved_inputs:
         st.success(
             (
-                "The other saved lists are still available."
+                "The other saved entries are still available."
                 if replacement_child_id is not None
-                else "Your previously supplied lists are still available."
+                else "Your previously supplied entries are still available."
             )
         )
         labels_by_child = {
@@ -5981,8 +6003,16 @@ def _render_lists(st: Any) -> None:
             escape_streamlit_data(
                 tuple(
                     {
-                        "Saved list": item.resolved_document_name,
-                        "Pages": _saved_list_page_count(item),
+                        "Saved entry": (
+                            "What you typed"
+                            if item.input_kind == "pasted"
+                            else item.resolved_document_name
+                        ),
+                        "Pages": (
+                            ""
+                            if item.input_kind == "pasted"
+                            else _saved_list_page_count(item)
+                        ),
                         "For": labels_by_child.get(
                             item.child_id,
                             item.child_id,
@@ -5996,7 +6026,7 @@ def _render_lists(st: Any) -> None:
             replacement_child_id is None
             and tuple(item.child_id for item in saved_inputs)
             == expected_child_ids
-            and st.button("Rebuild using the saved lists")
+            and st.button("Rebuild using the saved entries")
         ):
             st.session_state["result"] = None
             st.session_state["list_identity_confirmed"] = False
@@ -6013,7 +6043,7 @@ def _render_lists(st: Any) -> None:
     shared_list_for_all = False
     if len(children) > 1 and replacement_child_id is None:
         shared_list_for_all = st.checkbox(
-            "One district document contains sections for all entries",
+            "One district list contains sections for all entries",
             value=bool(
                 st.session_state.get("shared_list_for_all", False)
             ),
@@ -6031,7 +6061,7 @@ def _render_lists(st: Any) -> None:
             (
                 -1,
                 {
-                    "label": "Shared district document",
+                    "label": "Shared district list",
                     "grade": "multiple grades",
                 },
             ),
@@ -6065,7 +6095,7 @@ def _render_lists(st: Any) -> None:
             st.subheader(
                 escape_streamlit_dollars(
                     (
-                        "Shared district document"
+                        "Shared district list"
                         if shared_source
                         else (
                             f"{child['label']} · "
@@ -6080,7 +6110,7 @@ def _render_lists(st: Any) -> None:
                     "teacher section for each student next."
                 )
             st.radio(
-                "List source",
+                "How would you like to add the list?",
                 ("Paste text", "Upload a file"),
                 horizontal=True,
                 key=mode_key,
@@ -6088,7 +6118,7 @@ def _render_lists(st: Any) -> None:
             if st.session_state[mode_key] == "Upload a file":
                 upload = st.file_uploader(
                     (
-                        "District supply-list document"
+                        "District supply-list file"
                         if shared_source
                         else "Supply list"
                     ),
@@ -8545,18 +8575,14 @@ def _personalize_source_button_label(
     """Label pasted and uploaded sources according to how they were supplied."""
 
     if list_input.input_kind == "pasted":
-        return (
-            f"View pasted list · {child_label}"
-            if child_label
-            else "View pasted list"
-        )
+        return "What you typed"
     document = _source_document_button_label(
         list_input.resolved_document_name
     )
     return (
-        f"View source · {child_label} · {document}"
+        f"View file · {child_label} · {document}"
         if child_label
-        else f"View source · {document}"
+        else f"View file · {document}"
     )
 
 
@@ -8621,7 +8647,7 @@ def _render_personalize_child_sources(
         )
         return
     with st.expander(
-        f"Sources · {len(sources)} lists",
+        f"Lists used · {len(sources)}",
         key=f"personalize-sources:{child_id}:expanded",
         on_change="rerun",
     ):
@@ -8692,6 +8718,13 @@ def _personalize_source_pages(
     else:
         selected_pages = ()
 
+    if list_input.input_kind == "pasted":
+        return (
+            (
+                NONPAGINATED_SOURCE_PAGE,
+                _personalize_source_line(list_input),
+            ),
+        )
     if selected_pages and use_document_selection:
         page_numbers = tuple(dict.fromkeys(selected_pages))
     elif evidence:
@@ -8756,8 +8789,11 @@ def _render_personalize_summary_source_control(
                 + _join_names(section_labels)
             )
         )
+    typed_only = all(
+        source.input_kind == "pasted" for source in sources
+    )
     with st.popover(
-        "Open source pages",
+        "What you typed" if typed_only else "Open lists used",
         use_container_width=True,
     ):
         for index, (
@@ -8772,12 +8808,13 @@ def _render_personalize_summary_source_control(
                 page_number=page_number,
                 source_line=source_line,
             )
-            st.markdown(
-                escape_streamlit_dollars(
-                    f"**{reference.document_name} · "
-                    f"page {reference.page_number}**"
+            if source.input_kind != "pasted":
+                st.markdown(
+                    escape_streamlit_dollars(
+                        f"**{reference.document_name} · "
+                        f"page {reference.page_number}**"
+                    )
                 )
-            )
             _render_source_reference_content(st, reference)
 
 
@@ -10662,6 +10699,15 @@ def _render_whole_document_source_links(
 ) -> None:
     """Render retained pages for a document that has no named sections."""
 
+    if list_input.input_kind == "pasted":
+        _render_source_reference(
+            st,
+            list_input,
+            page_number=NONPAGINATED_SOURCE_PAGE,
+            source_line=_personalize_source_line(list_input),
+            key=f"{key_prefix}:typed-entry",
+        )
+        return
     for page_number in range(
         1,
         _saved_list_page_count(list_input) + 1,
@@ -10888,15 +10934,15 @@ def _render_sections(st: Any) -> None:
         st.rerun()
         return
 
-    st.header("What will be extracted from each list")
+    st.header("What we'll read from each list")
     st.write(
-        "Choose the part of a document that applies wherever a choice is "
+        "Choose the part of a list that applies wherever a choice is "
         "shown below."
     )
     if st.session_state["structure_errors"]:
         st.error(
-            "The documents named below could not be organized. They will not "
-            "be extracted, but the other lists can continue."
+            "The lists named below could not be organized. They will not be "
+            "read, but the other lists can continue."
         )
         for child_id, error in st.session_state["structure_errors"].items():
             child = child_by_id.get(child_id, {})
@@ -10914,6 +10960,13 @@ def _render_sections(st: Any) -> None:
         grade = str(child["grade"])
         resolution = resolutions[child_id]
         document_name = list_input.resolved_document_name
+        typed_entry = list_input.input_kind == "pasted"
+        parent_entry_name = (
+            "what you typed" if typed_entry else document_name
+        )
+        parent_entry_subject = (
+            "Your entry" if typed_entry else document_name
+        )
         if resolution.grade_scope_case == DOCUMENT_GRADE_SCOPE_NO_GRADE:
             with st.container(border=True):
                 st.subheader(
@@ -10926,11 +10979,19 @@ def _render_sections(st: Any) -> None:
                 )
                 st.caption(
                     escape_streamlit_dollars(
-                        f"Document: {document_name}"
+                        (
+                            "What you typed"
+                            if typed_entry
+                            else f"File: {document_name}"
+                        )
                     )
                 )
                 st.write(
-                    "This list will be extracted."
+                    (
+                        "We'll read this entry."
+                        if typed_entry
+                        else "We'll read this list."
+                    )
                 )
                 _render_whole_document_source_links(
                     st,
@@ -10974,7 +11035,13 @@ def _render_sections(st: Any) -> None:
                 )
             )
             st.caption(
-                escape_streamlit_dollars(f"Document: {document_name}")
+                escape_streamlit_dollars(
+                    (
+                        "What you typed"
+                        if typed_entry
+                        else f"File: {document_name}"
+                    )
+                )
             )
 
             if not resolution.has_primary_language_source:
@@ -10988,7 +11055,8 @@ def _render_sections(st: Any) -> None:
                 )
                 st.error(
                     escape_streamlit_dollars(
-                        f"{document_name} contains {languages or 'translated'} "
+                        f"{parent_entry_subject} contains "
+                        f"{languages or 'translated'} "
                         "sections, but no source-language original that can be "
                         f"resolved for {child['label']}. Nothing will be extracted "
                         "until you choose how to proceed."
@@ -11019,9 +11087,9 @@ def _render_sections(st: Any) -> None:
                 )
                 st.error(
                     escape_streamlit_dollars(
-                        f"No section in {document_name} matches "
-                        f"{child['label']} ({grade}). The document covers "
-                        f"{covered}. Nothing will be extracted until you choose "
+                        f"No section in {parent_entry_name} matches "
+                        f"{child['label']} ({grade}). It covers "
+                        f"{covered}. Nothing will be read until you choose "
                         "how to proceed."
                     )
                 )
@@ -11050,9 +11118,13 @@ def _render_sections(st: Any) -> None:
                 if choice.selected_section_labels:
                     st.write(
                         escape_streamlit_dollars(
-                            "We will extract items from "
+                            "We will read items from "
                             + _join_names(choice.selected_section_labels)
-                            + f" from {document_name}."
+                            + (
+                                " in what you typed."
+                                if typed_entry
+                                else f" in {document_name}."
+                            )
                         )
                     )
                 for section_id in choice.selected_section_ids:
@@ -11082,7 +11154,8 @@ def _render_sections(st: Any) -> None:
                 ):
                     st.warning(
                         escape_streamlit_dollars(
-                            f"{document_name} has no section matching {grade}. "
+                            f"{parent_entry_subject} has no section matching "
+                            f"{grade}. "
                             "You chose "
                             + _join_names(choice.selected_section_labels)
                             + ", so the list can continue."
@@ -11108,9 +11181,14 @@ def _render_sections(st: Any) -> None:
                         ),
                     )
                     page_text = (
-                        "page " + ", ".join(map(str, section.page_numbers))
-                        if section.page_numbers
-                        else "the uploaded list"
+                        "what you typed"
+                        if typed_entry
+                        else (
+                            "page "
+                            + ", ".join(map(str, section.page_numbers))
+                            if section.page_numbers
+                            else "the uploaded list"
+                        )
                     )
                     st.caption(
                         escape_streamlit_dollars(
@@ -12440,10 +12518,17 @@ def _personalize_source_summary(
             ("List section: " if len(sections) == 1 else "List sections: ")
             + _join_names(sections)
         )
-    show_pages = bool(pages) and not (
-        list_input is not None
-        and list_input.source_page_texts
-        and list_input.source_page_count == 1
+    show_pages = (
+        bool(pages)
+        and not (
+            list_input is not None
+            and list_input.input_kind == "pasted"
+        )
+        and not (
+            list_input is not None
+            and list_input.source_page_texts
+            and list_input.source_page_count == 1
+        )
     )
     if show_pages:
         summary_parts.append(
@@ -13312,7 +13397,7 @@ def _route_pipeline_result(
         st.session_state["ui_error_active"] = True
         st.error(
             "Every list failed extraction. Return to the lists screen and "
-            "check the files or pasted text."
+            "check the uploaded files or what you typed."
         )
         for child_id, reason in result.extraction_failures.items():
             st.warning(
@@ -13609,7 +13694,7 @@ def _render_working(st: Any) -> None:
         st.session_state["ui_error_active"] = True
         st.error(
             "No readable list content was extracted. Return to the lists "
-            "screen and check the files or pasted text."
+            "screen and check the uploaded files or what you typed."
         )
         for child_id, error in extraction_errors.items():
             st.warning(

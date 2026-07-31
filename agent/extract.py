@@ -1365,7 +1365,7 @@ def require_extracted_requirements(
     raise EmptyExtractionError(
         "No supply requirements were found in this non-empty list. "
         "This list was not included in the plan. Check that the correct "
-        "file or pasted list was provided, then try again."
+        "uploaded file or typed entry was provided, then try again."
     )
 
 

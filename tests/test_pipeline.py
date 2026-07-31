@@ -611,7 +611,7 @@ def test_e33_empty_extraction_is_explicit_and_other_list_continues() -> None:
         "missing": (
             "EmptyExtractionError: No supply requirements were found in this "
             "non-empty list. This list was not included in the plan. Check "
-            "that the correct file or pasted list was provided, then try "
+            "that the correct uploaded file or typed entry was provided, then try "
             "again."
         )
     }

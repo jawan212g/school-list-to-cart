@@ -4982,3 +4982,38 @@ Removed from cart groups in the deployed x86 build.
 Renamed the third journey tab from “Personalize” to “Personalize your cart.”
 Only the visible stage label and its navigation-copy assertions changed; the
 Personalize workflow, calculations, matching, and approval behavior did not.
+
+## 2026-07-30 — Typed-entry language and source view
+
+### Objective
+
+Present text a parent typed or pasted as their own entry, without leaking the
+internal document/page abstraction used to retain item provenance.
+
+### Work completed
+
+- Chose the parent-facing label “What you typed” for every retained typed-entry
+  control.
+- Kept deterministic BR-64 pagination internally, while rendering the exact
+  complete entry once with no filename, page number, or citation header.
+- Routed the Lists section preview, duplicate evidence, unavailable-item
+  evidence, student Personalize view, and Personalize Summary through the same
+  typed-entry-aware source renderer.
+- Kept real filenames and page numbers for uploaded files, while replacing
+  source-system vocabulary with “View file,” “From the list,” and “File.”
+- Removed remaining typed-entry copy that called the entry a document, a source,
+  or a paginated file in the Lists workflow and failure messages.
+
+### Audit finding
+
+The old renderer correctly reused BR-64's text-backed pages, but exposed that
+internal pagination in every label and rendered only one internal page at a
+time. The same shared renderer also emitted “Cited line” and “Source document”
+inside popovers. The retained data model remains useful for provenance; only
+its parent-facing presentation was wrong.
+
+### Architecture
+
+The language model and deterministic calculation boundaries are unchanged.
+No extraction prompt, matching behavior, money path, optimizer, gate, or
+business threshold changed.

@@ -1179,9 +1179,7 @@ def test_uploaded_text_source_popover_renders_the_retained_text() -> None:
         key="uploaded-text",
     )
 
-    assert SourceControl.captions == [
-        "Cited line on this page: 24 pencils"
-    ]
+    assert SourceControl.captions == ["From the list: 24 pencils"]
     assert SourceControl.text_pages == [
         "24 pencils\n1 box of tissues\n"
     ]
@@ -1218,9 +1216,7 @@ def test_docx_source_fallback_names_the_format_and_action() -> None:
         ),
     )
 
-    assert SourceContentRecorder.captions == [
-        "Source document: grade5.docx · page 1"
-    ]
+    assert SourceContentRecorder.captions == ["File: grade5.docx · page 1"]
     assert SourceContentRecorder.info_messages == [
         "A preview of this DOCX file is unavailable. Open the original file "
         "on your device, or upload it as a PDF or TXT file to preview it here."
@@ -4609,7 +4605,7 @@ def test_personalize_summary_opens_typed_and_uploaded_sources(
     recorder = SourceScreenRecorder()
     app._render_review(recorder)
 
-    assert recorder.popovers.count("Open source pages") == 2
+    assert recorder.popovers == ["What you typed", "Open lists used"]
     assert recorder.text_sources == [typed_text]
     assert len(recorder.pdf_pages) == 2
     assert recorder.column_specs.count([4.8, 1.2]) == 2
@@ -4622,7 +4618,7 @@ def test_personalize_summary_opens_typed_and_uploaded_sources(
     state["list_inputs"] = (state["list_inputs"][0],)
     pasted_only = SourceScreenRecorder()
     app._render_review(pasted_only)
-    assert pasted_only.popovers.count("Open source pages") == 1
+    assert pasted_only.popovers == ["What you typed"]
     assert pasted_only.text_sources == [typed_text]
 
 
@@ -7593,7 +7589,7 @@ def test_source_button_filename_is_bounded_and_keeps_extension() -> None:
         mime_type="application/pdf",
     )
     assert app._source_reference_hover_text(reference) == (
-        "View source · "
+        "View file · "
         "very-long-district-school-supply-list-for-every-grade.pdf · page 3"
     )
 
@@ -7671,7 +7667,7 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
     assert reference.page_number == 2
     assert reference.source_line == source_line
     assert reference.rendered_page is None
-    assert reference.text_page == list_input.source_page_texts[1]
+    assert reference.text_page == pasted
 
     class Popover:
         def __enter__(self) -> None:
@@ -7726,6 +7722,7 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
     district_input = replace(
         list_input,
         document_name="Machiasschoolsupplylist 1.pdf",
+        input_kind="uploaded",
     )
     app._render_source_reference(
         SourceControl(),
@@ -7738,20 +7735,17 @@ def test_pasted_list_screen_builds_exact_paginated_viewable_source() -> None:
 
     assert len(SourceControl.popover_labels) == 2
     source_label = SourceControl.popover_labels[0]
-    assert source_label.startswith("View source")
-    assert "Maya's supply list" in source_label
-    assert source_label.endswith("page 2")
+    assert source_label == "What you typed"
+    assert "Maya's supply list" not in source_label
+    assert "page" not in source_label.casefold()
     assert SourceControl.popover_labels[1] == (
         "Machiasschoolsupplylist 1.pdf · page 2"
     )
     assert SourceControl.rendered_text_pages == [
-        (list_input.source_page_texts[1], False),
+        (pasted, False),
         (list_input.source_page_texts[1], False),
     ]
-    assert SourceControl.captions == [
-        f"Cited line on this page: {source_line}",
-        f"Cited line on this page: {source_line}",
-    ]
+    assert SourceControl.captions == [f"From the list: {source_line}"]
 
 
 def test_pasted_source_controls_reach_all_provenance_surfaces(
@@ -8005,20 +7999,11 @@ def test_pasted_source_controls_reach_all_provenance_surfaces(
     assert item_surface_count == 0
     assert conflict_surface_count == 2
     assert unavailable_surface_count == 0
-    conflict_labels = recorder.popovers[
-        before_conflict : before_conflict + conflict_surface_count
+    assert recorder.popovers == [
+        "What you typed",
+        "What you typed",
+        "What you typed",
     ]
-    standalone_labels = tuple(
-        label
-        for label in recorder.popovers
-        if label not in conflict_labels
-    )
-    assert all(
-        not label.startswith("View source")
-        and "Kevin's supply list" in label
-        for label in conflict_labels
-    )
-    assert standalone_labels == ("View pasted list",)
     assert recorder.text_pages == [
         pasted
         for _ in recorder.popovers

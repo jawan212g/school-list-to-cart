@@ -64,7 +64,7 @@ def _read_demo_text(
                 page.extract_text() or "" for page in reader.pages
             )
         raise ExtractionInputError(
-            "Offline demo mode supports pasted text, TXT, DOCX, PDF, "
+            "Offline demo mode supports typed entries, TXT, DOCX, PDF, "
             "and the bundled sample. Use normal mode for arbitrary images."
         )
     if isinstance(source, Path):

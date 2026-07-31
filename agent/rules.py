@@ -342,9 +342,10 @@ STUDENT_SCOPED_LIST_REPLACEMENT = True
 # section choice remain intact.
 
 PASTED_SOURCE_LINES_PER_PAGE = 48
-# BR-64: pasted text is retained byte-for-byte as session provenance and
-# deterministically paginated into text-backed source pages without wrapping
-# or rewriting its lines. Every downstream source control uses those pages.
+# BR-64: typed or pasted text is retained exactly as entered. Deterministic
+# pagination may be used internally to preserve item-level location references,
+# but the parent sees one entry labeled "What you typed," with no filename or
+# page numbers.
 
 EXPLICIT_COMPOUND_REQUIREMENT_COMPONENTS = {
     "three-ring binder with dividers": ("binders", "dividers"),

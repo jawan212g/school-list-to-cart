@@ -690,14 +690,18 @@ def test_mixed_section_screen_renders_pasted_source_and_shared_heading() -> None
         app._student_grade_heading("Kevin", "Grade 2"),
         app._student_grade_heading("Jawan", "Grade 5"),
     ]
-    assert recorder.captions[0] == "Document: Kevin's supply list"
+    assert recorder.captions[0] == "What you typed"
     assert any(
-        label.startswith("View source")
-        and "Kevin's supply list" in label
-        and "page 1" in label
+        label == "What you typed"
         for label in recorder.popovers
     )
-    assert pasted in recorder.text_pages
+    assert recorder.text_pages[0] == pasted
+    assert "page" not in recorder.captions[0].casefold()
+    assert "page" not in recorder.popovers[0].casefold()
+    assert not any(
+        "kevin's supply list" in value.casefold()
+        for value in (*recorder.captions, *recorder.popovers)
+    )
 
 
 def test_replacing_one_student_list_preserves_the_other_student_scope() -> None:
