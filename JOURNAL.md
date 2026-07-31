@@ -5901,6 +5901,11 @@ low-confidence catalog-match decision remains.
   diagnosable from the request because no exception or Streamlit log was
   included. It remains explicitly unresolved rather than being attributed to
   the budget defect without evidence.
+- The first x86 run exposed another production-shape fixture gap: the shopping
+  plan AppTest omitted the required `budget_mode` value even though setup
+  always writes it before production can reach the summary. The fixture was
+  corrected to represent combined-budget intake; the application contract was
+  not weakened to accept the impossible state.
 
 ### Testing performed
 

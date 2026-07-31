@@ -226,6 +226,7 @@ st.session_state["intake"] = {
         },
     ),
     "budget_total": 12_000,
+    "budget_mode": "combined",
     "budget_allocations": {},
 }
 st.session_state["result"] = result
