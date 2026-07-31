@@ -356,7 +356,7 @@ SCREEN_ORDER = (
 JOURNEY_STAGES = (
     "Your students",
     "Their lists",
-    "Personalize",
+    "Personalize your cart",
     "Your shopping plan",
 )
 SCREEN_PHASES: Mapping[str, tuple[str, str]] = {

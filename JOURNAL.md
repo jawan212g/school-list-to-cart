@@ -4976,3 +4976,9 @@ approved.
 
 Review the two-row decision-card layout and the separate Already owned and
 Removed from cart groups in the deployed x86 build.
+
+## 2026-07-30 — Personalize stage label
+
+Renamed the third journey tab from “Personalize” to “Personalize your cart.”
+Only the visible stage label and its navigation-copy assertions changed; the
+Personalize workflow, calculations, matching, and approval behavior did not.

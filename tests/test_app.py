@@ -2381,7 +2381,7 @@ def test_visible_navigation_uses_four_required_stages() -> None:
     assert app.JOURNEY_STAGES == (
         "Your students",
         "Their lists",
-        "Personalize",
+        "Personalize your cart",
         "Your shopping plan",
     )
     assert app.screen_phase_label("intake") == "Your students"
@@ -2391,7 +2391,7 @@ def test_visible_navigation_uses_four_required_stages() -> None:
         == "Your shopping plan"
     )
     assert app.screen_phase_label("sections") == "Their lists"
-    assert app.screen_phase_label("review") == "Personalize"
+    assert app.screen_phase_label("review") == "Personalize your cart"
     assert app.screen_phase_label("approval") == "Your shopping plan"
     assert app.screen_phase_label("summary") == "Your shopping plan"
     assert "st.progress" not in intake_sections_source
@@ -2436,7 +2436,7 @@ def test_visible_navigation_uses_four_required_stages() -> None:
     assert rendered[1][0].startswith("✓ ")
     assert not rendered[2][0].startswith("✓ ")
     assert not rendered[3][0].startswith("✓ ")
-    assert rendered[2][0].endswith("Personalize")
+    assert rendered[2][0].endswith("Personalize your cart")
     assert app.journey_stage_statuses(3, 3) == (
         "completed",
         "completed",
