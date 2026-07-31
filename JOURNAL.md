@@ -5566,3 +5566,20 @@ to diagnose the next service failure.
 
 Review and approve or reject the timed-out-batch deterministic fallback before
 changing matching or gate behavior.
+
+## 2026-07-31 — Production-shaped retry AppTest setup
+
+### Finding and correction
+
+- The first x86 run for cart retry failed at the required three-second AppTest
+  ceiling. The inline test rebuilt the entire frozen Maple plan on every
+  Streamlit rerun and then rendered Summary; production caches a completed plan
+  instead of recreating the fixture during widget interaction.
+- Corrected the AppTest setup to construct its deterministic completed result
+  once in session state and to preserve the production `result` and `screen`
+  transitions across reruns. The timeout remains three seconds.
+
+### Testing performed
+
+- First x86 evidence: run `30658498286`, one AppTest timeout failure.
+- Full Windows ARM64 suite after the fixture correction: 469 passed, 1 skipped.

@@ -115,11 +115,13 @@ from test_maple_cart import _run_maple
 
 app._initialize_state(st)
 fixture = load_frozen_maple_fixture()
-completed_result = _run_maple(
-    fixture.extractions,
-    fixture.judge,
-    budget_cents=12_000,
-)
+if "test_completed_result" not in st.session_state:
+    st.session_state["test_completed_result"] = _run_maple(
+        fixture.extractions,
+        fixture.judge,
+        budget_cents=12_000,
+    )
+completed_result = st.session_state["test_completed_result"]
 
 def fail_once_then_complete(*args, **kwargs):
     del args, kwargs
@@ -174,8 +176,8 @@ st.session_state["requirement_merge_result"] = None
 st.session_state["requirement_merge_resolved"] = True
 st.session_state["list_identity_confirmed"] = True
 st.session_state["organized_list_confirmed"] = True
-st.session_state["result"] = None
-st.session_state["screen"] = "working"
+st.session_state.setdefault("result", None)
+st.session_state.setdefault("screen", "working")
 app.main()
 """
     )
