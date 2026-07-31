@@ -1470,19 +1470,19 @@ def test_personalize_accept_keeps_the_open_entry_and_records_the_choice(
     )
 
     before = frozenset(
-        test_app.session_state.get(
-            app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY,
-            (),
-        )
+        test_app.session_state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY]
+        if app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY
+        in test_app.session_state
+        else ()
     )
     _click_label(test_app, "Approve this recommendation")
     _assert_no_exception(test_app)
 
     after = frozenset(
-        test_app.session_state.get(
-            app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY,
-            (),
-        )
+        test_app.session_state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY]
+        if app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY
+        in test_app.session_state
+        else ()
     )
     assert test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY] == entry_id
     assert len(after - before) == 1
