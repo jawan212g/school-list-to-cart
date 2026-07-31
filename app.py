@@ -492,6 +492,7 @@ class ApprovalDisplayOption:
     alternative_id: str
     label: str
     cost_delta_cents: int
+    purchase_price_cents: int | None = None
     explanation: str | None = None
     sku: str | None = None
     source_requirement_ids: tuple[str, ...] = ()
@@ -1755,6 +1756,31 @@ def _humanize_internal_text(
     return re.sub(r"\bentry\b", "student", visible, flags=re.I)
 
 
+def _interrupt_item_name(
+    result: PipelineResult,
+    interrupt: ApprovalInterrupt,
+    line: CartLine | None,
+) -> str:
+    """Name a selected line or a confidence-blocked purchase need."""
+
+    if line is not None:
+        return _item_display_name(line.canonical_item)
+    need = next(
+        (
+            candidate
+            for candidate in result.purchase_needs
+            if candidate.source_requirement_ids
+            == interrupt.source_requirement_ids
+        ),
+        None,
+    )
+    return (
+        _item_display_name(need.canonical_item)
+        if need is not None
+        else "Required item"
+    )
+
+
 def _catalog_product_label(
     sku: str,
     offers: Sequence[Offer],
@@ -1902,14 +1928,10 @@ def _short_cost_component(label: str, cents: int) -> str | None:
 def _catalog_choice_explanation(
     choice: CatalogApprovalChoice,
 ) -> str | None:
-    if choice.is_current:
-        return None
-    return _landed_delta_explanation(
-        choice.cost_delta_cents,
-        choice.item_subtotal_delta_cents,
-        choice.tax_delta_cents,
-        choice.fulfillment_fee_delta_cents,
-    )
+    """Keep price comparisons out of pre-cart product choices."""
+
+    del choice
+    return None
 
 
 def _landed_delta_explanation(
@@ -2144,6 +2166,7 @@ def _legacy_budget_approval_content(
                         f"{_join_names(affected_children)} to "
                         f"{offer.title} — {store_name}"
                     ),
+                    purchase_price_cents=choice.purchase_price_cents,
                     cost_delta_cents=choice.cost_delta_cents,
                     explanation=_catalog_choice_explanation(choice),
                     sku=choice.sku,
@@ -2389,11 +2412,7 @@ def _approval_options(
         return options
 
     line = _interrupt_line(result, interrupt)
-    item_name = (
-        _item_display_name(line.canonical_item)
-        if line is not None
-        else "item"
-    )
+    item_name = _interrupt_item_name(result, interrupt, line)
     offers_by_sku = {offer.sku: offer for offer in offers}
     stores_by_id = {store.store_id: store for store in stores}
     catalog_choices = build_catalog_approval_choices(
@@ -2407,26 +2426,37 @@ def _approval_options(
     )
     if catalog_choices:
         options = []
-        for choice in catalog_choices:
+        for choice_index, choice in enumerate(catalog_choices):
             offer = offers_by_sku[choice.sku]
             store = stores_by_id.get(choice.store_id)
             store_name = store.name if store is not None else "Unknown store"
-            verb = "Keep" if choice.is_current else "Choose"
             options.append(
                 ApprovalDisplayOption(
                     alternative_id=(
                         f"{interrupt.interrupt_id}-catalog-{choice.sku}"
                     ),
-                    label=f"{verb} {offer.title} — {store_name}",
+                    label=f"{offer.title} — {store_name}",
+                    purchase_price_cents=choice.purchase_price_cents,
                     cost_delta_cents=choice.cost_delta_cents,
                     explanation=_catalog_choice_explanation(choice),
                     sku=choice.sku,
-                    source_requirement_ids=line.source_requirement_ids,
-                    affected_lines=(line.line_id,),
+                    source_requirement_ids=(
+                        line.source_requirement_ids
+                        if line is not None
+                        else interrupt.source_requirement_ids
+                    ),
+                    affected_lines=(
+                        (line.line_id,) if line is not None else ()
+                    ),
                     is_current_product=choice.is_current,
-                    is_recommended=choice.is_current,
+                    is_recommended=(
+                        choice.is_current
+                        or (line is None and choice_index == 0)
+                    ),
                 )
             )
+        if line is None:
+            return _with_one_recommended_option(options)
         should_offer_self_source = (
             not _has_exact_catalog_match(result, line)
             or len(catalog_choices) <= 1
@@ -2443,16 +2473,6 @@ def _approval_options(
             None,
         )
         if removal is not None:
-            context = removal_cost_context(
-                interrupt,
-                result.proposed_cart,
-                stores,
-            )
-            cost_explanation = _removal_explanation(
-                removal.cost_delta_cents,
-                context,
-                stores_by_id,
-            )
             availability_explanation = (
                 "No exact catalog match is available. "
                 if len(catalog_choices) > 1
@@ -2461,17 +2481,11 @@ def _approval_options(
             options.append(
                 ApprovalDisplayOption(
                     alternative_id=removal.alternative_id,
-                    label=(
-                        "Do not buy this — I will source it myself "
-                        f"(leaves required {item_name.lower()} unmet)"
-                    ),
+                    label="Source this item myself",
                     cost_delta_cents=removal.cost_delta_cents,
                     explanation=(
                         availability_explanation
-                        + (
-                            cost_explanation
-                            or "This removes the required item from the cart."
-                        )
+                        + "No product will be purchased for this item in this cart."
                     ),
                     source_requirement_ids=line.source_requirement_ids,
                     affected_lines=(line.line_id,),
@@ -2517,11 +2531,7 @@ def _approval_heading(
     interrupt: ApprovalInterrupt,
     line: CartLine | None,
 ) -> str:
-    item_name = (
-        _item_display_name(line.canonical_item)
-        if line is not None
-        else "Cart"
-    )
+    item_name = _interrupt_item_name(result, interrupt, line)
     attributes = _attribute_labels(result, line)
     if attributes:
         detail = _join_names(attributes) if attributes else "requested details"
@@ -2533,8 +2543,8 @@ def _approval_heading(
     if interrupt.kind == "budget_exceeded":
         return "Budget — the required-item cart costs more"
     if interrupt.kind == "low_confidence":
-        return f"{item_name} — confirm the list interpretation"
-    return f"{item_name} — required item is unavailable"
+        return f"{item_name} — compare the proposed product"
+    return f"{item_name} — choose what to buy"
 
 
 def _approval_message(
@@ -2612,11 +2622,7 @@ def build_approval_presentations(
     presentations = []
     for interrupt in _all_interrupts(result.approval_batch):
         line = _interrupt_line(result, interrupt)
-        item_name = (
-            _item_display_name(line.canonical_item)
-            if line is not None
-            else "Required item"
-        )
+        item_name = _interrupt_item_name(result, interrupt, line)
         if interrupt.kind == "budget_exceeded":
             message, options = _budget_approval_content(
                 result,
@@ -2664,11 +2670,16 @@ def build_approval_presentations(
 
 
 def approval_option_label(option: ApprovalDisplayOption) -> str:
-    """Render one concise radio label safely."""
+    """Render one concise option label with an actual price, not a delta."""
 
+    if option.purchase_price_cents is not None:
+        suffix = format_money(option.purchase_price_cents)
+    elif option.leaves_required_unmet:
+        suffix = "No purchase in this cart"
+    else:
+        suffix = ""
     return escape_streamlit_dollars(
-        f"{option.label} "
-        f"({format_streamlit_cost_delta(option.cost_delta_cents)})"
+        option.label if not suffix else f"{option.label} — {suffix}"
     )
 
 
@@ -14816,6 +14827,215 @@ def _render_contextual_approval_radio(
     return all_by_id[other_choice]
 
 
+def _render_approval_plan_context(
+    st: Any,
+    result: PipelineResult,
+    optimization: OptimizationResult,
+    child_labels: Mapping[str, str],
+) -> None:
+    """Show the current deterministic plan before FR-26 choices."""
+
+    st.subheader(
+        "Current shopping plan",
+        help=(
+            "Total cost includes the selected products, tax, and any pickup "
+            "or delivery fees. Decisions below may change this plan."
+        ),
+    )
+    plans = _plans(optimization)
+    item_count = sum(len(plan.lines) for plan in plans)
+    store_count = len(
+        {
+            order.store_id
+            for plan in plans
+            for order in plan.store_orders
+        }
+    )
+    metrics = st.columns(3)
+    metrics[0].metric(
+        "Total cost",
+        format_streamlit_money(optimization.landed_cost),
+    )
+    metrics[1].metric("Items", str(item_count))
+    metrics[2].metric("Stores", str(store_count))
+
+    if not optimization.gap_items:
+        return
+    with st.container(border=True):
+        st.markdown(
+            f"**Items to buy elsewhere ({len(optimization.gap_items)})**"
+        )
+        st.write(
+            "These items are not stocked within the shopping preferences "
+            "you selected. They are not decisions on this screen."
+        )
+        for item in optimization.gap_items:
+            affected_children = tuple(
+                dict.fromkeys(
+                    _child_display_label(child_id, child_labels)
+                    for need in result.purchase_needs
+                    if item in {need.canonical_item, need.label}
+                    for child_id in need.allocated_to
+                )
+            )
+            child_text = (
+                f" — {_join_names(affected_children)}"
+                if affected_children
+                else ""
+            )
+            st.write(
+                escape_streamlit_dollars(
+                    f"• {_item_display_name(item)}{child_text}"
+                )
+            )
+
+
+def _approval_review_members(
+    state: Mapping[str, Any],
+    presentation: ApprovalDisplayDecision,
+) -> tuple[SupplyItemReview, ...]:
+    """Find the Personalize rows represented by one shopping decision."""
+
+    source_ids = frozenset(presentation.interrupt.source_requirement_ids)
+    if not source_ids:
+        return ()
+    rows = tuple(state.get("review_items", ())) + tuple(
+        state.get("parent_added_review_items", ())
+    )
+    return tuple(
+        row
+        for row in rows
+        if source_ids.intersection(
+            {
+                row.req_id,
+                *(
+                    source.source_req_id
+                    for source in row.sources
+                ),
+            }
+        )
+    )
+
+
+def _approval_choose_recommendation(
+    state: MutableMapping[str, Any],
+    selection_key: str,
+    option_id: str,
+) -> None:
+    """Select the recommendation using the same state as the comparison list."""
+
+    state[selection_key] = option_id
+
+
+def _approval_edit_in_personalize(
+    state: MutableMapping[str, Any],
+    member: SupplyItemReview,
+) -> None:
+    """Return to the source-backed Personalize editor for one decision."""
+
+    _select_personalize_tab(
+        state,
+        member.child_id,
+        _personalize_item_anchor(member.review_id),
+    )
+    state["progress_substep"] = "personalizing the cart"
+    state["screen"] = "review"
+
+
+def _approval_mark_owned_and_rebuild(
+    state: MutableMapping[str, Any],
+    presentation: ApprovalDisplayDecision,
+    members: Sequence[SupplyItemReview],
+) -> None:
+    """Apply Personalize's owned action, then rebuild from confirmed rows."""
+
+    _mark_personalize_group_owned(
+        state,
+        presentation.interrupt.interrupt_id,
+        tuple(members),
+    )
+    extractions = dict(state.get("extracted_lists", {}))
+    reviewed = tuple(state.get("review_items", ())) + tuple(
+        state.get("parent_added_review_items", ())
+    )
+    confirmed = reviewed_envelopes(extractions, reviewed)
+    state["extracted_lists"] = confirmed
+    state[PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY] = (
+        _extraction_envelope_fingerprints(confirmed)
+    )
+    state["organized_list_confirmed"] = True
+    _invalidate_plan_state(state)
+    state["progress_substep"] = "rebuilding the plan with what you already own"
+    state[WORK_EPISODE_ACTIVE_KEY] = None
+    state["screen"] = "working"
+
+
+def _render_approval_card_actions(
+    st: Any,
+    generation: int,
+    presentation: ApprovalDisplayDecision,
+) -> None:
+    """Render the same primary actions used by Personalize decision cards."""
+
+    members = _approval_review_members(st.session_state, presentation)
+    recommended = next(
+        (
+            option
+            for option in presentation.options
+            if option.is_recommended
+        ),
+        None,
+    )
+    if recommended is None:
+        return
+    selection_key = _approval_selection_key(
+        generation,
+        presentation.interrupt.interrupt_id,
+    )
+    approve_column, edit_column, owned_column = st.columns(3)
+    approve_column.button(
+        "Approve this recommendation",
+        key=(
+            f"approval-action:{generation}:approve:"
+            f"{presentation.interrupt.interrupt_id}"
+        ),
+        type="primary",
+        on_click=_approval_choose_recommendation,
+        args=(st.session_state, selection_key, recommended.alternative_id),
+        use_container_width=True,
+    )
+    edit_column.button(
+        "Change item or quantity",
+        key=(
+            f"approval-action:{generation}:edit:"
+            f"{presentation.interrupt.interrupt_id}"
+        ),
+        disabled=not members,
+        on_click=(
+            _approval_edit_in_personalize if members else None
+        ),
+        args=(st.session_state, members[0]) if members else None,
+        use_container_width=True,
+    )
+    owned_column.button(
+        "We already own this item",
+        key=(
+            f"approval-action:{generation}:owned:"
+            f"{presentation.interrupt.interrupt_id}"
+        ),
+        disabled=not members,
+        on_click=(
+            _approval_mark_owned_and_rebuild if members else None
+        ),
+        args=(
+            st.session_state,
+            presentation,
+            members,
+        ) if members else None,
+        use_container_width=True,
+    )
+
+
 def _render_approval(st: Any) -> None:
     """Render cached decisions and the exact budget-plan builder."""
 
@@ -15008,6 +15228,12 @@ def _render_approval(st: Any) -> None:
                 str(st.session_state["catalog_change_notice"])
             )
         )
+    _render_approval_plan_context(
+        st,
+        result,
+        current_optimization,
+        child_labels,
+    )
     approval_cart_skus = tuple(
         dict.fromkeys(
             line.sku
@@ -15044,14 +15270,18 @@ def _render_approval(st: Any) -> None:
                 )
                 st.rerun()
     st.write(
-        "All required decisions are collected here. "
-        "The recommended choice is selected by default."
+        "Choose what to buy for each item below. The current recommendation "
+        "is selected until you change it."
     )
     selections: dict[str, ApprovalDisplayOption] = {}
 
     for index, presentation in enumerate(presentations):
         interrupt = presentation.interrupt
-        with st.container(border=True):
+        settled_decision = (
+            interrupt.interrupt_id in preserved_replan_ids
+            or interrupt.interrupt_id in selection_state.resolutions
+        )
+        with st.container(border=not settled_decision):
             st.subheader(
                 escape_streamlit_dollars(
                     f"{index + 1}. {presentation.heading}"
@@ -15304,6 +15534,7 @@ def _render_approval(st: Any) -> None:
                     ),
                 )
                 continue
+            st.markdown("**What the list asks for**")
             st.write(escape_streamlit_dollars(presentation.message))
             presentation = _reprice_approval_presentation(
                 presentation,
@@ -15315,10 +15546,19 @@ def _render_approval(st: Any) -> None:
                 offers,
                 stores,
             )
+            st.markdown("**Current recommendation**")
             st.info(
                 escape_streamlit_dollars(
-                    f"Recommendation: {presentation.recommendation}"
+                    presentation.recommendation
                 )
+            )
+            _render_approval_card_actions(
+                st,
+                generation,
+                presentation,
+            )
+            st.caption(
+                "Compare the stocked products and their prices below."
             )
             selections[interrupt.interrupt_id] = (
                 _render_contextual_approval_radio(
@@ -15354,10 +15594,19 @@ def _render_approval(st: Any) -> None:
             continue
         alternative = selections[interrupt.interrupt_id]
         outcomes[interrupt.interrupt_id] = alternative.alternative_id
+        if alternative.purchase_price_cents is not None:
+            outcome_detail = (
+                "Price for this item: "
+                f"{format_money(alternative.purchase_price_cents)}."
+            )
+        elif alternative.leaves_required_unmet:
+            outcome_detail = "No product will be purchased in this cart."
+        else:
+            outcome_detail = alternative.explanation or "Choice recorded."
         response_log.record_approval_response(
             (
-                f"{presentation.heading}: {alternative.label} "
-                f"({format_cost_delta(alternative.cost_delta_cents)})."
+                f"{presentation.heading}: {alternative.label}. "
+                f"{outcome_detail}"
             ),
             affected_lines=(
                 alternative.affected_lines or interrupt.affected_lines

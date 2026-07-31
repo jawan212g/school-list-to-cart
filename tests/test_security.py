@@ -309,8 +309,8 @@ def test_adversarial_lists_are_safe_through_full_pipeline(
         )
     )
     assert result.approval_batch.interrupts
-    assert any(
-        interrupt.kind == "low_confidence"
+    assert all(
+        interrupt.interrupt_id != "approval-low-confidence-extraction"
         for interrupt in _all_interrupts(result)
     )
     assert result.session.budget_total == 100

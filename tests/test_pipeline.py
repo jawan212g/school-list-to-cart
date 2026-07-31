@@ -404,8 +404,8 @@ def test_nonpurchasable_reminder_cannot_make_plan_incomplete() -> None:
     assert result.approval_flags == ()
 
 
-def test_pipeline_reports_required_item_with_no_equivalent() -> None:
-    """E-12: a missing required catalog category returns an approval flag."""
+def test_pipeline_reports_required_item_with_no_equivalent_as_a_gap() -> None:
+    """E-12: a missing catalog category stays visible without an interrupt."""
 
     def headphones_extractor(
         source: str,
@@ -456,11 +456,8 @@ def test_pipeline_reports_required_item_with_no_equivalent() -> None:
     )
 
     assert result.proposed_cart.gap_items == ("headphones",)
-    assert len(result.approval_flags) == 1
-    assert result.approval_flags[0].kind == "required_unavailable"
-    assert result.approval_flags[0].source_requirement_ids == (
-        "child-a:headphones",
-    )
+    assert result.proposed_cart.is_complete is False
+    assert result.approval_flags == ()
 
 
 def test_e33_one_failed_extraction_does_not_block_the_other_list() -> None:

@@ -5632,3 +5632,75 @@ changing matching or gate behavior.
 
 - Documentation-only clarification; no application behavior changed and no test
   suite was run for this entry.
+
+## 2026-07-31 — Shopping-decision boundary and approval context
+
+### Objective
+
+Keep the post-cart decision screen limited to choices about what to buy, make
+its prices understandable before Summary, and simplify unavailable-item handling
+for the prototype.
+
+### Decisions made
+
+- Retired `required_unavailable` as an FR-26 interrupt. A required item outside
+  the selected store and fulfillment scope remains an explicit incomplete-cart
+  gap under “Items to buy elsewhere,” but the parent is no longer asked to
+  change permitted stores or re-plan from the decision screen.
+- Moved low-confidence extraction out of the gate. Personalize already has the
+  source line, confidence-derived issue, and correction controls; only
+  low-confidence catalog matching remains a post-cart decision.
+- The five defined gate conditions are now budget exceeded, major substitution,
+  brand-lock break, attribute choice, and low-confidence catalog match. Four are
+  reachable through production today because FR-17 filters brand-lock-breaking
+  candidates before the gate can see them.
+
+### Work completed
+
+- Removed unavailable-item and extraction-interpretation interrupt generation.
+- Kept required gaps visible and incomplete without offering a decision.
+- Added current-plan context to Decisions to review: total cost, item count,
+  store count, and a separate items-to-buy-elsewhere block.
+- Catalog options now display their exact selected line price rather than a
+  cart delta. A source-it-yourself option says plainly that no product will be
+  purchased in this cart.
+- Low-confidence match decisions now expose their blocked catalog candidates
+  and exact prices instead of generic correction-only options.
+- Added Personalize-style card actions. Approving selects the recommendation;
+  changing returns to the source-backed Personalize item; already-owned uses
+  the existing Personalize transition and rebuilds from confirmed rows.
+- Pending decisions retain bordered-card weight; resolved decisions render as
+  quiet rows.
+
+### Source-text finding
+
+- The checked-in evidence contains `1 box | Ziploc quart gallon sized`. The
+  contradictory `quart gallon` wording is therefore present in the stored
+  source evidence. The spelling `zided` does not occur in the repository and
+  could not be verified from the deployed session state.
+
+### Files changed
+
+- `BRD.md`
+- `agent/gate.py`
+- `agent/pipeline.py`
+- `agent/approval_options.py`
+- `app.py`
+- `tests/test_gate.py`
+- `tests/test_pipeline.py`
+- `tests/test_maple_cart.py`
+- `tests/test_approval_options.py`
+- `tests/test_security.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused gate, pipeline, frozen Maple, approval presentation, app, and security
+  tests passed during implementation.
+- Full Windows ARM64 suite: 470 passed, 1 skipped. The skipped module is the
+  real Streamlit AppTest suite and runs on the x86 GitHub Actions workflow.
+
+### Remaining limitation
+
+- The brand-lock-break interrupt branch remains unreachable through production
+  matching and is unchanged in this pass.

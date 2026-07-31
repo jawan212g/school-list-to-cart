@@ -1,4 +1,4 @@
-"""Deterministic, batched approval gate for the six active FR-26 conditions."""
+"""Deterministic, batched approval gate for the five active FR-26 conditions."""
 
 from __future__ import annotations
 
@@ -37,7 +37,6 @@ InterruptKind = Literal[
     "brand_lock_break",
     "attribute_choice",
     "low_confidence",
-    "required_unavailable",
 ]
 
 BRAND_LOCK_REASON = "brand_lock_break"
@@ -81,7 +80,7 @@ class ApprovalBatch:
 
 @dataclass(frozen=True)
 class GateContext:
-    """Deterministic evidence required for the six active FR-26 conditions."""
+    """Deterministic evidence required for the five active FR-26 conditions."""
 
     optimization: OptimizationResult
     matches: MatchResult
@@ -415,58 +414,10 @@ def _line_interrupts(
     return interrupts
 
 
-def _extraction_interrupts(
-    context: GateContext,
-) -> list[ApprovalInterrupt]:
-    interrupts: list[ApprovalInterrupt] = []
-    requirement_ids_with_review = {
-        requirement.source.req_id
-        for requirement in context.normalization.manual_review_requirements
-    }
-    review_reasons = tuple(
-        reason
-        for extraction in context.extractions.values()
-        for reason in extraction.review_reasons
-    )
-    if review_reasons or requirement_ids_with_review:
-        interrupt_id = "approval-low-confidence-extraction"
-        detail = "; ".join(review_reasons) or (
-            "One or more required lines have low extraction confidence."
-        )
-        interrupts.append(
-            ApprovalInterrupt(
-                interrupt_id=interrupt_id,
-                kind="low_confidence",
-                message=detail,
-                recommendation=(
-                    "Review the source line before allowing it into the cart."
-                ),
-                alternatives=(
-                    ApprovalAlternative(
-                        alternative_id=f"{interrupt_id}-correct",
-                        label="Correct and recheck the requirement",
-                        cost_delta_cents=0,
-                    ),
-                    ApprovalAlternative(
-                        alternative_id=f"{interrupt_id}-exclude",
-                        label="Parent confirms the line should be excluded",
-                        cost_delta_cents=0,
-                    ),
-                ),
-                cost_impact_cents=0,
-                source_requirement_ids=tuple(
-                    sorted(requirement_ids_with_review)
-                ),
-            )
-        )
-    return interrupts
-
-
 def _need_interrupts(
     context: GateContext,
 ) -> list[ApprovalInterrupt]:
     interrupts: list[ApprovalInterrupt] = []
-    gap_labels = frozenset(context.optimization.unfulfilled_gap_items)
     for need_matches in context.matches.needs:
         need = need_matches.unit_need
         if need_matches.requires_confidence_review:
@@ -502,46 +453,6 @@ def _need_interrupts(
                 )
             )
             continue
-        unavailable = (
-            need.is_required
-            and (
-                need_matches.unfulfillable
-                or need.label in gap_labels
-            )
-        )
-        if unavailable:
-            interrupt_id = (
-                "approval-unavailable-"
-                + "-".join(need.source_requirement_ids)
-            )
-            interrupts.append(
-                ApprovalInterrupt(
-                    interrupt_id=interrupt_id,
-                    kind="required_unavailable",
-                    message=(
-                        f"Required item {need.label} is unavailable at every "
-                        "permitted store."
-                    ),
-                    recommendation=(
-                        "Expand the permitted stores or correct the requirement; "
-                        "do not remove it automatically."
-                    ),
-                    alternatives=(
-                        ApprovalAlternative(
-                            alternative_id=f"{interrupt_id}-stores",
-                            label="Change the permitted stores and re-plan",
-                            cost_delta_cents=0,
-                        ),
-                        ApprovalAlternative(
-                            alternative_id=f"{interrupt_id}-omit",
-                            label="Parent chooses to omit the required item",
-                            cost_delta_cents=0,
-                        ),
-                    ),
-                    cost_impact_cents=0,
-                    source_requirement_ids=need.source_requirement_ids,
-                )
-            )
     return interrupts
 
 
@@ -656,7 +567,7 @@ def evaluate_gate(
     *,
     decision_log: DecisionLog | None = None,
 ) -> ApprovalBatch:
-    """Return all six active FR-26 conditions in one batch (FR-27–FR-29)."""
+    """Return all five active FR-26 conditions in one batch (FR-27–FR-29)."""
 
     if REQUIRED_ITEM_AUTO_DROP_ALLOWED:
         raise RuntimeError("BR-04 must prohibit automatic required-item removal")
@@ -666,7 +577,6 @@ def evaluate_gate(
     if budget is not None:
         raw.append(budget)
     raw.extend(_line_interrupts(context))
-    raw.extend(_extraction_interrupts(context))
     raw.extend(_need_interrupts(context))
     raw = _deduplicate(raw)
     raw_count = len(raw)

@@ -233,7 +233,7 @@ Requirements are numbered FR-## and are individually testable. Business rules ca
 
 ### 9.5 Approval gate
 
-The proposal named three interrupt conditions. Six are active here; the three additions are marked. The former returnability interrupt was retired with BR-08 because simulated checkout does not benefit from it.
+The proposal named three interrupt conditions. Five are active here; the former returnability interrupt was retired with BR-08 because simulated checkout does not benefit from it. Required items unavailable at the permitted stores are shown as items to buy elsewhere rather than as parent decisions. Low-confidence extraction is resolved during Personalize, beside its source evidence; only low-confidence catalog matching reaches this gate.
 
 1.  Total cost exceeds budget.
 
@@ -243,11 +243,9 @@ The proposal named three interrupt conditions. Six are active here; the three ad
 
 4.  Preference-dependent attribute choice: color, character, or style.
 
-5.  New. Low-confidence extraction or match (BR-11).
+5.  New. Low-confidence catalog match (BR-11).
 
-6.  New. Required item unavailable at any permitted store.
-
-- **FR-26** The six active conditions above are the complete set of interrupt triggers.
+- **FR-26** The five active conditions above are the complete set of interrupt triggers. Required-unavailable items remain visibly unmet and are listed under items to buy elsewhere, but they do not ask the parent to change store scope or re-plan.
 
 - **FR-27** Batch all interrupts onto one approval screen. Do not ask serially. An agent that interrupts fourteen times has not saved anyone an evening (BR-10).
 

@@ -341,10 +341,10 @@ def test_frozen_gate_condition_5_low_confidence_still_fires(
     ) == ("low_confidence",)
 
 
-def test_frozen_gate_condition_6_required_unavailable_still_fires(
+def test_frozen_required_unavailable_is_visible_without_an_interrupt(
     frozen_maple_fixture: Any,
 ) -> None:
-    """FR-26: pickup-only makes delivery-only headphones unavailable."""
+    """E-12: pickup-only leaves headphones visibly unavailable."""
 
     result = _run_maple(
         frozen_maple_fixture.extractions,
@@ -353,9 +353,9 @@ def test_frozen_gate_condition_6_required_unavailable_still_fires(
         fulfillment="pickup",
     )
 
-    assert tuple(
-        interrupt.kind for interrupt in result.approval_batch.interrupts
-    ) == ("required_unavailable",)
+    assert result.approval_batch.interrupts == ()
+    assert "headphones" in result.proposed_cart.gap_items
+    assert result.proposed_cart.is_complete is False
 
 
 def test_frozen_retired_br08_remains_inactive(
@@ -376,7 +376,7 @@ def test_frozen_retired_br08_remains_inactive(
     assert result.approval_batch.interrupts == ()
 
 
-def test_frozen_brand_lock_stockout_reports_unavailable_not_break(
+def test_frozen_brand_lock_stockout_stays_unavailable_not_a_decision(
     frozen_maple_fixture: Any,
 ) -> None:
     """Document the current FR-17/FR-26 reachability gap without fixing it."""
@@ -394,12 +394,8 @@ def test_frozen_brand_lock_stockout_reports_unavailable_not_break(
         offers=changed_offers,
     )
 
-    assert tuple(
-        interrupt.kind for interrupt in result.approval_batch.interrupts
-    ) == ("required_unavailable",)
-    assert "pencils (Ticonderoga)" in (
-        result.approval_batch.interrupts[0].message
-    )
+    assert result.approval_batch.interrupts == ()
+    assert "pencils (Ticonderoga)" in result.proposed_cart.gap_items
     assert all(
         interrupt.kind != "brand_lock_break"
         for interrupt in result.approval_batch.interrupts

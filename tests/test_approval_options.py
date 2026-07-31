@@ -31,6 +31,8 @@ from agent.optimize import (
     optimize_cart,
 )
 from agent.pipeline import PipelineResult, PipelineSession
+from agent.review import organize_extractions
+from agent.schema import ExtractionEnvelope, Requirement
 from data.loader import Offer, Store
 
 
@@ -289,16 +291,14 @@ def test_no_exact_match_keeps_catalog_choices_and_self_source_last(
     assert len(presentation.options) == 3
     assert current_offer.title in presentation.options[0].label
     assert alternative_offer.title in presentation.options[1].label
-    assert presentation.options[1].explanation is not None
-    assert presentation.options[1].explanation == (
-        f"Adds {app.format_money(alternative_offer.pack_price - current_offer.pack_price)} "
-        "to total "
-        f"({app.format_money(alternative_offer.pack_price - current_offer.pack_price)} item)"
+    assert presentation.options[0].purchase_price_cents == (
+        current_offer.pack_price
     )
-    assert presentation.options[-1].label == (
-        "Do not buy this — I will source it myself "
-        f"(leaves required {presentation.item_name.lower()} unmet)"
+    assert presentation.options[1].purchase_price_cents == (
+        alternative_offer.pack_price
     )
+    assert presentation.options[1].explanation is None
+    assert presentation.options[-1].label == "Source this item myself"
     assert presentation.options[-1].leaves_required_unmet is True
     assert "source it myself" not in presentation.recommendation
     assert all(
@@ -310,8 +310,64 @@ def test_no_exact_match_keeps_catalog_choices_and_self_source_last(
     )
 
 
-def test_substitution_removal_keeps_gate_delta_and_explains_delivery_threshold() -> None:
-    """FR-28: shared headphones show both children and the $31.01 rationale."""
+def test_approval_owned_action_reuses_personalize_and_rebuilds() -> None:
+    """FR-12: the approval card's owned action is the Personalize action."""
+
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="headphones",
+                child_id="grade2",
+                raw_text="1 pair of headphones",
+                canonical_item="headphones",
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+    member = organize_extractions({"grade2": envelope})[0].model_copy(
+        update={"review_status": "confirmed"}
+    )
+    interrupt = ApprovalInterrupt(
+        interrupt_id="approval-headphones",
+        kind="major_substitution",
+        message="Choose headphones",
+        recommendation="Use the proposed headphones",
+        alternatives=(),
+        cost_impact_cents=0,
+        source_requirement_ids=("headphones",),
+    )
+    presentation = app.ApprovalDisplayDecision(
+        interrupt=interrupt,
+        item_name="Headphones",
+        heading="Headphones — choose what to buy",
+        message="The list asks for headphones.",
+        recommendation="Use the proposed headphones.",
+        affected_children=("Grade 2",),
+        options=(),
+    )
+    state: dict[str, object] = {
+        "review_items": (member,),
+        "parent_added_review_items": (),
+        "extracted_lists": {"grade2": envelope},
+        "result": object(),
+        "approval_outcomes": {"old": "choice"},
+        "parent_decisions": (object(),),
+    }
+
+    members = app._approval_review_members(state, presentation)
+    assert members == (member,)
+    app._approval_mark_owned_and_rebuild(state, presentation, members)
+
+    assert state["review_items"][0].already_owned is True
+    assert state["extracted_lists"]["grade2"].requirements == ()
+    assert state["result"] is None
+    assert state["approval_outcomes"] == {}
+    assert state["screen"] == "working"
+
+
+def test_substitution_removal_keeps_internal_delta_but_shows_no_purchase() -> None:
+    """FR-28: internal repricing stays exact while the parent sees no purchase."""
 
     store = _store(
         "CLOUD",
@@ -414,14 +470,11 @@ def test_substitution_removal_keeps_gate_delta_and_explains_delivery_threshold()
     assert tuple(
         option.cost_delta_cents for option in presentation.options
     ) == (0, -3_101)
-    assert presentation.options[1].label == (
-        "Do not buy this — I will source it myself "
-        "(leaves required headphones unmet)"
-    )
+    assert presentation.options[1].label == "Source this item myself"
+    assert presentation.options[1].purchase_price_cents is None
     assert presentation.options[1].explanation == (
-        "No other stocked catalog match is available. This saves the item "
-        "and its tax, but Supply Cloud's $7.49 delivery fee returns because "
-        "the remaining item subtotal falls below $49.00."
+        "No other stocked catalog match is available. No product will be "
+        "purchased for this item in this cart."
     )
     visible_text = " ".join(
         (
@@ -486,7 +539,7 @@ def test_substitution_removal_keeps_gate_delta_and_explains_delivery_threshold()
         affected_lines=presentation.interrupt.affected_lines,
     )
     assert decision_log.entries[0].actor == "parent"
-    assert "source it myself" in decision_log.entries[0].rationale
+    assert "Source this item myself" in decision_log.entries[0].rationale
 
 
 def test_radio_option_uses_escaped_label_and_attached_caption() -> None:
@@ -496,19 +549,14 @@ def test_radio_option_uses_escaped_label_and_attached_caption() -> None:
         alternative_id="binder-two",
         label="Choose Avery 2-Inch Binder — Value Depot",
         cost_delta_cents=300,
-        explanation="Adds $3.00 to total ($2.80 item, $0.20 tax)",
+        purchase_price_cents=520,
     )
 
     label = app.approval_option_label(option)
     caption = app.approval_option_caption(option)
 
-    assert label == (
-        "Choose Avery 2-Inch Binder — Value Depot "
-        "(adds \\$3.00)"
-    )
-    assert caption == (
-        "Adds \\$3.00 to total (\\$2.80 item, \\$0.20 tax)"
-    )
+    assert label == "Choose Avery 2-Inch Binder — Value Depot — \\$5.20"
+    assert caption == "Alternative."
     assert "$" not in (label + caption).replace("\\$", "")
 
 
@@ -651,7 +699,7 @@ def test_budget_interrupt_has_ranked_item_choices_and_applies_selection() -> Non
     )
     assert cheaper.cost_delta_cents == -200
     assert cheaper.source_requirement_ids == ("grade5:pens",)
-    assert "saves \\$2.00" in app.approval_option_label(cheaper)
+    assert app.approval_option_label(cheaper).endswith("\\$3.00")
 
     self_source = next(
         option
@@ -833,7 +881,6 @@ def test_raise_budget_choice_funds_cart_and_clears_shortfall() -> None:
         "brand_lock_break",
         "attribute_choice",
         "low_confidence",
-        "required_unavailable",
     ),
 )
 def test_each_non_budget_interrupt_marks_one_safe_recommendation(

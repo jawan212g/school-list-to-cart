@@ -29,6 +29,7 @@ class CatalogApprovalChoice:
 
     sku: str
     store_id: str
+    purchase_price_cents: int
     cost_delta_cents: int
     is_current: bool
     item_subtotal_delta_cents: int
@@ -112,6 +113,19 @@ def _line_for_interrupt(
     )
 
 
+def _purchase_price_for_need(
+    optimization: OptimizationResult,
+    source_requirement_ids: tuple[str, ...],
+) -> int:
+    """Return the exact selected line cost for one approval choice."""
+
+    return sum(
+        line.line_cost
+        for line in _selected_lines(optimization)
+        if line.source_requirement_ids == source_requirement_ids
+    )
+
+
 def _offer_within_overage_ceiling(
     unit_need: UnitNeed,
     offer: Offer,
@@ -144,22 +158,30 @@ def build_catalog_approval_choices(
     """Price every stocked matched product for one line decision (FR-28)."""
 
     line = _line_for_interrupt(interrupt, optimization)
-    if line is None:
-        return ()
+    source_requirement_ids = (
+        line.source_requirement_ids
+        if line is not None
+        else interrupt.source_requirement_ids
+    )
     need_matches = next(
         (
             item
             for item in matches.needs
             if item.unit_need.source_requirement_ids
-            == line.source_requirement_ids
+            == source_requirement_ids
         ),
         None,
     )
     if need_matches is None:
         return ()
+    candidate_pool = (
+        need_matches.candidates
+        if line is not None
+        else need_matches.review_blocked_candidates
+    )
     compliant_skus = frozenset(
         candidate.offer.sku
-        for candidate in need_matches.candidates
+        for candidate in candidate_pool
         if _offer_within_overage_ceiling(
             need_matches.unit_need,
             candidate.offer,
@@ -174,16 +196,16 @@ def build_catalog_approval_choices(
         frozenset[str],
     ] = matches.candidate_skus_by_need
     choices: list[CatalogApprovalChoice] = []
-    for candidate in need_matches.candidates:
+    for candidate in candidate_pool:
         offer = candidate.offer
         if compliant_skus and offer.sku not in compliant_skus:
             continue
-        is_current = offer.sku == line.sku
+        is_current = line is not None and offer.sku == line.sku
         if is_current:
             alternative = optimization
         else:
             forced_candidates = dict(baseline_candidates)
-            forced_candidates[line.source_requirement_ids] = frozenset(
+            forced_candidates[source_requirement_ids] = frozenset(
                 {offer.sku}
             )
             alternative = optimize_cart(
@@ -200,6 +222,10 @@ def build_catalog_approval_choices(
             CatalogApprovalChoice(
                 sku=offer.sku,
                 store_id=offer.store_id,
+                purchase_price_cents=_purchase_price_for_need(
+                    alternative,
+                    source_requirement_ids,
+                ),
                 cost_delta_cents=(
                     alternative.landed_cost - optimization.landed_cost
                 ),

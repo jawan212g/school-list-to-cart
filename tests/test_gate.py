@@ -1,4 +1,4 @@
-"""Exact, model-free tests for every FR-26 approval condition."""
+"""Exact, model-free tests for every active FR-26 approval condition."""
 
 from collections.abc import Sequence
 
@@ -21,6 +21,7 @@ from agent.optimize import (
     StoreOrder,
 )
 from data.loader import Offer, Store
+from agent.schema import ExtractionEnvelope
 
 
 class AmbiguousJudge:
@@ -386,6 +387,36 @@ def test_condition_5_ambiguous_sub_07_match_routes_to_review_once() -> None:
     need = _need(
         attributes={"other_details": "ambiguous classroom item"}
     )
+
+
+def test_low_confidence_extraction_stays_in_personalize_not_gate() -> None:
+    """FR-12/FR-26: source-reading uncertainty is not re-asked at checkout."""
+
+    offer = _offer()
+    need = _need()
+    context = _context(
+        need,
+        offer,
+        _candidate(need, offer),
+        _optimization(offer),
+    )
+    context = GateContext(
+        optimization=context.optimization,
+        matches=context.matches,
+        normalization=context.normalization,
+        extractions={
+            "child": ExtractionEnvelope(
+                requirements=(),
+                manual_review_required=True,
+                review_reasons=("The source line may be unclear.",),
+            )
+        },
+        offers=context.offers,
+        stores=context.stores,
+        tax_basis_points=context.tax_basis_points,
+    )
+
+    assert evaluate_gate(context).interrupts == ()
     matches = match_offers(
         [need],
         [offer],
@@ -412,10 +443,10 @@ def test_condition_5_ambiguous_sub_07_match_routes_to_review_once() -> None:
     )
 
 
-def test_condition_6_required_item_unavailable_fires_once() -> None:
+def test_required_item_unavailable_stays_outside_the_decision_gate() -> None:
     offer = _offer()
     need = _need()
-    _assert_one(
+    batch = evaluate_gate(
         _context(
             need,
             offer,
@@ -425,10 +456,10 @@ def test_condition_6_required_item_unavailable_fires_once() -> None:
                 gap_items=(need.label,),
                 include_line=False,
             ),
-        ),
-        "required_unavailable",
-        (0, 0),
+        )
     )
+
+    assert batch.interrupts == ()
 
 
 def test_clean_cart_has_zero_interrupts() -> None:
@@ -473,11 +504,13 @@ def test_more_than_six_interrupts_are_grouped_by_type() -> None:
             ),
             matches=MatchResult(
                 needs=tuple(
-                    NeedMatches(
-                        unit_need=need,
-                        candidates=(),
-                        review_blocked_candidates=(),
-                    )
+                        NeedMatches(
+                            unit_need=need,
+                            candidates=(),
+                            review_blocked_candidates=(
+                                _candidate(need, offer, confidence=0.65),
+                            ),
+                        )
                     for need in needs
                 )
             ),
@@ -492,7 +525,7 @@ def test_more_than_six_interrupts_are_grouped_by_type() -> None:
     assert len(batch.interrupts) == 2
     assert [interrupt.kind for interrupt in batch.interrupts] == [
         "budget_exceeded",
-        "required_unavailable",
+        "low_confidence",
     ]
     assert batch.interrupts[0].cost_impact_cents == 125
     assert len(batch.interrupts[1].grouped_interrupts) == 7

@@ -75,7 +75,6 @@ ApprovalKind = Literal[
     "major_substitution",
     "attribute_choice",
     "low_confidence",
-    "required_unavailable",
 ]
 
 
@@ -311,7 +310,6 @@ def _legacy_approval_kind(kind: InterruptKind) -> ApprovalKind:
         "brand_lock_break": "major_substitution",
         "attribute_choice": "attribute_choice",
         "low_confidence": "low_confidence",
-        "required_unavailable": "required_unavailable",
     }[kind]  # type: ignore[return-value]
 
 
