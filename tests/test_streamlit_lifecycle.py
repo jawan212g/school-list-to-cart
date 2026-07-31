@@ -176,8 +176,10 @@ st.session_state["requirement_merge_result"] = None
 st.session_state["requirement_merge_resolved"] = True
 st.session_state["list_identity_confirmed"] = True
 st.session_state["organized_list_confirmed"] = True
-st.session_state.setdefault("result", None)
-st.session_state.setdefault("screen", "working")
+if not st.session_state.get("test_retry_route_initialized", False):
+    st.session_state["result"] = None
+    st.session_state["screen"] = "working"
+    st.session_state["test_retry_route_initialized"] = True
 app.main()
 """
     )

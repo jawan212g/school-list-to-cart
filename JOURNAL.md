@@ -5578,8 +5578,14 @@ changing matching or gate behavior.
 - Corrected the AppTest setup to construct its deterministic completed result
   once in session state and to preserve the production `result` and `screen`
   transitions across reruns. The timeout remains three seconds.
+- The next x86 run exposed that `setdefault("screen", "working")` could not
+  override `_initialize_state()`'s first-screen default. The test now enters
+  Working exactly once under an initialization marker, then leaves subsequent
+  navigation entirely to production.
 
 ### Testing performed
 
 - First x86 evidence: run `30658498286`, one AppTest timeout failure.
+- Second x86 evidence: run `30658924071`, the test remained on Intake and never
+  invoked the cart attempt.
 - Full Windows ARM64 suite after the fixture correction: 469 passed, 1 skipped.
