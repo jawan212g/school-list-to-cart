@@ -1392,6 +1392,7 @@ def test_unresolved_open_student_button_survives_a_view_round_trip() -> None:
             and "unresolved-student" in str(button.key)
         )
     )
+    first_unresolved_key = unresolved_open.key
     unresolved_open.click().run()
     _assert_no_exception(test_app)
 
@@ -1404,6 +1405,15 @@ def test_unresolved_open_student_button_survives_a_view_round_trip() -> None:
     _assert_no_exception(test_app)
     _click_label(test_app, "Use these choices and build my shopping plan")
     _assert_no_exception(test_app)
+    reopened_unresolved = next(
+        button
+        for button in test_app.button
+        if (
+            button.label == "Open Mr. G"
+            and "unresolved-student" in str(button.key)
+        )
+    )
+    assert reopened_unresolved.key != first_unresolved_key
 
 
 def test_personalize_remove_action_uses_distinct_removed_group() -> None:
