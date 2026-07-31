@@ -5963,3 +5963,7 @@ low-confidence catalog-match decision remains.
   it supplied a nonexistent `Requirement.brand` field. Production stores that
   source-derived value in `brand_hint`; the fixture now uses the real schema
   field rather than weakening validation.
+- The second x86 run showed that glue sticks and sticky notes correctly render
+  as decision-card headings, while pencils render as a settled-row expander.
+  The browser test now reads each item from the production surface where it is
+  actually displayed instead of assuming every item is an expander.

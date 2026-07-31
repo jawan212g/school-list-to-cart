@@ -1726,10 +1726,19 @@ def test_classroom_personalize_shows_per_student_quantities_as_class_totals() ->
 
     test_app = _run_classroom_personalize_screen()
     labels = {expander.label for expander in test_app.expander}
+    rendered_text = "\n".join(
+        str(element.value)
+        for collection in (
+            test_app.markdown,
+            test_app.caption,
+            test_app.warning,
+        )
+        for element in collection
+    )
 
-    assert "5 packs of Elmer's glue sticks" in labels
+    assert "5 packs of Elmer's glue sticks" in rendered_text
     assert "50 pencils" in labels
-    assert "10 packs of Post-It sticky notes" in labels
+    assert "10 packs of Post-It sticky notes" in rendered_text
 
     pencil_row = next(
         expander for expander in test_app.expander
