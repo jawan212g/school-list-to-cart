@@ -1721,39 +1721,6 @@ def test_personalize_item_expanders_and_controls_keep_independent_state() -> Non
     assert pencils_expander.proto.expanded is True
 
 
-def test_classroom_personalize_shows_per_student_quantities_as_class_totals() -> None:
-    """BR-33: the real Personalize screen shows five-student totals."""
-
-    test_app = _run_classroom_personalize_screen()
-    labels = {expander.label for expander in test_app.expander}
-    rendered_text = "\n".join(
-        str(element.value)
-        for collection in (
-            test_app.markdown,
-            test_app.caption,
-            test_app.warning,
-        )
-        for element in collection
-    )
-
-    assert "5 packs of 4 glue sticks" in rendered_text
-    assert "50 pencils" in labels
-    assert "10 packs of 3 sticky notes" in rendered_text
-
-    pencil_row = next(
-        expander for expander in test_app.expander
-        if expander.label == "50 pencils"
-    )
-    quantity = next(
-        widget for widget in pencil_row.number_input
-        if widget.label == "Quantity for each student"
-    )
-    assert quantity.value == 10
-    assert any(
-        "Class total: 50 (10 for each student x 5 students)." in caption.value
-        for caption in pencil_row.caption
-    )
-
     test_app.number_input(key=pencils_quantity.key).set_value(24).run()
     _assert_no_exception(test_app)
     test_app.session_state[erasers_expander_key] = True
@@ -1801,6 +1768,40 @@ def test_classroom_personalize_shows_per_student_quantities_as_class_totals() ->
     assert erasers_expander.proto.expanded is True
     assert test_app.number_input(key=pencils_quantity.key).value == 24
     assert test_app.number_input(key=erasers_quantity.key).value == 5
+
+
+def test_classroom_personalize_shows_per_student_quantities_as_class_totals() -> None:
+    """BR-33: the real Personalize screen shows five-student totals."""
+
+    test_app = _run_classroom_personalize_screen()
+    labels = {expander.label for expander in test_app.expander}
+    rendered_text = "\n".join(
+        str(element.value)
+        for collection in (
+            test_app.markdown,
+            test_app.caption,
+            test_app.warning,
+        )
+        for element in collection
+    )
+
+    assert "5 packs of 4 glue sticks" in rendered_text
+    assert "50 pencils" in labels
+    assert "10 packs of 3 sticky notes" in rendered_text
+
+    pencil_row = next(
+        expander for expander in test_app.expander
+        if expander.label == "50 pencils"
+    )
+    quantity = next(
+        widget for widget in pencil_row.number_input
+        if widget.label == "Quantity for each student"
+    )
+    assert quantity.value == 10
+    assert any(
+        "Class total: 50 (10 for each student x 5 students)." in caption.value
+        for caption in pencil_row.caption
+    )
 
 
 def test_personalize_optional_item_can_return_to_cart() -> None:

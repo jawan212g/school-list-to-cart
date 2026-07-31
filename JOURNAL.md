@@ -5971,3 +5971,8 @@ low-confidence catalog-match decision remains.
   `5 packs of 4 glue sticks` and `10 packs of 3 sticky notes`. The regression
   now asserts those production phrases rather than incorrectly expecting the
   brand name where the formatter displays package contents.
+- The following run exposed that the new test had been inserted before the
+  prior expander-independence test finished, so its remaining actions executed
+  inside the new test with out-of-scope variables. The test is now a separate
+  function after the complete pre-existing test; no application behavior was
+  changed to address that test-authoring error.
