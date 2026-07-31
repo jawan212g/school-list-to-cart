@@ -4710,15 +4710,30 @@ unavailable. Each gate branch produces exactly its named interrupt. A seventh
 test proves the former non-returnable condition remains intentionally inactive
 under retired BR-08, including for the $35.98 non-returnable headphones.
 
-The producer audit found one real reachability gap: `match_offers()` filters
-every offer whose brand differs from a locked brand before substitution
+### Named finding — fifth defined-but-unconsumed mechanism
+
+The `brand_lock_break` approval path is the fifth mechanism found to be defined
+but unconsumed, after BR-34's closest-package preference, BR-32's empty
+ambiguous-descriptor list, `brand_hint`, and Parent note. `match_offers()`
+filters every offer whose brand differs from a locked brand before substitution
 classification. The pipeline therefore reports a required locked-brand item as
 unavailable when its exact brand is absent; it cannot currently emit
 `brand_lock_break`. The frozen near-variant proves the gate consumer still
-handles such evidence, but it does not prove the current matcher can produce
-it. This pass records the defect and does not loosen the brand filter or change
-the intended approval behavior without a separate reconciliation of FR-17 and
-FR-26.
+handles such evidence, while a production-path test records that removing all
+Ticonderoga stock produces `required_unavailable` instead.
+
+This is also the second unconsumed brand mechanism. A preferred `brand_hint` is
+dropped before `UnitNeed` and has no effect on matching, while a required
+`brand_lock` acts only as a hard filter and can never become the parent question
+specified by FR-26. Brand handling therefore filters required brands but does
+not currently express either preferred-brand ranking or approval of a
+locked-brand alternative.
+
+Future correction must reconcile FR-17 with FR-26: keep wrong-brand offers out
+of automatic optimization, but retain suitable ones as approval-only
+alternatives when no exact locked-brand offer is available. This pass documents
+the gap and adds its regression test; it does not loosen the brand filter,
+change matching, or make the gate reachable by new behavior.
 
 The smallest operational demo variation is a stockout of
 `VD-GLU-VB-006`, the exact large Value Basics glue-stick package. Replanning

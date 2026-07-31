@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from itertools import combinations
 from types import SimpleNamespace
@@ -21,7 +21,7 @@ from agent.pipeline import (
     run_pipeline_from_confirmed_extractions,
 )
 from agent.schema import ExtractionEnvelope
-from data.loader import load_catalog, load_stores
+from data.loader import Offer, load_catalog, load_stores
 
 
 def _run_maple(
@@ -33,6 +33,7 @@ def _run_maple(
     fulfillment: str = "either",
     allowed_stores: frozenset[str] | None = None,
     max_stores: int | None = None,
+    offers: Sequence[Offer] | None = None,
 ) -> PipelineResult:
     """Run the same confirmed-input pipeline used after Personalize."""
 
@@ -53,7 +54,7 @@ def _run_maple(
         ),
         extractions,
         stores=tuple(load_stores()),
-        offers=tuple(load_catalog()),
+        offers=tuple(load_catalog() if offers is None else offers),
         suitability_judge=judge,
     )
 
@@ -373,6 +374,36 @@ def test_frozen_retired_br08_remains_inactive(
     assert headphones.is_returnable is False
     assert headphones.pack_price > 1_500
     assert result.approval_batch.interrupts == ()
+
+
+def test_frozen_brand_lock_stockout_reports_unavailable_not_break(
+    frozen_maple_fixture: Any,
+) -> None:
+    """Document the current FR-17/FR-26 reachability gap without fixing it."""
+
+    changed_offers = tuple(
+        replace(offer, stock_qty=0)
+        if offer.brand.casefold() == "ticonderoga"
+        else offer
+        for offer in load_catalog()
+    )
+    result = _run_maple(
+        frozen_maple_fixture.extractions,
+        frozen_maple_fixture.judge,
+        budget_cents=15_000,
+        offers=changed_offers,
+    )
+
+    assert tuple(
+        interrupt.kind for interrupt in result.approval_batch.interrupts
+    ) == ("required_unavailable",)
+    assert "pencils (Ticonderoga)" in (
+        result.approval_batch.interrupts[0].message
+    )
+    assert all(
+        interrupt.kind != "brand_lock_break"
+        for interrupt in result.approval_batch.interrupts
+    )
 
 
 def test_frozen_maple_single_stop_second_trip_is_not_unavailable(
