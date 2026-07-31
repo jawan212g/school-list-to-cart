@@ -1,4 +1,4 @@
-"""Presentation-option tests that leave the seven-condition gate unchanged."""
+"""Presentation-option tests for the active approval gate."""
 
 from dataclasses import replace
 
@@ -310,7 +310,7 @@ def test_no_exact_match_keeps_catalog_choices_and_self_source_last(
     )
 
 
-def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -> None:
+def test_substitution_removal_keeps_gate_delta_and_explains_delivery_threshold() -> None:
     """FR-28: shared headphones show both children and the $31.01 rationale."""
 
     store = _store(
@@ -324,7 +324,7 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
         "headphones",
         2,
         {"grade2": 1, "grade5": 1},
-        {},
+        {"connector": "usb"},
         "shared:headphones",
     )
     pencils = _need(
@@ -342,6 +342,7 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
         1,
         1_799,
         is_returnable=False,
+        attributes={"connector": "3.5 mm"},
     )
     pencil_offer = _offer(
         "CLOUD-PENCILS",
@@ -368,7 +369,7 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
     interrupt = next(
         item
         for item in batch.interrupts
-        if item.kind == "non_returnable_threshold"
+        if item.kind == "major_substitution"
     )
     removal = next(
         option
@@ -408,9 +409,7 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
         {"grade2": "Grade 2", "grade5": "Grade 5"},
     )[0]
 
-    assert presentation.heading == (
-        "Headphones — non-returnable, over $15.00"
-    )
+    assert presentation.heading == "Headphones — choose an acceptable connector"
     assert presentation.affected_children == ("Grade 2", "Grade 5")
     assert tuple(
         option.cost_delta_cents for option in presentation.options
@@ -434,7 +433,7 @@ def test_headphones_removal_keeps_gate_delta_and_explains_delivery_threshold() -
     )
     assert "CLOUD-HEADPHONES" not in visible_text
     assert "3598 cents" not in visible_text
-    assert "non_returnable_threshold" not in visible_text
+    assert "major_substitution" not in visible_text
 
     outcomes = {
         presentation.interrupt.interrupt_id: (
@@ -833,7 +832,6 @@ def test_raise_budget_choice_funds_cart_and_clears_shortfall() -> None:
         "major_substitution",
         "brand_lock_break",
         "attribute_choice",
-        "non_returnable_threshold",
         "low_confidence",
         "required_unavailable",
     ),
@@ -949,7 +947,7 @@ def test_budget_omission_resolves_and_reactivates_headphones_interrupt() -> None
             "headphones",
             1,
             {"grade2": 1},
-            {},
+            {"connector": "usb"},
             "grade2:headphones",
         ),
         _need(
@@ -969,6 +967,7 @@ def test_budget_omission_resolves_and_reactivates_headphones_interrupt() -> None
             1,
             2_000,
             is_returnable=False,
+            attributes={"connector": "3.5 mm"},
         ),
         _offer(
             "PENCILS",
@@ -1025,7 +1024,7 @@ def test_budget_omission_resolves_and_reactivates_headphones_interrupt() -> None
     headphones = next(
         presentation
         for presentation in presentations
-        if presentation.interrupt.kind == "non_returnable_threshold"
+        if presentation.interrupt.kind == "major_substitution"
     )
     keep = next(
         option for option in headphones.options if option.is_recommended

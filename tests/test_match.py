@@ -276,8 +276,30 @@ def test_unknown_catalog_attribute_becomes_line_note_not_approval() -> None:
     assert candidate.requires_approval is False
 
 
-def test_approval_free_candidate_is_preferred_to_cheaper_major_candidate() -> None:
-    """BR-10: avoid an interrupt when an approval-free equivalent exists."""
+def test_numeric_catalog_dimension_matches_normalized_source_dimension() -> None:
+    """FR-19/BR-13: approximate prose and numeric inches are one value."""
+
+    need = _need("pencil_boxes", attributes={"size": "8 inch"})
+    candidate = match_offers(
+        [need],
+        [
+            _offer(
+                "BOX-8",
+                "S",
+                "pencil_boxes",
+                attributes={"length_inches": 8},
+            )
+        ],
+        [_store("S", 1.0)],
+    ).needs[0].candidates[0]
+
+    assert candidate.attribute_status == "exact"
+    assert "attribute_change:size" not in candidate.substitution_reasons
+    assert candidate.requires_approval is False
+
+
+def test_retired_br08_does_not_filter_non_returnable_offer() -> None:
+    """BR-08: legacy returnability data has no matching effect."""
 
     need = _need("tissues")
     returnable = _offer("RETURNABLE", "S", "tissues")
@@ -298,8 +320,12 @@ def test_approval_free_candidate_is_preferred_to_cheaper_major_candidate() -> No
     )
 
     assert matches.candidate_skus_by_need == {
-        ("req-1",): frozenset({"RETURNABLE"})
+        ("req-1",): frozenset({"RETURNABLE", "NON-RETURNABLE"})
     }
+    assert all(
+        not candidate.requires_approval
+        for candidate in matches.needs[0].candidates
+    )
 
 
 def test_br11_below_floor_match_is_blocked_for_review() -> None:

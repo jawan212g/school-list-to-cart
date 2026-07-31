@@ -21,6 +21,47 @@ from agent.rules import (
 from agent.schema import AttributeValue, Requirement, UnitType
 
 
+ATTRIBUTE_APPROXIMATION_WORDS = frozenset({"about", "approx", "approximately"})
+ATTRIBUTE_UNIT_ALIASES = {
+    "in": "inch",
+    "inch": "inch",
+    "inches": "inch",
+    "oz": "ounce",
+    "ounce": "ounce",
+    "ounces": "ounce",
+}
+
+
+def _normalize_attribute_text(value: str) -> str:
+    """Canonicalize extracted attribute text before identity is frozen (BR-13)."""
+
+    words = re.findall(r"#?\d+(?:\.\d+)?|[a-z0-9]+", value.casefold())
+    normalized = [
+        ATTRIBUTE_UNIT_ALIASES.get(word, word)
+        for word in words
+        if word not in ATTRIBUTE_APPROXIMATION_WORDS
+    ]
+    return " ".join(normalized)
+
+
+def normalize_attribute_values(
+    attributes: Mapping[str, AttributeValue],
+) -> dict[str, AttributeValue]:
+    """Return stable attribute spellings without changing numeric values (BR-13)."""
+
+    normalized: dict[str, AttributeValue] = {}
+    for field_name, value in attributes.items():
+        if isinstance(value, str):
+            normalized[field_name] = _normalize_attribute_text(value)
+        elif isinstance(value, tuple):
+            normalized[field_name] = tuple(
+                _normalize_attribute_text(item) for item in value
+            )
+        else:
+            normalized[field_name] = value
+    return normalized
+
+
 @dataclass(frozen=True)
 class NormalizedRequirement:
     """A deterministic cart-ready or display-only requirement."""
@@ -144,7 +185,9 @@ def normalize_requirement(requirement: Requirement) -> NormalizedRequirement:
     """Normalize one line while preserving review evidence (FR-10, FR-11)."""
 
     flags: list[str] = []
-    attributes = requirement.attributes.model_dump(exclude_none=True)
+    attributes = normalize_attribute_values(
+        requirement.attributes.model_dump(exclude_none=True)
+    )
     canonical_item = (
         NON_PURCHASABLE_CATEGORY
         if not requirement.is_purchasable

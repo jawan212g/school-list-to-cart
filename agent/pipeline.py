@@ -54,7 +54,6 @@ from agent.rules import (
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
     SUBSTITUTION_NONE,
-    non_returnable_offer_requires_approval,
 )
 from agent.requirement_merge import (
     RequirementConstraintInterrupt,
@@ -71,7 +70,6 @@ ApprovalKind = Literal[
     "budget",
     "major_substitution",
     "attribute_choice",
-    "non_returnable",
     "low_confidence",
     "required_unavailable",
 ]
@@ -308,7 +306,6 @@ def _legacy_approval_kind(kind: InterruptKind) -> ApprovalKind:
         "major_substitution": "major_substitution",
         "brand_lock_break": "major_substitution",
         "attribute_choice": "attribute_choice",
-        "non_returnable_threshold": "non_returnable",
         "low_confidence": "low_confidence",
         "required_unavailable": "required_unavailable",
     }[kind]  # type: ignore[return-value]
@@ -836,27 +833,11 @@ def _refresh_candidate(
 ) -> CandidateMatch:
     """Refresh price and stock without repeating model suitability judgment."""
 
-    non_returnable_approval = non_returnable_offer_requires_approval(
-        active_offer.is_returnable,
-        active_offer.pack_price,
-    )
-    approval_reasons = tuple(
-        reason
-        for reason in candidate.approval_reasons
-        if reason != "non_returnable_threshold"
-    ) + (
-        ("non_returnable_threshold",)
-        if non_returnable_approval
-        else ()
-    )
     return replace(
         candidate,
         offer=active_offer,
-        approval_reasons=approval_reasons,
-        requires_approval=(
-            candidate.substitution_type == SUBSTITUTION_MAJOR
-            or non_returnable_approval
-        ),
+        approval_reasons=candidate.approval_reasons,
+        requires_approval=(candidate.substitution_type == SUBSTITUTION_MAJOR),
     )
 
 

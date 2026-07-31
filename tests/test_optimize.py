@@ -10,7 +10,7 @@ from agent.optimize import (
     optimize_cart,
     select_packages,
 )
-from agent.rules import TAX_ROUNDING_METHOD
+from agent.rules import TAX_ROUNDING_METHOD, TAX_ROUNDING_SCOPE
 from data.loader import Offer, Store
 
 
@@ -432,6 +432,28 @@ def test_br02_tax_rounds_fractional_cents_half_up() -> None:
     assert result.plan.item_subtotal == 150
     assert result.plan.tax == 11
     assert result.landed_cost == 161
+
+
+def test_br02_tax_rounds_each_store_order_before_cart_sum() -> None:
+    """BR-02: two sub-cent store taxes stay zero rather than cart-rounding to one."""
+
+    result = optimize_cart(
+        [
+            _unit_need("pencils", {"child-a": 1}),
+            _unit_need("erasers", {"child-a": 1}),
+        ],
+        [
+            _offer("A-PEN", "A", "pencils", 1, 1),
+            _offer("B-ERA", "B", "erasers", 1, 7),
+        ],
+        [_store("A"), _store("B")],
+        _config(tax_basis_points=635),
+    )
+
+    assert TAX_ROUNDING_SCOPE == "per_store_order"
+    assert tuple(order.tax for order in result.plan.store_orders) == (0, 0)
+    assert result.plan.tax == 0
+    assert result.landed_cost == 8
 
 
 def test_delivery_fee_is_charged_below_and_waived_above_minimum() -> None:

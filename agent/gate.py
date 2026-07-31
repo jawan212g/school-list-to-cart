@@ -1,4 +1,4 @@
-"""Deterministic, batched approval gate for the seven FR-26 conditions."""
+"""Deterministic, batched approval gate for the six active FR-26 conditions."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ from agent.rules import (
     DEFAULT_TAX_BASIS_POINTS,
     INTERRUPT_DESIGN_FAILURE_COUNT,
     INTERRUPT_TARGET_COUNT,
-    NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     PREFERENCE_DEPENDENT_ATTRIBUTES,
     REQUIRED_ITEM_AUTO_DROP_ALLOWED,
     SUBSTITUTION_MAJOR,
@@ -37,7 +36,6 @@ InterruptKind = Literal[
     "major_substitution",
     "brand_lock_break",
     "attribute_choice",
-    "non_returnable_threshold",
     "low_confidence",
     "required_unavailable",
 ]
@@ -318,7 +316,6 @@ def _line_candidate(
 def _line_interrupts(
     context: GateContext,
 ) -> list[ApprovalInterrupt]:
-    offers_by_sku = {offer.sku: offer for offer in context.offers}
     interrupts: list[ApprovalInterrupt] = []
     for line in _selected_lines(context.optimization):
         candidate = _line_candidate(line, context.matches)
@@ -415,36 +412,6 @@ def _line_interrupts(
                     )
                 )
 
-        offer = offers_by_sku.get(line.sku)
-        if (
-            offer is not None
-            and not offer.is_returnable
-            and line.line_cost
-            > NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS
-        ):
-            interrupt_id = f"approval-non-returnable-{line.sku}"
-            interrupts.append(
-                ApprovalInterrupt(
-                    interrupt_id=interrupt_id,
-                    kind="non_returnable_threshold",
-                    message=(
-                        f"{line.sku} is non-returnable and its line cost is "
-                        f"{line.line_cost} cents."
-                    ),
-                    recommendation=(
-                        "Approve only after confirming this exact item is wanted."
-                    ),
-                    alternatives=_decision_alternatives(
-                        context,
-                        interrupt_id,
-                        line,
-                    ),
-                    cost_impact_cents=line.line_cost,
-                    affected_lines=(line.line_id,),
-                    source_requirement_ids=line.source_requirement_ids,
-                    sku=line.sku,
-                )
-            )
     return interrupts
 
 
@@ -689,7 +656,7 @@ def evaluate_gate(
     *,
     decision_log: DecisionLog | None = None,
 ) -> ApprovalBatch:
-    """Return all seven FR-26 conditions in one ordered batch (FR-27–FR-29)."""
+    """Return all six active FR-26 conditions in one batch (FR-27–FR-29)."""
 
     if REQUIRED_ITEM_AUTO_DROP_ALLOWED:
         raise RuntimeError("BR-04 must prohibit automatic required-item removal")

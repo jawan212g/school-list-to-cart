@@ -55,6 +55,39 @@ def test_canonical_item_aliases_resolve_to_allowlist_names() -> None:
     )
 
 
+def test_br13_attribute_spelling_is_normalized_before_identity() -> None:
+    """BR-13: punctuation and approximation prose do not split identities."""
+
+    hyphenated = normalize_requirement(
+        _requirement(
+            "1 wide-ruled composition notebook",
+            "composition_notebooks",
+            1,
+            attributes={"ruling": "wide-ruled"},
+        )
+    )
+    spaced = normalize_requirement(
+        _requirement(
+            "1 wide ruled composition notebook",
+            "composition_notebooks",
+            1,
+            attributes={"ruling": "wide ruled"},
+        )
+    )
+    pencil_box = normalize_requirement(
+        _requirement(
+            "1 pencil box, approx. 8 inches",
+            "pencil_boxes",
+            1,
+            attributes={"size": "approx. 8 inches"},
+        )
+    )
+
+    assert hyphenated.attributes["ruling"] == "wide ruled"
+    assert spaced.attributes["ruling"] == "wide ruled"
+    assert pencil_box.attributes["size"] == "8 inch"
+
+
 def test_e01_quantity_range_uses_minimum_and_preserves_maximum() -> None:
     """E-01: 2–3 boxes resolves to 2 while retaining 3 for later economics."""
 

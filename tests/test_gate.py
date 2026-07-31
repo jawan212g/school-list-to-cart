@@ -20,7 +20,6 @@ from agent.optimize import (
     OptimizationResult,
     StoreOrder,
 )
-from agent.rules import EXACT_NON_RETURNABLE_ITEM_IS_SUBSTITUTION
 from data.loader import Offer, Store
 
 
@@ -296,7 +295,7 @@ def test_no_budget_preserves_non_budget_approval_conditions() -> None:
 
     assert tuple(
         interrupt.kind for interrupt in batch.interrupts
-    ) == ("non_returnable_threshold",)
+    ) == ()
 
 
 def test_condition_2_major_substitution_fires_once() -> None:
@@ -359,37 +358,14 @@ def test_condition_4_preference_attribute_choice_fires_once() -> None:
     )
 
 
-def test_condition_5_exact_non_returnable_above_15_fires_br08_only() -> None:
+def test_retired_br08_ignores_legacy_returnability_data() -> None:
     offer = _offer(price=1_501, returnable=False)
     need = _need()
     matches = match_offers([need], [offer], [_store()])
     candidate = matches.needs[0].candidates[0]
 
-    assert EXACT_NON_RETURNABLE_ITEM_IS_SUBSTITUTION is False
     assert candidate.substitution_type == "none"
-    assert candidate.requires_approval is True
-    _assert_one(
-        GateContext(
-            optimization=_optimization(offer),
-            matches=matches,
-            normalization=NormalizationResult(requirements=()),
-            extractions={},
-            offers=(offer,),
-            stores=(_store(),),
-            tax_basis_points=0,
-        ),
-        "non_returnable_threshold",
-        (0, -1_501),
-    )
-
-
-def test_br01_br08_exact_non_returnable_at_15_needs_no_approval() -> None:
-    offer = _offer(price=1_500, returnable=False)
-    need = _need()
-    matches = match_offers([need], [offer], [_store()])
-
-    assert matches.needs[0].candidates[0].substitution_type == "none"
-    assert matches.needs[0].candidates[0].requires_approval is False
+    assert candidate.requires_approval is False
     assert evaluate_gate(
         GateContext(
             optimization=_optimization(offer),

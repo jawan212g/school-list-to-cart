@@ -4693,6 +4693,50 @@ assertion was relaxed.
 No extraction, matching, pricing, optimizer, gate, or business-threshold
 behavior changed.
 
+## 2026-07-31 — Attribute identity normalization and BR-08 retirement
+
+### Diagnosis
+
+Equivalent ruling values reached aggregation as both `wide-ruled` and
+`wide ruled`, so BR-13 froze them as different identities and the optimizer
+made separate package decisions. Pencil-box size was also represented as
+`approx. 8 inches` by extraction but as numeric `length_inches=8` in the
+catalog; the matcher retained `approx.` as a comparison token and incorrectly
+classified the exact eight-inch offer as an attribute change.
+
+The same prose-versus-number boundary can occur for binder capacity, ruler and
+scissor length, water-bottle volume, sanitizer volume, and play-dough weight.
+Their catalog keys now participate in the same normalized size comparison.
+
+### Resolution
+
+- Normalize attribute identity text before aggregation: case-fold; treat
+  punctuation and hyphens as separators; collapse whitespace; remove
+  approximation words; and canonicalize inch and ounce spellings. Exact source
+  lines remain unchanged for provenance.
+- Compare the catalog's numeric length, capacity, and ounce fields against the
+  normalized source dimension.
+- Retire BR-08. The legacy `is_returnable` field remains loadable but has no
+  matching, optimization, or approval effect.
+- Amend BR-02 to state the already-implemented tax boundary explicitly: round
+  each store order half-up before combining store totals.
+
+### Frozen Maple impact
+
+The corrected BR-13 merge combines notebook paper and composition notebooks
+across the two confirmed Maple envelopes. The required cart changes from
+$110.04 to $109.83: item subtotal falls by 20 cents and tax by one cent. At a
+$150 budget, both former interrupts disappear: the pencil-box size interrupt
+was a false mismatch and the headphones interrupt was retired with BR-08, so
+the actual count is zero rather than the anticipated one. At an $85 budget,
+only the budget interrupt remains and the exact recommended bundle is $69.24.
+
+### Architecture
+
+Attribute normalization and approval classification remain deterministic. No
+model call was added, and no money, package, store-assignment, or tax algorithm
+changed.
+
 ## 2026-07-31 — Frozen cart boundary and deterministic re-plan corrections
 
 ### Reproducible cart boundary

@@ -89,11 +89,13 @@ def test_frozen_maple_150_dollar_baseline(
         budget_cents=15_000,
     )
 
-    assert result.proposed_cart.plan.item_subtotal == 10_284
-    assert result.proposed_cart.plan.tax == 720
+    # BR-13 now combines the spelling-only duplicates before package choice,
+    # saving 20 item cents plus one tax cent from the prior frozen plan.
+    assert result.proposed_cart.plan.item_subtotal == 10_264
+    assert result.proposed_cart.plan.tax == 719
     assert result.proposed_cart.plan.fulfillment_fees == 0
-    assert result.proposed_cart.landed_cost == 11_004
-    assert len(result.approval_batch.interrupts) == 2
+    assert result.proposed_cart.landed_cost == 10_983
+    assert len(result.approval_batch.interrupts) == 0
 
 
 def test_frozen_maple_85_dollar_recommended_plan_baseline(
@@ -108,13 +110,13 @@ def test_frozen_maple_85_dollar_recommended_plan_baseline(
         budget_cents=8_500,
     )
 
-    assert result.proposed_cart.landed_cost == 11_004
-    assert len(result.approval_batch.interrupts) == 3
+    assert result.proposed_cart.landed_cost == 10_983
+    assert len(result.approval_batch.interrupts) == 1
     assert result.budget_analysis is not None
     assert result.budget_analysis.recommended_plan is not None
     assert (
         result.budget_analysis.recommended_plan.resulting_landed_cost_cents
-        == 7_697
+        == 6_924
     )
 
 
@@ -131,7 +133,10 @@ def test_frozen_maple_single_stop_second_trip_is_not_unavailable(
         shopping_mode="single_stop",
     )
 
-    assert result.proposed_cart.landed_cost == 11_749
+    # With ruling spellings consolidated, Supply Cloud covers one more complete
+    # need than the other primary stores; single-stop therefore chooses it and
+    # closes the remaining glue-stick gap with the minimum second trip.
+    assert result.proposed_cart.landed_cost == 15_099
     assert result.proposed_cart.minimum_second_trip is not None
     assert result.proposed_cart.unfulfilled_gap_items == ()
     assert result.proposed_cart.is_complete is True
@@ -237,7 +242,7 @@ def test_frozen_maple_custom_one_store_supply_cloud_fallbacks_are_complete(
 
     assert len(results) == 14
     assert all(result.is_complete for result in results)
-    assert all(result.landed_cost == 15_089 for result in results)
+    assert all(result.landed_cost == 14_511 for result in results)
     assert all(
         tuple(order.store_id for order in result.plan.store_orders)
         == ("SUPPLY_CLOUD",)

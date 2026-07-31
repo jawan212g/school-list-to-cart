@@ -121,7 +121,6 @@ from agent.rules import (
     LOW_CONFIDENCE_OTHER_DETAILS_ISSUE,
     LOW_CONFIDENCE_QUANTITY_ISSUE,
     NONPAGINATED_SOURCE_PAGE,
-    NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS,
     PARENT_EDITABLE_DETAIL_FIELDS,
     PACKAGE_EXTRAS_ACCEPTABLE_LABEL,
     PACKAGE_EXTRAS_AVOID_LABEL,
@@ -2406,11 +2405,6 @@ def _approval_heading(
         if line is not None
         else "Cart"
     )
-    if interrupt.kind == "non_returnable_threshold":
-        return (
-            f"{item_name} — non-returnable, over "
-            f"{format_money(NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS)}"
-        )
     attributes = _attribute_labels(result, line)
     if attributes:
         detail = _join_names(attributes) if attributes else "requested details"
@@ -2442,11 +2436,6 @@ def _approval_message(
             )
         )
         store_name = store.name if store is not None else "the selected store"
-        if interrupt.kind == "non_returnable_threshold":
-            return (
-                f"{product_name} from {store_name} costs "
-                f"{format_money(line.line_cost)} and cannot be returned."
-            )
         if _attribute_labels(result, line):
             source_lines = _source_lines(result, interrupt)
             request = source_lines[0] if source_lines else line.canonical_item
@@ -2481,11 +2470,6 @@ def _approval_recommendation(
         if recommended_option is not None
         else "Leave this decision pending"
     )
-    if interrupt.kind == "non_returnable_threshold":
-        return (
-            f"{recommended}, but only after confirming that the exact product "
-            "is wanted because it cannot be returned."
-        )
     attribute_labels = _attribute_labels(result, line)
     if attribute_labels:
         return (

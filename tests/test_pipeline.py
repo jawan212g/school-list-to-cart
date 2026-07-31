@@ -697,15 +697,11 @@ def test_identical_cross_child_decision_is_returned_once() -> None:
         "a:headphones",
         "b:headphones",
     )
-    assert len(result.approval_flags) == 1
-    assert result.approval_flags[0].kind == "non_returnable"
-    assert result.approval_flags[0].source_requirement_ids == (
-        "a:headphones",
-        "b:headphones",
+    assert result.approval_flags == ()
+    assert all(
+        decision.type != "approval_request"
+        for decision in result.decisions
     )
-    assert result.decisions[-1].type == "approval_request"
-    assert result.decisions[-1].actor == "agent"
-    assert result.decisions[-1].affected_lines == ("line-1-1",)
 
 
 def test_e23_optional_item_is_never_added_to_cross_delivery_threshold() -> None:

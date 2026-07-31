@@ -81,3 +81,37 @@ def test_classroom_unspecified_scope_cannot_reach_quantity_math() -> None:
             ),
             student_counts_by_child={"classroom": 20},
         )
+
+
+def test_br13_equivalent_attribute_spelling_aggregates_one_need() -> None:
+    """BR-13: hyphenation alone cannot split one shared item identity."""
+
+    normalized = normalize_requirements(
+        (
+            Requirement(
+                req_id="paper-a",
+                child_id="a",
+                raw_text="1 pack wide-ruled notebook paper",
+                canonical_item="notebook_paper",
+                quantity=1,
+                attributes={"ruling": "wide-ruled", "count": 150},
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="paper-b",
+                child_id="b",
+                raw_text="2 packs wide ruled notebook paper",
+                canonical_item="notebook_paper",
+                quantity=2,
+                attributes={"ruling": "wide ruled", "count": 150},
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    needs = aggregate_requirements(normalized.budget_requirements)
+
+    assert len(needs) == 1
+    assert needs[0].quantity == 3
+    assert needs[0].attributes["ruling"] == "wide ruled"
+    assert needs[0].allocated_to == {"a": 1, "b": 2}

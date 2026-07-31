@@ -11,13 +11,13 @@
     "confirmation_note": "All purchasable rows were treated as reviewed and confirmed before cart calculation; one contradictory binding attribute was removed as documented.",
     "regression_baselines": {
       "combined_budget_15000": {
-        "required_cart_total_cents": 11004,
-        "visible_interrupt_count": 2
+        "required_cart_total_cents": 10983,
+        "visible_interrupt_count": 0
       },
       "combined_budget_8500": {
-        "required_cart_total_cents": 11004,
-        "recommended_plan_total_cents": 7697,
-        "visible_interrupt_count": 3
+        "required_cart_total_cents": 10983,
+        "recommended_plan_total_cents": 6924,
+        "visible_interrupt_count": 1
       }
     },
     "retired_historical_guard": {
@@ -2352,6 +2352,41 @@
       "reason": "Composition notebook category and wide ruling match the need."
     },
     {
+      "need_key": "grade-2:req-006|grade-5:req_004",
+      "sku": "VD-COM-VB-001",
+      "suitable": true,
+      "confidence": 0.99,
+      "reason": "Both confirmed requirements describe wide-ruled composition notebooks."
+    },
+    {
+      "need_key": "grade-2:req-006|grade-5:req_004",
+      "sku": "VD-COM-WR-003",
+      "suitable": true,
+      "confidence": 0.99,
+      "reason": "Both confirmed requirements describe wide-ruled composition notebooks."
+    },
+    {
+      "need_key": "grade-2:req-006|grade-5:req_004",
+      "sku": "NM-COM-NS-001",
+      "suitable": true,
+      "confidence": 0.99,
+      "reason": "Both confirmed requirements describe wide-ruled composition notebooks."
+    },
+    {
+      "need_key": "grade-2:req-006|grade-5:req_004",
+      "sku": "SC-COM-MEA-001",
+      "suitable": true,
+      "confidence": 0.99,
+      "reason": "Both confirmed requirements describe wide-ruled composition notebooks."
+    },
+    {
+      "need_key": "grade-2:req-006|grade-5:req_004",
+      "sku": "CL-COM-CC-004",
+      "suitable": true,
+      "confidence": 0.99,
+      "reason": "Both confirmed requirements describe wide-ruled composition notebooks."
+    },
+    {
       "need_key": "grade-5:req_008",
       "sku": "VD-PNS-VB-010",
       "suitable": true,
@@ -2623,6 +2658,34 @@
       "suitable": true,
       "confidence": 0.99,
       "reason": "The notebook paper is wide ruled with 150 sheets per pack; the multipack format does not affect functional suitability."
+    },
+    {
+      "need_key": "grade-2:req-005|grade-5:req_005",
+      "sku": "VD-PAP-VB-001",
+      "suitable": true,
+      "confidence": 0.99,
+      "reason": "Both confirmed requirements describe wide-ruled notebook paper with 150 sheets per pack."
+    },
+    {
+      "need_key": "grade-2:req-005|grade-5:req_005",
+      "sku": "VD-PAP-VB-003",
+      "suitable": true,
+      "confidence": 0.99,
+      "reason": "Both confirmed requirements describe wide-ruled notebook paper with 150 sheets per pack."
+    },
+    {
+      "need_key": "grade-2:req-005|grade-5:req_005",
+      "sku": "NM-PAP-NS-001",
+      "suitable": true,
+      "confidence": 0.99,
+      "reason": "Both confirmed requirements describe wide-ruled notebook paper with 150 sheets per pack."
+    },
+    {
+      "need_key": "grade-2:req-005|grade-5:req_005",
+      "sku": "CL-PAP-CC-003",
+      "suitable": true,
+      "confidence": 0.99,
+      "reason": "Both confirmed requirements describe wide-ruled notebook paper with 150 sheets per pack."
     },
     {
       "need_key": "grade-5:req_009",

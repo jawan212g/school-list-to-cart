@@ -58,7 +58,7 @@ The prototype is the input to these, not a substitute for them. Owners to be con
 - Total cost including tax and fulfillment fees, with the trip penalty applied
   only when comparing plans
 
-- Batched approval gate covering all seven interrupt conditions
+- Batched approval gate covering all six active interrupt conditions
 
 - Manual stockout injection and re-planning
 
@@ -233,7 +233,7 @@ Requirements are numbered FR-## and are individually testable. Business rules ca
 
 ### 9.5 Approval gate
 
-The proposal named three interrupt conditions. Seven are specified here; the four additions are marked.
+The proposal named three interrupt conditions. Six are active here; the three additions are marked. The former returnability interrupt was retired with BR-08 because simulated checkout does not benefit from it.
 
 1.  Total cost exceeds budget.
 
@@ -243,13 +243,11 @@ The proposal named three interrupt conditions. Seven are specified here; the fou
 
 4.  Preference-dependent attribute choice: color, character, or style.
 
-5.  New. Non-returnable item above the value threshold (BR-08).
+5.  New. Low-confidence extraction or match (BR-11).
 
-6.  New. Low-confidence extraction or match (BR-11).
+6.  New. Required item unavailable at any permitted store.
 
-7.  New. Required item unavailable at any permitted store.
-
-- **FR-26** The seven conditions above are the complete set of interrupt triggers.
+- **FR-26** The six active conditions above are the complete set of interrupt triggers.
 
 - **FR-27** Batch all interrupts onto one approval screen. Do not ask serially. An agent that interrupts fourteen times has not saved anyone an evening (BR-10).
 
@@ -275,9 +273,9 @@ The proposal named three interrupt conditions. Seven are specified here; the fou
 
 ### 9.7 Business rules
 
-- **BR-01 Substitution severity.** Minor, and auto-approved: a different brand where no brand was specified; a pack size within the overage ceiling; an equivalent product with the same attributes. Major, and requiring approval: any brand-lock break; a pack count differing from the requirement by more than twenty percent; a different product category; any change to a specified attribute; a non-returnable swap.
+- **BR-01 Substitution severity.** Minor, and auto-approved: a different brand where no brand was specified; a pack size within the overage ceiling; an equivalent product with the same attributes. Major, and requiring approval: any brand-lock break; a pack count differing from the requirement by more than twenty percent; a different product category; any change to a specified attribute.
 
-- **BR-02 Tax.** Total cost includes sales tax at the session rate, defaulting to 7.0% and editable (D-4). State-specific rules and back-to-school tax holidays are not modeled, and the interface says so rather than being silently wrong.
+- **BR-02 Tax.** Total cost includes sales tax at the session rate, defaulting to 7.0% and editable (D-4). Tax is calculated independently for each store order; each fractional-cent store result is rounded half-up to the nearest cent before store totals are combined, rather than rounding once on the cart-wide subtotal. State-specific rules and back-to-school tax holidays are not modeled, and the interface says so rather than being silently wrong.
 
 - **BR-03 No naked subtotals.** Any figure labeled "total cost" includes tax and fulfillment fees. An item subtotal may appear only when explicitly labeled as such and must never be presented as the total cost.
 
@@ -289,7 +287,7 @@ The proposal named three interrupt conditions. Seven are specified here; the fou
 
 - **BR-07 Trip penalty.** Each store beyond the first carries a six-dollar implicit cost in optimization, so a second store must save more than six dollars in total cost to be recommended. The penalty is a comparison device and never appears in the total shown to the parent.
 
-- **BR-08 Non-returnable threshold.** Non-returnable items above fifteen dollars require approval regardless of substitution severity.
+- **BR-08 Returnability (retired).** The legacy `is_returnable` catalog field remains readable for backward compatibility but returnability does not affect matching, optimization, or approval.
 
 - **BR-09 Shared-purchase allocation.** Under per-child budgets, a shared package allocates cost proportionally by units consumed. A twelve-pack costing six dollars, split eight units to one child and four to another, allocates four dollars and two dollars.
 
@@ -299,7 +297,7 @@ The proposal named three interrupt conditions. Seven are specified here; the fou
 
 - **BR-12 Cart staleness.** Within a session, prices and stock re-validate before checkout is simulated, and any change since the cart was built is surfaced first.
 
-- **BR-13 Duplicate suppression.** Identical canonical items across children never generate separate purchases unless a brand lock or an attribute difference requires it.
+- **BR-13 Duplicate suppression.** Identical canonical items across children never generate separate purchases unless a brand lock or a meaningful attribute difference requires it. Before identity is frozen, attribute text is case-folded, punctuation and hyphens become spaces, repeated whitespace collapses, approximation words are removed, and common measurement-unit spellings are canonicalized; exact source lines remain unchanged for provenance.
 
 ## 10. Edge Case Register
 
@@ -434,7 +432,7 @@ Targets are set today; measured results follow from the real-list validation in 
 
 9.  Packaging cases E-13 through E-17, each with a known-correct answer.
 
-10. Gate behavior: one case for each of the seven interrupt conditions, plus one case that should produce no interrupt at all.
+10. Gate behavior: one case for each of the six active interrupt conditions, plus one case that should produce no interrupt at all.
 
 11. Stockout injection at two points: before approval and after approval.
 
@@ -468,7 +466,7 @@ Treated as a test tier. Run the full five-minute flow end to end at least three 
 | **agent/aggregate** | Cross-child roll-up into unit needs                                         |
 | **agent/match**     | Requirement to candidate offers                                             |
 | **agent/optimize**  | Deterministic packaging, store assignment, and total cost. No model calls. |
-| **agent/gate**      | The seven interrupt conditions                                              |
+| **agent/gate**      | The six active interrupt conditions                                         |
 | **agent/decisions** | Audit log                                                                   |
 | **data**            | Seeded catalog and store definitions                                        |
 | **tests**           | Sample lists, expected extractions, and unit tests                          |
@@ -503,7 +501,7 @@ The optimizer is the component most likely to contain subtle errors, and it is t
 
 - Injecting a stockout produces a correct revised cart without losing prior approvals.
 
-- The seven interrupt conditions each fire on a test case.
+- The six active interrupt conditions each fire on a test case.
 
 - The injection payload in the adversarial set changes nothing about the resulting cart.
 
@@ -528,5 +526,5 @@ Confirming that every commitment in the Week 9 submission is accounted for.
 | **Test with different lists, budgets, stores, and stockouts**            | Section 13                                                                                                                |
 | **Compare against a manually created cart**                              | Section 13.2                                                                                                              |
 | **Autonomously locate the list**                                         | Phase 2, Section 4.3, with stated reason                                                                                  |
-| **Purchase returnable items autonomously**                               | Superseded by simulated checkout, per the proposal and faculty endorsement. The non-returnable rule is retained as BR-08. |
+| **Purchase returnable items autonomously**                               | Superseded by simulated checkout. BR-08 is retired; the legacy data field remains readable but is ignored. |
 | **Wholesalers for bulk quantities**                                      | Phase 2, Section 4.3. Quantity handling ships today under D-7.                                                            |

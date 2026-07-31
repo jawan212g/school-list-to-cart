@@ -36,7 +36,6 @@ from agent.rules import (
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
     SUBSTITUTION_NONE,
-    non_returnable_offer_requires_approval,
     pack_count_difference_is_major,
 )
 from data.loader import Offer, Store
@@ -51,7 +50,16 @@ MATCH_DATA_END = "</catalog_match_data>"
 ATTRIBUTE_OFFER_KEYS: Mapping[str, tuple[str, ...]] = {
     "acceptable_colors": ("ink_color", "color"),
     "character": ("character",),
-    "size": ("size_label", "size", "capacity_inches", "length_inches"),
+    "size": (
+        "size_label",
+        "size",
+        "capacity_inches",
+        "length_inches",
+        "ounces",
+        "ounces_per_bottle",
+        "tub_ounces",
+        "weight_ounces",
+    ),
     "ruling": ("ruling",),
     "tab_count": ("tab_count", "tabs_per_set"),
     "tip_style": ("tip_style", "tip"),
@@ -96,7 +104,17 @@ VALUE_ALIASES: Mapping[str, str] = {
 }
 
 APPROXIMATION_WORDS = frozenset(
-    {"approx", "approximately", "inch", "inches"}
+    {
+        "about",
+        "approx",
+        "approximately",
+        "in",
+        "inch",
+        "inches",
+        "ounce",
+        "ounces",
+        "oz",
+    }
 )
 
 MATCH_SYSTEM_INSTRUCTION = f"""
@@ -224,7 +242,6 @@ class OpenAISuitabilityJudge:
                     "brand": case.offer.brand,
                     "title": case.offer.title,
                     "category": case.offer.category,
-                    "is_returnable": case.offer.is_returnable,
                     "attributes": case.offer.attributes,
                 },
             }
@@ -434,7 +451,9 @@ def _attribute_words(
     value: object,
     field_name: str,
 ) -> frozenset[str]:
-    words = frozenset(_normalized_words(value))
+    words = frozenset(
+        word.rstrip(".") for word in _normalized_words(value)
+    )
     if field_name != "size":
         return words
     return frozenset(
@@ -717,21 +736,8 @@ def match_offers(
             substitution_reasons=substitution_reasons,
             attribute_status=attribute_status,
             line_notes=line_notes,
-            approval_reasons=(
-                ("non_returnable_threshold",)
-                if non_returnable_offer_requires_approval(
-                    case.offer.is_returnable,
-                    case.offer.pack_price,
-                )
-                else ()
-            ),
-            requires_approval=(
-                substitution_type == SUBSTITUTION_MAJOR
-                or non_returnable_offer_requires_approval(
-                    case.offer.is_returnable,
-                    case.offer.pack_price,
-                )
-            ),
+            approval_reasons=(),
+            requires_approval=(substitution_type == SUBSTITUTION_MAJOR),
         )
         if Decimal(str(decision.confidence)) < CONFIDENCE_FLOOR:
             blocked_by_need[case.need_key].append(candidate)

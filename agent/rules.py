@@ -16,18 +16,18 @@ MAJOR_SUBSTITUTION_TYPES = frozenset(
         "pack_count_difference",
         "different_category",
         "attribute_change",
-        "non_returnable_swap",
     }
 )  # BR-01: substitutions that require approval.
 MAJOR_PACK_DIFFERENCE_PERCENT = 20  # BR-01: pack-count approval threshold.
 SUBSTITUTION_NONE = "none"  # BR-01: no substitution occurred.
 SUBSTITUTION_MINOR = "minor"  # BR-01: substitution may proceed automatically.
 SUBSTITUTION_MAJOR = "major"  # BR-01: substitution requires approval.
-EXACT_NON_RETURNABLE_ITEM_IS_SUBSTITUTION = False  # BR-01/BR-08 reconciliation: an exact item is not a swap; only BR-08 can interrupt based on its non-returnable price.
 
 DEFAULT_TAX_BASIS_POINTS = 700  # BR-02: default tax rate is 7.0%.
 BASIS_POINTS_DENOMINATOR = 10_000  # BR-02: integer tax-rate scale.
 TAX_ROUNDING_METHOD = "half_up_to_nearest_cent"  # BR-02: fractional cents.
+TAX_ROUNDING_SCOPE = "per_store_order"
+# BR-02: round each store order before cart aggregation.
 TAX_ROUNDING_OFFSET = BASIS_POINTS_DENOMINATOR // 2  # BR-02: half-up offset.
 
 TOTAL_INCLUDES_TAX_AND_FEES = True  # BR-03: total cost includes tax and fees.
@@ -56,7 +56,9 @@ OVERAGE_ABSOLUTE_UNITS = 6  # BR-06: minimum absolute overage allowance.
 ADDITIONAL_STORE_PENALTY_CENTS = 600  # BR-07: $6 per store after the first.
 TRIP_PENALTY_SHOWN_IN_TOTAL = False  # BR-07: comparison-only penalty.
 
-NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS = 1_500  # BR-08: above $15.
+RETURNABILITY_IGNORED_FOR_PLANNING = True
+# BR-08 retired: legacy ``is_returnable`` catalog data remains readable but
+# does not affect matching, optimization, or approval.
 
 SHARED_COST_ALLOCATION_METHOD = "proportional_by_units"  # BR-09.
 
@@ -1283,19 +1285,6 @@ def pack_count_difference_is_major(
     return (
         difference * PERCENT_DENOMINATOR
         > requested_count * MAJOR_PACK_DIFFERENCE_PERCENT
-    )
-
-
-def non_returnable_offer_requires_approval(
-    is_returnable: bool,
-    pack_price_cents: int,
-) -> bool:
-    """Apply BR-08 to a single offered package without cart arithmetic."""
-
-    return (
-        not is_returnable
-        and pack_price_cents
-        > NON_RETURNABLE_APPROVAL_THRESHOLD_CENTS
     )
 
 

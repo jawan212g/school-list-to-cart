@@ -222,7 +222,7 @@ The catalog must deliberately include:
 - pickup and delivery variations;
 - store and fulfillment fees;
 - delivery or pickup thresholds;
-- non-returnable products;
+- legacy returnability fields retained as ignored catalog data;
 - products that create excess units;
 - products available at only one store;
 - unfulfillable requirements; and
@@ -285,7 +285,6 @@ The agent must request approval before:
 - proceeding with a low-confidence extraction or match;
 - exceeding the budget;
 - dropping a required item;
-- selecting a non-returnable item above $15; or
 - proceeding after a material price or availability change invalidates prior approval.
 
 Approval requests should be batched. The target is no more than three approval interrupts per session. More than six indicates a workflow problem that should be investigated.

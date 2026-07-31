@@ -37,6 +37,7 @@ def _offer(
     price: int,
     *,
     returnable: bool = True,
+    attributes: dict[str, object] | None = None,
 ) -> Offer:
     return Offer(
         sku=sku,
@@ -49,7 +50,7 @@ def _offer(
         pack_price=price,
         stock_qty=10,
         is_returnable=returnable,
-        attributes={},
+        attributes=attributes or {},
     )
 
 
@@ -90,13 +91,19 @@ def _pipeline(
     )
 
 
-def _requirement(req_id: str, category: str) -> Requirement:
+def _requirement(
+    req_id: str,
+    category: str,
+    *,
+    attributes: dict[str, object] | None = None,
+) -> Requirement:
     return Requirement(
         req_id=req_id,
         child_id="model-child",
         raw_text=f"1 {category}",
         canonical_item=category,
         quantity=1,
+        attributes=attributes or {},
         extraction_confidence=1.0,
     )
 
@@ -159,18 +166,21 @@ def test_e29_stockout_after_approval_preserves_unaffected_response() -> None:
         "headphones",
         1_800,
         returnable=False,
+        attributes={"connector": "3.5 mm"},
     )
     prior = _pipeline(
         (
             _requirement("pencils", "pencils"),
-            _requirement("headphones", "headphones"),
+            _requirement(
+                "headphones",
+                "headphones",
+                attributes={"connector": "usb"},
+            ),
         ),
         (pencil_a, pencil_b, headphones),
         budget=5_000,
     )
-    non_returnable_id = _interrupt_ids_by_kind(prior)[
-        "non_returnable_threshold"
-    ]
+    substitution_id = _interrupt_ids_by_kind(prior)["major_substitution"]
     presentation = next(
         presentation
         for presentation in app.build_approval_presentations(
@@ -179,7 +189,7 @@ def test_e29_stockout_after_approval_preserves_unaffected_response() -> None:
             (_store(),),
             {"child": "Grade 2"},
         )
-        if presentation.interrupt.interrupt_id == non_returnable_id
+        if presentation.interrupt.interrupt_id == substitution_id
     )
     approved_option = next(
         option
@@ -187,7 +197,7 @@ def test_e29_stockout_after_approval_preserves_unaffected_response() -> None:
         if option.is_recommended
     )
     prior_outcomes = {
-        non_returnable_id: approved_option.alternative_id
+        substitution_id: approved_option.alternative_id
     }
 
     changed_offers = (
@@ -222,7 +232,7 @@ def test_e29_stockout_after_approval_preserves_unaffected_response() -> None:
     )
     assert st.session_state["approval_outcomes"] == prior_outcomes
     assert st.session_state["replan_preserved_approval_ids"] == frozenset(
-        {non_returnable_id}
+        {substitution_id}
     )
     assert st.session_state["approved_optimization"] is None
 
@@ -235,18 +245,23 @@ def test_e30_price_rise_after_approval_reopens_budget_gate() -> None:
         "headphones",
         1_600,
         returnable=False,
+        attributes={"connector": "3.5 mm"},
     )
     prior = _pipeline(
-        (_requirement("headphones", "headphones"),),
+        (
+            _requirement(
+                "headphones",
+                "headphones",
+                attributes={"connector": "usb"},
+            ),
+        ),
         (headphones,),
         budget=2_000,
     )
     assert prior.proposed_cart.within_budget is True
-    non_returnable_id = _interrupt_ids_by_kind(prior)[
-        "non_returnable_threshold"
-    ]
+    substitution_id = _interrupt_ids_by_kind(prior)["major_substitution"]
     prior_outcomes = {
-        non_returnable_id: f"{non_returnable_id}-approve"
+        substitution_id: f"{substitution_id}-approve"
     }
     changed_headphones = replace(
         headphones,
