@@ -61,3 +61,14 @@ variables.
 ```
 pytest -q
 ```
+
+The Maple Street cart regression uses
+`tests/fixtures/maple_street_frozen_pipeline.json`, which freezes both the
+parent-confirmed extraction and the model-assisted suitability decisions. Its
+active deterministic baselines are $110.04 with two visible interrupts at a
+$150 combined budget, and a $76.97 recommended plan at an $85 combined budget.
+
+The earlier $111.21/three-interrupt and $71.07 figures were produced before
+either model boundary was frozen. The retained evidence cannot reproduce them,
+so they remain documented historical findings but are retired as regression
+guards rather than silently rewritten as current expectations.

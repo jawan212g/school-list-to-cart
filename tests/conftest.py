@@ -2,11 +2,87 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from docx import Document
 from PIL import Image
+
+from agent.match import (
+    SuitabilityCase,
+    SuitabilityDecision,
+)
+from agent.schema import ExtractionEnvelope
+
+
+@dataclass(frozen=True)
+class FrozenSuitabilityJudge:
+    """Replay the captured model decisions for production match cases."""
+
+    decisions: Mapping[tuple[str, str], SuitabilityDecision]
+
+    def judge(
+        self,
+        cases: Sequence[SuitabilityCase],
+    ) -> tuple[SuitabilityDecision, ...]:
+        """Return one frozen decision for every current production case."""
+
+        missing = tuple(
+            (case.need_key, case.offer.sku)
+            for case in cases
+            if (case.need_key, case.offer.sku) not in self.decisions
+        )
+        if missing:
+            raise AssertionError(
+                "Frozen Maple suitability fixture is missing current cases: "
+                f"{missing[:3]}"
+            )
+        return tuple(
+            self.decisions[(case.need_key, case.offer.sku)]
+            for case in cases
+        )
+
+
+@dataclass(frozen=True)
+class FrozenMapleFixture:
+    """Confirmed Maple extractions plus captured suitability decisions."""
+
+    metadata: Mapping[str, object]
+    extractions: Mapping[str, ExtractionEnvelope]
+    judge: FrozenSuitabilityJudge
+
+
+@pytest.fixture(scope="session")
+def frozen_maple_fixture() -> FrozenMapleFixture:
+    """Load the production-shaped, model-free Maple cart regression input."""
+
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "maple_street_frozen_pipeline.json"
+    )
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    decisions = tuple(
+        SuitabilityDecision.model_validate(decision)
+        for decision in payload["suitability_decisions"]
+    )
+    return FrozenMapleFixture(
+        metadata=payload["fixture_metadata"],
+        extractions={
+            child_id: ExtractionEnvelope.model_validate(envelope)
+            for child_id, envelope in payload["envelopes"].items()
+        },
+        judge=FrozenSuitabilityJudge(
+            decisions={
+                (decision.need_key, decision.sku): decision
+                for decision in decisions
+            }
+        ),
+    )
 
 
 @pytest.fixture
