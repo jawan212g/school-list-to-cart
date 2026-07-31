@@ -4744,8 +4744,9 @@ the budget and the parent's shopping preferences.
 - Renamed the Personalize group to "Optional — left out of cart" and placed it
   immediately above the broader out-of-cart group.
 - Added an Out of cart count to each Personalize Summary entry. It combines
-  excluded rows and items unavailable from the permitted stores while keeping
-  optional items in their own count.
+  parent-removed items, already-owned items, and items unavailable from the
+  permitted stores while keeping optional and school-provided items out of
+  that count.
 - Amended BR-05 so exact re-optimization must remain within budget and satisfy
   the active store, radius, and fulfillment constraints before an optional
   item is applied.

@@ -594,6 +594,7 @@ class PersonalizeStudentSection:
     additional_decision_ids: tuple[str, ...]
     additional_pending_item_ids: tuple[str, ...]
     anchored_flag_groups: tuple[ReviewFlagGroup, ...]
+    parent_removed_item_ids: tuple[str, ...] = ()
 
     @property
     def item_count(self) -> int:
@@ -627,9 +628,9 @@ class PersonalizeStudentSection:
 
     @property
     def out_of_cart_count(self) -> int:
-        """Count non-optional items excluded or unavailable for this entry."""
+        """Count parent removals, owned items, and unavailable items."""
 
-        return self.excluded_count + self.unstocked_count
+        return len(self.parent_removed_item_ids) + self.unstocked_count
 
     @property
     def pending_item_ids(self) -> tuple[str, ...]:
@@ -7569,6 +7570,17 @@ def build_personalize_student_sections(
             )
         ) + tuple((additional_excluded_ids or {}).get(child_id, ()))
         excluded_ids = frozenset(excluded_item_ids)
+        parent_removed_item_ids = tuple(
+            item.review_id
+            for item in child_items
+            if (
+                item.review_id in excluded_ids
+                and (
+                    item.review_status == "deleted"
+                    or item.already_owned
+                )
+            )
+        )
         child_unstocked_item_ids = tuple(
             item.review_id
             for item in child_items
@@ -7631,6 +7643,7 @@ def build_personalize_student_sections(
                         ),
                     )
                 ),
+                parent_removed_item_ids=parent_removed_item_ids,
             )
         )
     return tuple(sections)

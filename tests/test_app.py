@@ -3204,6 +3204,75 @@ def test_personalize_screen_groups_sources_in_student_summary() -> None:
     assert "Notes from the teacher" in source
 
 
+def test_out_of_cart_count_uses_only_removed_owned_and_unstocked_items() -> None:
+    """Personalize excludes optional and informational rows from this count."""
+
+    items = (
+        SupplyItemReview(
+            review_id="removed",
+            req_id="removed",
+            child_id="child-1",
+            item_name="folders",
+            required_quantity=0,
+            review_status="deleted",
+            source_text="1 folder",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="owned",
+            req_id="owned",
+            child_id="child-1",
+            item_name="backpacks",
+            required_quantity=0,
+            already_owned=True,
+            source_text="1 backpack",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="optional",
+            req_id="optional",
+            child_id="child-1",
+            item_name="tissues",
+            required_quantity=1,
+            optional=True,
+            source_text="Optional tissues",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="provided",
+            req_id="provided",
+            child_id="child-1",
+            item_name="crayons",
+            required_quantity=1,
+            provided_by_school=True,
+            is_purchasable=False,
+            source_text="School provides crayons",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="unstocked",
+            req_id="unstocked",
+            child_id="child-1",
+            item_name="headphones",
+            required_quantity=1,
+            source_text="1 headphones",
+            confidence=1.0,
+        ),
+    )
+
+    section = app.build_personalize_student_sections(
+        ({"child_id": "child-1", "label": "Maya"},),
+        items,
+        (),
+        unstocked_item_ids=frozenset({"unstocked"}),
+    )[0]
+
+    assert section.optional_count == 1
+    assert section.excluded_count == 3
+    assert section.unstocked_count == 1
+    assert section.out_of_cart_count == 3
+
+
 def test_personalize_navigation_round_trip_uses_non_widget_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
