@@ -2232,7 +2232,7 @@ def test_shortfall_state_renders_the_plain_summary_headings() -> None:
     assert copy.register == "plain"
     assert events[0][0] == "error"
     assert ("header", "Shopping plan") in events
-    assert ("caption", "Plan status") in events
+    assert ("caption", "Your shopping plan") in events
     assert all(
         "ready" not in value.casefold()
         for kind, value in events
@@ -2342,8 +2342,8 @@ def test_no_budget_summary_shows_cost_without_budget_comparison() -> None:
     assert column_counts == [3]
     assert ("caption", "No budget comparison selected.") in events
     assert any(kind == "metric:Total cost" for kind, _ in events)
-    assert any(kind == "metric:Items" for kind, _ in events)
-    assert any(kind == "metric:Stores" for kind, _ in events)
+    assert any(kind == "metric:Products to buy" for kind, _ in events)
+    assert any(kind == "metric:Shopping stops" for kind, _ in events)
     assert not any(
         kind in {"metric:Budget remaining", "metric:Budget shortfall"}
         for kind, _ in events
@@ -2442,10 +2442,73 @@ def test_shopping_checklist_is_durable_and_cannot_change_the_plan() -> None:
     assert result.proposed_cart == optimization
     assert result.proposed_cart.landed_cost == optimization.landed_cost
 
-    app._clear_shopping_checks(state, (line_id,), (widget_key,))
-    assert state[app.SHOPPING_CHECKLIST_TICKS_KEY] == {line_id: False}
-    assert state[widget_key] is False
-    assert result.proposed_cart == optimization
+
+def test_individual_budget_increase_updates_only_over_budget_entries() -> None:
+    """E-22: approving an individual overage preserves other allocations."""
+
+    result = _real_pipeline_result("Grade 2")
+    plan = replace(
+        result.proposed_cart.plan,
+        landed_cost=17_901,
+        per_child_landed_costs={
+            "kevin": 12_506,
+            "mr-smith": 5_395,
+        },
+    )
+    optimization = replace(
+        result.proposed_cart,
+        plan=plan,
+        landed_cost=17_901,
+        budget_cents=27_500,
+        within_budget=True,
+        shortfall_cents=0,
+    )
+    result = replace(
+        result,
+        session=replace(
+            result.session,
+            children=("kevin", "mr-smith"),
+            budget_mode="per_child",
+            budget_total=27_500,
+            budget_allocations={
+                "kevin": 7_500,
+                "mr-smith": 20_000,
+            },
+        ),
+        proposed_cart=optimization,
+    )
+
+    class RecordingLog:
+        def __init__(self) -> None:
+            self.entries: list[tuple[str, str, str]] = []
+
+        def record(
+            self,
+            decision_type: str,
+            rationale: str,
+            *,
+            actor: str,
+            affected_lines: tuple[str, ...],
+        ) -> None:
+            del affected_lines
+            self.entries.append((decision_type, rationale, actor))
+
+    log = RecordingLog()
+    updated, approved = app.authorize_budget_increase(
+        result,
+        optimization,
+        log,  # type: ignore[arg-type]
+    )
+
+    assert updated.session.budget_allocations == {
+        "kevin": 12_506,
+        "mr-smith": 20_000,
+    }
+    assert updated.session.budget_total == 32_506
+    assert approved.within_budget is True
+    assert approved.shortfall_cents == 0
+    assert log.entries[0][0] == "budget_action"
+    assert log.entries[0][2] == "parent"
 
 
 def test_zero_delivery_fee_names_the_threshold_that_waived_it() -> None:

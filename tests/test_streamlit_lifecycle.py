@@ -2304,7 +2304,7 @@ def test_shopping_checklist_survives_reruns_without_changing_the_plan() -> None:
     checklist = tuple(
         checkbox
         for checkbox in test_app.checkbox
-        if checkbox.label == "Mark this product as collected"
+        if checkbox.label == "Collected"
     )
     assert checklist
 
@@ -2320,11 +2320,7 @@ def test_shopping_checklist_survives_reruns_without_changing_the_plan() -> None:
         == original_total
     )
 
-    _click_label(test_app, "Clear all ticks")
-    _assert_no_exception(test_app)
-    assert all(
-        checkbox.value is False
-        for checkbox in test_app.checkbox
-        if checkbox.label == "Mark this product as collected"
+    assert not any(
+        button.label == "Clear all ticks" for button in test_app.button
     )
     assert test_app.session_state["approved_optimization"] == original

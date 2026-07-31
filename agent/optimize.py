@@ -169,6 +169,37 @@ class OptimizationResult:
         return self.gap_items
 
 
+def per_entry_landed_costs(
+    optimization: OptimizationResult,
+) -> dict[str, int]:
+    """Return each entry's full allocated cost across every store plan."""
+
+    totals: dict[str, int] = {}
+    plans = (optimization.plan,) + (
+        ()
+        if optimization.minimum_second_trip is None
+        else (optimization.minimum_second_trip,)
+    )
+    for plan in plans:
+        for entry_id, amount in plan.per_child_landed_costs.items():
+            totals[entry_id] = totals.get(entry_id, 0) + amount
+    return totals
+
+
+def per_entry_budget_overages(
+    optimization: OptimizationResult,
+    allocations: Mapping[str, int],
+) -> dict[str, int]:
+    """Return positive E-22 overages without pooling independent budgets."""
+
+    costs = per_entry_landed_costs(optimization)
+    return {
+        entry_id: costs.get(entry_id, 0) - budget
+        for entry_id, budget in allocations.items()
+        if costs.get(entry_id, 0) > budget
+    }
+
+
 @dataclass(frozen=True)
 class _PackageState:
     cost: int

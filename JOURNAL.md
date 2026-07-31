@@ -5868,3 +5868,51 @@ low-confidence catalog-match decision remains.
 - Verify the same classroom session in the deployed x86 app and confirm that
   the shopping-plan line shows the scaled `needed` quantity while Personalize
   no longer shows the internal scope suffix.
+
+## 2026-07-31 — Individual budgets no longer pool across entries
+
+### What changed
+
+- Traced the individual-budget path from setup through optimization and the
+  approval gate. Setup retained each allocation but also summed them into
+  `budget_total`; the gate consulted only the summed total, so one entry's
+  unused allocation could silently hide another entry's overage.
+- Added one deterministic per-entry cost and overage calculation in
+  `agent/optimize.py`. The initial plan and catalog-change replan now pass the
+  selected budget mode and allocations to the same gate consumer.
+- Added an E-22 approval whenever any individual allocation is exceeded,
+  including the affected entries and exact overages. Authorizing the increase
+  raises only those entries; other allocations remain unchanged.
+- Removed the pooled `Budget remaining` presentation from individual-budget
+  summaries and exports. Each entry now reports its own amount left or over.
+- Simplified the shopping-plan screen: removed catalog-field diagnostics and
+  checklist reset copy, made supporting detail collapsed, made fulfillment
+  explicit on every store card, and separated the checkmark, product, student,
+  and price columns.
+
+### Defect finding
+
+- This was another split-consumer budget defect: per-entry allocations were
+  used for cost attribution but not by the approval boundary. The existing
+  regression asserted a cart that exceeded the sum of all allocations, so it
+  exercised only the combined condition and could not catch a masked
+  individual overage.
+- The separate deployed cart-build crash reported in the same pass was not
+  diagnosable from the request because no exception or Streamlit log was
+  included. It remains explicitly unresolved rather than being attributed to
+  the budget defect without evidence.
+
+### Testing performed
+
+- Added a production pipeline regression where one entry is over, another is
+  under, and the cart is below the summed allocations. It failed before the
+  fix with zero interrupts and passes afterward with `budget_exceeded`.
+- Added coverage that a parent-authorized individual increase changes only the
+  over-budget allocation and clears the shortfall.
+- `py -3.12-arm64 -m pytest -q`
+  - `479 passed, 1 skipped in 16.23s`.
+
+### Remaining work
+
+- Obtain the deployed crash traceback or Streamlit log tail and reproduce that
+  exact cart-build failure before changing its handler or timeout behavior.

@@ -69,6 +69,8 @@ from agent.optimize import (
     OptimizationResult,
     _allocate_cents,
     optimize_cart,
+    per_entry_budget_overages,
+    per_entry_landed_costs,
 )
 from agent.pipeline import (
     ListInput,
@@ -853,7 +855,7 @@ PLAIN_COPY = CopySet(
     register="plain",
     tagline=APP_TAGLINE,
     summary_heading="Shopping plan",
-    headline_heading="Plan status",
+    headline_heading="Your shopping plan",
     complete_status="Required items covered",
     attention_clear="Nothing needs your attention.",
 )
@@ -1634,7 +1636,16 @@ def authorize_budget_increase(
     previous_budget = result.session.budget_total
     if previous_budget is None:
         raise ValueError("A budget increase requires an existing budget")
-    new_budget = optimization.landed_cost
+    updated_allocations = dict(result.session.budget_allocations)
+    if result.session.budget_mode == "per_child":
+        costs = per_entry_landed_costs(optimization)
+        updated_allocations = {
+            entry_id: max(budget, costs.get(entry_id, 0))
+            for entry_id, budget in updated_allocations.items()
+        }
+        new_budget = sum(updated_allocations.values())
+    else:
+        new_budget = optimization.landed_cost
     if new_budget < previous_budget:
         raise ValueError("A budget increase cannot lower the session budget")
     updated_optimization = apply_authorized_budget(
@@ -1643,7 +1654,11 @@ def authorize_budget_increase(
     )
     updated_result = replace(
         result,
-        session=replace(result.session, budget_total=new_budget),
+        session=replace(
+            result.session,
+            budget_total=new_budget,
+            budget_allocations=updated_allocations,
+        ),
         proposed_cart=apply_authorized_budget(
             result.proposed_cart,
             new_budget,
@@ -1652,9 +1667,17 @@ def authorize_budget_increase(
     decision_log.record(
         "budget_action",
         (
-            "Parent authorized a budget increase from "
-            f"{previous_budget} cents to {new_budget} cents so the selected "
-            "required-item plan is fully funded."
+            "Parent authorized "
+            + (
+                "the affected individual budget increases from a combined "
+                f"{previous_budget} cents to {new_budget} cents"
+                if result.session.budget_mode == "per_child"
+                else (
+                    "a budget increase from "
+                    f"{previous_budget} cents to {new_budget} cents"
+                )
+            )
+            + " so the selected required-item plan is fully funded."
         ),
         actor="parent",
         affected_lines=tuple(
@@ -2232,6 +2255,46 @@ def _budget_approval_content(
         _child_display_label(child_id, child_labels)
         for child_id in result.session.children
     )
+    if (
+        result.session.budget_mode == "per_child"
+        and interrupt.interrupt_id == "approval-budget-per-entry"
+    ):
+        costs = per_entry_landed_costs(optimization)
+        overages = per_entry_budget_overages(
+            optimization,
+            result.session.budget_allocations,
+        )
+        details = tuple(
+            (
+                f"{_child_display_label(entry_id, child_labels)} is "
+                f"{format_money(overage)} over their individual budget "
+                f"({format_money(costs.get(entry_id, 0))} total cost against "
+                f"{format_money(result.session.budget_allocations[entry_id])})."
+            )
+            for entry_id, overage in overages.items()
+        )
+        total_overage = sum(overages.values())
+        affected_children = tuple(
+            _child_display_label(entry_id, child_labels)
+            for entry_id in overages
+        )
+        return (
+            " ".join(details),
+            (
+                ApprovalDisplayOption(
+                    alternative_id=f"{interrupt.interrupt_id}-raise",
+                    label="Raise the affected individual budgets",
+                    cost_delta_cents=0,
+                    explanation=(
+                        "Adds "
+                        f"{format_money(total_overage)} across only the "
+                        "individual budgets that are over."
+                    ),
+                    affected_children=affected_children,
+                    is_recommended=True,
+                ),
+            ),
+        )
     if analysis is None:
         return _legacy_budget_approval_content(
             result,
@@ -3242,8 +3305,18 @@ def tone_state_from_session(
     optimization = (
         state.get("approved_optimization") or result.proposed_cart
     )
+    entry_overages = (
+        per_entry_budget_overages(
+            optimization,
+            result.session.budget_allocations,
+        )
+        if result.session.budget_mode == "per_child"
+        else {}
+    )
     return ToneState(
-        has_shortfall=optimization.shortfall_cents > 0,
+        has_shortfall=(
+            optimization.shortfall_cents > 0 or bool(entry_overages)
+        ),
         has_unmet_required=(
             not optimization.is_complete
             or _has_parent_selected_unmet_item(state, result)
@@ -3271,7 +3344,21 @@ def build_text_summary(
     lines = [
         "READY, SET, SCHOOL",
     ]
-    if result.session.budget_total is not None:
+    if result.session.budget_mode == "per_child":
+        entry_costs = per_entry_landed_costs(optimization)
+        lines.append("INDIVIDUAL BUDGETS")
+        for entry_id, budget in result.session.budget_allocations.items():
+            difference = budget - entry_costs.get(entry_id, 0)
+            status = (
+                f"{format_money(difference)} LEFT"
+                if difference >= 0
+                else f"{format_money(abs(difference))} OVER"
+            )
+            lines.append(
+                f"  {_child_display_label(entry_id, child_labels)}: {status}"
+            )
+        lines.append("")
+    elif result.session.budget_total is not None:
         variance = result.session.budget_total - optimization.landed_cost
         lines.append(
             (
@@ -14857,7 +14944,7 @@ def _render_approval_plan_context(
         )
         st.write(
             "These items are not stocked within the shopping preferences "
-            "you selected. They are not decisions on this screen."
+            "you selected."
         )
         for item in optimization.gap_items:
             affected_children = tuple(
@@ -15375,6 +15462,19 @@ def _render_approval(st: Any) -> None:
                     )
                 continue
 
+            if (
+                interrupt.kind == "budget_exceeded"
+                and result.session.budget_mode == "per_child"
+            ):
+                st.write(escape_streamlit_dollars(presentation.message))
+                st.info(
+                    escape_streamlit_dollars(
+                        presentation.options[0].explanation
+                    )
+                )
+                selections[interrupt.interrupt_id] = presentation.options[0]
+                continue
+
             resolution = selection_state.resolutions.get(
                 interrupt.interrupt_id
             )
@@ -15579,6 +15679,9 @@ def _render_approval(st: Any) -> None:
         )
         updated_intake = dict(intake)
         updated_intake["budget_total"] = result.session.budget_total
+        updated_intake["budget_allocations"] = (
+            result.session.budget_allocations
+        )
         st.session_state["intake"] = updated_intake
         st.session_state["result"] = result
 
@@ -15648,7 +15751,7 @@ def _render_cost_summary(
             )
         )
     )
-    fee_text = f"Fees: {format_money(fees)}"
+    fee_text = f"Pickup and delivery fees: {format_money(fees)}"
     if waived:
         fee_text += " — " + "; ".join(waived)
     elif fees == 0:
@@ -15669,24 +15772,6 @@ def _render_cost_summary(
             "when that order reaches their stated threshold."
         ),
     )
-
-
-def _render_budget_status(
-    st: Any,
-    optimization: OptimizationResult,
-    budget_cents: int,
-) -> None:
-    """Lead the summary with the effective total-cost budget status."""
-
-    variance = budget_cents - optimization.landed_cost
-    if variance >= 0:
-        st.success(
-            f"Budget remaining: {format_streamlit_money(variance)}"
-        )
-    else:
-        st.error(
-            f"Budget shortfall: {format_streamlit_money(abs(variance))}"
-        )
 
 
 def _shopping_checklist_line_id(
@@ -15716,21 +15801,6 @@ def _record_shopping_check(
     ticks = dict(state.get(SHOPPING_CHECKLIST_TICKS_KEY, {}))
     ticks[line_id] = bool(state.get(widget_key, False))
     state[SHOPPING_CHECKLIST_TICKS_KEY] = ticks
-
-
-def _clear_shopping_checks(
-    state: MutableMapping[str, Any],
-    line_ids: Sequence[str],
-    widget_keys: Sequence[str],
-) -> None:
-    """Clear visible shopping ticks without changing plan data."""
-
-    ticks = dict(state.get(SHOPPING_CHECKLIST_TICKS_KEY, {}))
-    for line_id in line_ids:
-        ticks[line_id] = False
-    state[SHOPPING_CHECKLIST_TICKS_KEY] = ticks
-    for widget_key in widget_keys:
-        state[widget_key] = False
 
 
 def _shopping_parent_notes(
@@ -15806,9 +15876,11 @@ def _render_shopping_line(
     ticks = dict(st.session_state.get(SHOPPING_CHECKLIST_TICKS_KEY, {}))
     if mounted_widget_key not in st.session_state:
         st.session_state[mounted_widget_key] = bool(ticks.get(line_id, False))
-    check_column, item_column, cost_column = st.columns([0.35, 5.0, 1.1])
+    check_column, item_column, for_column, cost_column = st.columns(
+        [0.55, 4.1, 1.45, 1.1]
+    )
     check_column.checkbox(
-        "Mark this product as collected",
+        "Collected",
         key=stable_widget_key,
         label_visibility="collapsed",
         on_change=_record_shopping_check,
@@ -15829,9 +15901,12 @@ def _render_shopping_line(
     )
     item_column.caption(
         escape_streamlit_dollars(
-            f"For {allocations} · {line.units_needed} needed · "
+            f"{line.units_needed} needed · "
             f"{line.units_purchased} supplied"
         )
+    )
+    for_column.markdown(
+        escape_streamlit_dollars(f"**For**  \n{allocations}")
     )
     for note in _shopping_parent_notes(
         st.session_state,
@@ -15874,26 +15949,16 @@ def _render_store_breakdown(
     """Render the plan as durable, inert shopping lists grouped by store."""
 
     stores_by_id = {store.store_id: store for store in stores}
-    all_line_ids = tuple(
-        _shopping_checklist_line_id(plan_index, line)
-        for plan_index, plan in enumerate(_plans(optimization))
-        for line in plan.lines
+    st.subheader("Where to shop")
+    st.caption(
+        "Check products off while you shop. Checkmarks do not change the cart."
     )
-    all_widget_keys = tuple(
-        st.widget_key(f"checklist:{line_id}") for line_id in all_line_ids
-    )
-    header, clear_column = st.columns([4.5, 1.5])
-    header.subheader("Where to shop")
-    header.caption(
-        "Check items off while you shop. These ticks do not change the cart."
-    )
-    clear_column.button(
-        "Clear all ticks",
-        key="clear-shopping-checklist",
-        use_container_width=True,
-        on_click=_clear_shopping_checks,
-        args=(st.session_state, all_line_ids, all_widget_keys),
-    )
+    fulfillment_by_store: dict[str, set[str]] = {}
+    for plan in _plans(optimization):
+        for order in plan.store_orders:
+            fulfillment_by_store.setdefault(order.store_id, set()).add(
+                order.fulfillment_method
+            )
     for plan_index, plan in enumerate(_plans(optimization)):
         for order in plan.store_orders:
             store = stores_by_id.get(order.store_id)
@@ -15909,9 +15974,18 @@ def _render_store_breakdown(
                     )
                 )
                 item_word = "item" if len(order.lines) == 1 else "items"
+                methods = fulfillment_by_store.get(
+                    order.store_id,
+                    {order.fulfillment_method},
+                )
+                fulfillment = (
+                    "Pickup and delivery"
+                    if methods == {"pickup", "delivery"}
+                    else next(iter(methods)).title()
+                )
                 st.markdown(
                     escape_streamlit_dollars(
-                        f"{order.fulfillment_method.title()} · "
+                        f"Fulfillment: {fulfillment} · "
                         f"{len(order.lines)} {item_word} · Item subtotal "
                         f"{format_money(order.item_subtotal)} · Tax "
                         f"{format_money(order.tax)}"
@@ -15992,7 +16066,11 @@ def _render_per_child(
         }
         if child_id in allocations:
             variance = allocations[child_id] - landed_costs.get(child_id, 0)
-            row["Budget variance"] = format_streamlit_money(variance)
+            row["Budget difference"] = (
+                f"{format_streamlit_money(abs(variance))} left"
+                if variance >= 0
+                else f"{format_streamlit_money(abs(variance))} over"
+            )
         rows.append(row)
     st.table(escape_streamlit_data(rows))
 
@@ -16055,7 +16133,7 @@ def _render_substitutions(
                         "Packs": line.packs_purchased,
                         "Needed": line.units_needed,
                         "Bought": line.units_purchased,
-                        "Extra units": line.overage_units,
+                        "Extras in the package": line.overage_units,
                     }
                 )
     if decision_rows:
@@ -16481,7 +16559,7 @@ def _render_plan_approvals(
     resolved = st.session_state.get("resolved_interrupts", {})
     with st.container(border=True, key="plan-approvals"):
         st.markdown(
-            "### Approvals",
+            "### Choices you approved",
             help=(
                 "An approval is a product or budget choice that the app will "
                 "not make for you."
@@ -16652,44 +16730,6 @@ def _render_needs_attention(
                 f"• {_item_display_name(item)}{child_text}"
             )
 
-    unresolved_notes = _unresolved_catalog_notes(
-        optimization,
-        matches,
-    )
-    if unresolved_notes:
-        st.warning("Details the catalog could not resolve")
-        st.table(escape_streamlit_data(unresolved_notes))
-
-
-def _unresolved_catalog_notes(
-    optimization: OptimizationResult,
-    matches: MatchResult,
-) -> tuple[dict[str, str], ...]:
-    """Collect catalog facts that still require attention."""
-
-    unresolved_notes: list[dict[str, str]] = []
-    seen_notes: set[tuple[str, str]] = set()
-    for plan in _plans(optimization):
-        for line in plan.lines:
-            for note in line.notes:
-                if not note.startswith("catalog_attribute_unknown:"):
-                    continue
-                attribute = note.rsplit(":", 1)[-1].replace("_", " ")
-                key = (line.sku, attribute)
-                if key in seen_notes:
-                    continue
-                seen_notes.add(key)
-                unresolved_notes.append(
-                    {
-                        "Product": _product_name(line, matches),
-                        "Unresolved detail": (
-                            f"The catalog does not record {attribute}."
-                        ),
-                    }
-                )
-    return tuple(unresolved_notes)
-
-
 def _has_genuine_attention(
     result: PipelineResult,
     optimization: OptimizationResult,
@@ -16702,7 +16742,6 @@ def _has_genuine_attention(
         result.extraction_failures
         or self_sourced_decisions
         or not optimization.is_complete
-        or _unresolved_catalog_notes(optimization, matches)
     )
 
 
@@ -16987,6 +17026,9 @@ def _render_summary_headline(
     budget_cents: int | None,
     is_complete: bool,
     copy: CopySet,
+    budget_mode: str = "combined",
+    budget_allocations: Mapping[str, int] | None = None,
+    child_labels: Mapping[str, str] | None = None,
 ) -> None:
     """Lead with cost, budget status, and plan completeness."""
 
@@ -16995,7 +17037,22 @@ def _render_summary_headline(
         if budget_cents is None
         else budget_cents - optimization.landed_cost
     )
-    if variance is not None and variance < 0:
+    allocations = budget_allocations or {}
+    entry_overages = (
+        per_entry_budget_overages(optimization, allocations)
+        if budget_mode == "per_child"
+        else {}
+    )
+    if entry_overages:
+        labels = child_labels or {}
+        for entry_id, overage in entry_overages.items():
+            st.error(
+                escape_streamlit_dollars(
+                    f"{_child_display_label(entry_id, labels)} is "
+                    f"{format_money(overage)} over their individual budget."
+                )
+            )
+    elif variance is not None and variance < 0 and budget_mode != "per_child":
         st.error(
             "Budget shortfall: "
             f"{format_streamlit_money(abs(variance))}. "
@@ -17008,6 +17065,7 @@ def _render_summary_headline(
         )
     if (
         is_complete
+        and not entry_overages
         and (variance is None or variance >= 0)
         and copy.register == "warm"
     ):
@@ -17032,10 +17090,17 @@ def _render_summary_headline(
         "Total cost",
         format_streamlit_money(optimization.landed_cost),
     )
-    columns[1].metric("Items", str(item_count))
-    columns[2].metric("Stores", str(store_count))
+    columns[1].metric("Products to buy", str(item_count))
+    columns[2].metric("Shopping stops", str(store_count))
     if budget_cents is None:
         st.caption("No budget comparison selected.")
+    elif budget_mode == "per_child":
+        if entry_overages:
+            st.caption(
+                "One or more individual budgets still need attention."
+            )
+        else:
+            st.success("Each individual budget covers its assigned cost.")
     else:
         if variance is not None and variance >= 0:
             st.success(
@@ -17170,10 +17235,21 @@ def _render_summary(st: Any) -> None:
         st.session_state["include_addons"] = False
     is_complete = required_plan_is_complete
     budget_total = intake["budget_total"]
+    entry_overages = (
+        per_entry_budget_overages(
+            optimization,
+            intake["budget_allocations"],
+        )
+        if intake["budget_mode"] == "per_child"
+        else {}
+    )
     tone_state = ToneState(
         has_shortfall=(
             budget_total is not None
-            and optimization.landed_cost > int(budget_total)
+            and (
+                bool(entry_overages)
+                or optimization.landed_cost > int(budget_total)
+            )
         ),
         has_unmet_required=not is_complete,
         has_extraction_failure=bool(result.extraction_failures),
@@ -17188,6 +17264,9 @@ def _render_summary(st: Any) -> None:
         None if budget_total is None else int(budget_total),
         is_complete,
         copy,
+        str(intake["budget_mode"]),
+        intake["budget_allocations"],
+        child_labels,
     )
     _render_cost_summary(st, optimization, stores)
     if st.session_state.get("catalog_change_notice"):
@@ -17204,7 +17283,7 @@ def _render_summary(st: Any) -> None:
         required_matches,
         self_sourced_decisions,
     ):
-        st.subheader("Needs your attention")
+        st.subheader("Before you check out")
         _render_needs_attention(
             st,
             result,
@@ -17235,8 +17314,9 @@ def _render_summary(st: Any) -> None:
 
     # 4. Supporting detail follows the store-organized shopping task.
     with st.expander(
-        "Cost by student or classroom",
+        "Cost for each student or classroom",
         key="cost-by-student",
+        expanded=False,
     ):
         _render_per_child(
             st,
@@ -17247,14 +17327,16 @@ def _render_summary(st: Any) -> None:
 
     # 6. Routine equivalents collapse to one line; consequential choices remain.
     with st.expander(
-        "Substitutions and package choices",
+        "Product and package choices",
         key="substitutions-and-packages",
+        expanded=False,
     ):
         _render_substitutions(st, optimization, matches, stores)
 
     with st.expander(
-        "How the lists became this cart",
+        "How we built this shopping plan",
         key="list-interpretation",
+        expanded=False,
     ):
         _render_list_interpretation(
             st,
@@ -17265,8 +17347,9 @@ def _render_summary(st: Any) -> None:
 
     if has_assumptions_or_notes:
         with st.expander(
-            "Assumptions and list notes",
+            "List details we used",
             key="assumptions-and-list-notes",
+            expanded=False,
         ):
             _render_assumptions_and_notes(
                 st,
@@ -17275,10 +17358,10 @@ def _render_summary(st: Any) -> None:
             )
 
     with st.expander(
-        "Decisions made and their outcomes",
+        "Your choices",
         key="decisions-and-outcomes",
+        expanded=False,
     ):
-        st.caption("How the plan was built")
         st.table(
             escape_streamlit_data([
                 {
@@ -17297,7 +17380,7 @@ def _render_summary(st: Any) -> None:
             ])
         )
 
-    st.subheader("Try a live catalog change")
+    st.subheader("Try an inventory or price change")
     with st.container(border=True, key="live-catalog-change"):
         st.write(
             "Change simulated stock or price. Ready, Set, School will reuse "
@@ -17315,7 +17398,7 @@ def _render_summary(st: Any) -> None:
             offers_by_sku = {offer.sku: offer for offer in offers}
             stock_column, price_column = st.columns(2)
             with stock_column:
-                st.write("Stockout")
+                st.write("Out-of-stock item")
                 stockout_sku = st.selectbox(
                     "Product to mark out of stock",
                     selected_skus,
@@ -17325,7 +17408,7 @@ def _render_summary(st: Any) -> None:
                     key="catalog_stockout_sku",
                 )
                 if st.button(
-                    "Mark out of stock and re-plan",
+                    "Mark out of stock and rebuild",
                     type="primary",
                     key="apply_catalog_stockout",
                 ):
@@ -17359,7 +17442,7 @@ def _render_summary(st: Any) -> None:
                     key=f"catalog_price_value_{price_sku}",
                 )
                 if st.button(
-                    "Apply price and re-plan",
+                    "Apply price and rebuild",
                     key="apply_catalog_price",
                 ):
                     try:

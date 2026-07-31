@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from agent.aggregate import UnitNeed
@@ -18,6 +18,7 @@ from agent.optimize import (
     OptimizationResult,
     calculate_tax,
     optimize_cart,
+    per_entry_budget_overages,
 )
 from agent.rules import (
     DEFAULT_TAX_BASIS_POINTS,
@@ -91,6 +92,8 @@ class GateContext:
     tax_basis_points: int = DEFAULT_TAX_BASIS_POINTS
     unit_needs: Sequence[UnitNeed] = ()
     optimization_config: OptimizationConfig | None = None
+    budget_mode: Literal["combined", "per_child", "none"] = "combined"
+    budget_allocations: Mapping[str, int] = field(default_factory=dict)
 
 
 def _selected_lines(
@@ -238,6 +241,51 @@ def _budget_interrupt(
     context: GateContext,
 ) -> ApprovalInterrupt | None:
     optimization = context.optimization
+    entry_overages = (
+        per_entry_budget_overages(
+            optimization,
+            context.budget_allocations,
+        )
+        if context.budget_mode == "per_child"
+        else {}
+    )
+    if entry_overages:
+        affected_entry_ids = frozenset(entry_overages)
+        affected_lines = tuple(
+            line
+            for line in _selected_lines(optimization)
+            if affected_entry_ids.intersection(line.allocated_to)
+        )
+        total_overage = sum(entry_overages.values())
+        interrupt_id = "approval-budget-per-entry"
+        return ApprovalInterrupt(
+            interrupt_id=interrupt_id,
+            kind="budget_exceeded",
+            message=(
+                "One or more individual budgets are exceeded by "
+                f"{total_overage} cents in total."
+            ),
+            recommendation=(
+                "Raise only the affected individual budgets to cover the "
+                "current required-item plan."
+            ),
+            alternatives=(
+                ApprovalAlternative(
+                    alternative_id=f"{interrupt_id}-raise",
+                    label="Raise the affected individual budgets",
+                    cost_delta_cents=0,
+                ),
+            ),
+            cost_impact_cents=total_overage,
+            affected_lines=tuple(line.line_id for line in affected_lines),
+            source_requirement_ids=tuple(
+                dict.fromkeys(
+                    source_id
+                    for line in affected_lines
+                    for source_id in line.source_requirement_ids
+                )
+            ),
+        )
     if optimization.within_budget is not False:
         return None
     interrupt_id = "approval-budget"

@@ -736,6 +736,8 @@ def run_pipeline(
             tax_basis_points=session.tax_basis_points,
             unit_needs=consolidation.unit_needs,
             optimization_config=optimization_config,
+            budget_mode=session.budget_mode,
+            budget_allocations=session.budget_allocations,
         ),
         decision_log=decision_log,
     )
@@ -1019,6 +1021,8 @@ def replan_after_catalog_change(
             tax_basis_points=prior.session.tax_basis_points,
             unit_needs=consolidation.unit_needs,
             optimization_config=config,
+            budget_mode=prior.session.budget_mode,
+            budget_allocations=prior.session.budget_allocations,
         ),
         decision_log=decision_log,
     )
