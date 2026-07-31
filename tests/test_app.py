@@ -3613,6 +3613,11 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
 
     summary = ReviewScreenRecorder()
     app._render_review(summary)
+    assert state.button_keys
+    assert all(
+        key.startswith("personalize-visit:0:")
+        for key in state.button_keys
+    )
     assert summary.tab_labels == ("Summary", "Jawan  [1]")
     assert summary.radio_label_visibility == "collapsed"
     assert "1 decision remains." in summary.messages
@@ -4016,6 +4021,11 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     recorder = DecisionScreenRecorder()
     app._render_review(recorder)
     events = recorder.events
+    assert state.button_keys
+    assert all(
+        key.startswith("personalize-visit:0:")
+        for key in state.button_keys
+    )
 
     assert sum(
         event == ("button", "Approve this recommendation")
@@ -4113,7 +4123,7 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     assert "personalize-unavailable-student-child-1" in (
         recorder.container_keys
     )
-    assert "add:child-1:add" in state.button_keys
+    assert ("button", "Add this item for Kevin") in events
 
 
 def test_personalize_edit_updates_student_summary_and_detail_together(

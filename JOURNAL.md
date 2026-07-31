@@ -5024,3 +5024,38 @@ The first x86 run exposed one AppTest assertion that still expected the former
 “extract items” section copy. The production screen already rendered “read
 items”; the test was updated to assert that live wording, and the remaining
 section heading was changed from “What we will extract” to “What we'll read.”
+
+## 2026-07-30 — Personalize buttons inherit one visit scope
+
+### Defect
+
+The unresolved-warning “Open student” button reused an explicit key after its
+view had been left and re-entered. Streamlit can retain that unmounted key as
+ordinary session state, but buttons reject any application-visible value under
+their key when remounted. Earlier corrections manually added the view revision
+to selected decision buttons and therefore left every unlisted button exposed.
+
+### Resolution
+
+- Wrap the production Personalize renderer in one transparent view scope.
+- Automatically prefix every button key, including buttons rendered through
+  columns and nested helpers, with the current Personalize visit revision.
+- Require every Personalize button to supply a stable semantic action key.
+- Remove manually assembled revision fragments from individual buttons.
+- Cover all current actions, including student navigation, bulk and per-item
+  recommendations, editing, ownership, removal, school-provided overrides,
+  parent-added items, unresolved navigation, and bottom navigation.
+
+### Testing finding
+
+The first real-render AppTest completed before the fix because AppTest removed
+the orphaned value when the button unmounted, unlike the deployed session that
+retained it. The strengthened test asserts the required rendered identity
+change across the same view round trip. It failed before the fix on x86 run
+`30596417144`, proving the unscoped identity independently of whether AppTest
+happens to preserve the orphan.
+
+### Architecture
+
+No item interpretation, matching, money path, optimizer, or approval-gate
+behavior changed.

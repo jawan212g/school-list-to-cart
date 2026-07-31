@@ -654,6 +654,61 @@ class PersonalizeStudentSection:
         )
 
 
+class _PersonalizeViewScope:
+    """Give every Personalize button a visit-scoped widget identity."""
+
+    def __init__(self, target: Any, state: MutableMapping[str, Any]) -> None:
+        self._target = target
+        self._state = state
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+    def __enter__(self) -> "_PersonalizeViewScope":
+        self._target.__enter__()
+        return self
+
+    def __exit__(self, *args: object) -> object:
+        return self._target.__exit__(*args)
+
+    def columns(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> tuple["_PersonalizeViewScope", ...]:
+        """Keep column buttons inside the same Personalize visit scope."""
+
+        return tuple(
+            _PersonalizeViewScope(column, self._state)
+            for column in self._target.columns(*args, **kwargs)
+        )
+
+    def button(
+        self,
+        label: str,
+        *args: object,
+        **kwargs: object,
+    ) -> bool:
+        """Render one button whose key cannot survive another view visit."""
+
+        stable_key = kwargs.pop("key", None)
+        if stable_key is None:
+            raise ValueError(
+                "Every Personalize button requires a stable action key."
+            )
+        visit = int(
+            self._state.get(PERSONALIZE_VIEW_REVISION_KEY, 0)
+        )
+        return bool(
+            self._target.button(
+                label,
+                *args,
+                key=f"personalize-visit:{visit}:{stable_key}",
+                **kwargs,
+            )
+        )
+
+
 WARM_COPY = CopySet(
     register="warm",
     tagline=APP_TAGLINE,
@@ -8829,7 +8884,6 @@ def _render_personalize_summary(
     offers: Sequence[Offer] = (),
     child_labels: Mapping[str, str] | None = None,
     source_context_by_review_id: Mapping[str, Sequence[str]] | None = None,
-    view_revision: int,
 ) -> tuple[dict[str, SupplyItemReview], tuple[str, ...]]:
     """Render BR-52's complete production Personalize summary."""
 
@@ -8888,10 +8942,7 @@ def _render_personalize_summary(
                 )
             open_column.button(
                 f"Open {section.child_label}",
-                key=(
-                    "personalize-action:open-student:"
-                    f"{view_revision}:{section.child_id}"
-                ),
+                key=f"personalize-action:open-student:{section.child_id}",
                 on_click=_select_personalize_tab,
                 args=(st.session_state, section.child_id),
                 use_container_width=True,
@@ -8942,7 +8993,6 @@ def _render_personalize_summary(
                             source_context_by_review_id=(
                                 source_context_by_review_id
                             ),
-                            view_revision=view_revision,
                         )
                         edited_by_id.update(edited)
                         if confirmed:
@@ -8955,7 +9005,7 @@ def _render_personalize_summary(
                         "Approve all AI recommendations",
                         key=(
                             "personalize-action:approve-student:"
-                            f"{view_revision}:{section.child_id}"
+                            f"{section.child_id}"
                         ),
                         on_click=_approve_personalize_groups,
                         args=(
@@ -9915,7 +9965,6 @@ def _render_primary_review_decisions(
     item: SupplyItemReview,
     *,
     key_prefix: str,
-    button_scope: str,
     members: Sequence[SupplyItemReview],
 ) -> tuple[SupplyItemReview, frozenset[str]]:
     """Render A-18's two explicit ways to resolve an AI recommendation."""
@@ -9925,7 +9974,7 @@ def _render_primary_review_decisions(
     accept_column, edit_column = st.columns(2)
     accept_column.button(
         "Approve this recommendation",
-        key=f"personalize-action:accept:{button_scope}",
+        key=f"personalize-action:accept:{key_prefix}",
         type="primary",
         on_click=_approve_personalize_groups,
         args=(st.session_state, (key_prefix,)),
@@ -9933,7 +9982,7 @@ def _render_primary_review_decisions(
     )
     edit_column.button(
         _personalize_edit_button_label(fields),
-        key=f"personalize-action:edit:{button_scope}",
+        key=f"personalize-action:edit:{key_prefix}",
         on_click=_set_personalize_decision_action,
         args=(
             st.session_state,
@@ -9945,14 +9994,14 @@ def _render_primary_review_decisions(
     owned_column, remove_column = st.columns(2)
     owned_column.button(
         "We already own this item",
-        key=f"personalize-action:owned:{button_scope}",
+        key=f"personalize-action:owned:{key_prefix}",
         on_click=_mark_personalize_group_owned,
         args=(st.session_state, key_prefix, tuple(members)),
         use_container_width=True,
     )
     remove_column.button(
         "Remove item from cart",
-        key=f"personalize-action:remove:{button_scope}",
+        key=f"personalize-action:remove:{key_prefix}",
         on_click=_remove_personalize_group_from_cart,
         args=(st.session_state, key_prefix, tuple(members)),
         use_container_width=True,
@@ -10027,7 +10076,7 @@ def _render_primary_review_decisions(
             )
         st.button(
             "Send selection to cart",
-            key=f"personalize-action:send-selection:{button_scope}",
+            key=f"personalize-action:send-selection:{key_prefix}",
             type="primary",
             on_click=_commit_personalize_decision,
             args=(
@@ -10067,7 +10116,6 @@ def _render_compact_review_row(
     flag_messages: Sequence[str] = (),
     original_items: Mapping[str, SupplyItemReview] | None = None,
     source_context_by_review_id: Mapping[str, Sequence[str]] | None = None,
-    view_revision: int = 0,
 ) -> tuple[dict[str, SupplyItemReview], bool]:
     """Render one parent-first item card in the required verification order."""
 
@@ -10183,7 +10231,6 @@ def _render_compact_review_row(
                     st,
                     representative,
                     key_prefix=key_prefix,
-                    button_scope=f"{view_revision}:{key_prefix}",
                     members=members,
                 )
             )
@@ -12596,6 +12643,7 @@ def _personalize_has_list_details(
 def _render_review(st: Any) -> None:
     """Render a compact source-versus-interpretation review (FR-12)."""
 
+    st = _PersonalizeViewScope(st, st.session_state)
     intake = st.session_state["intake"]
     extractions: Mapping[str, ExtractionEnvelope] = (
         st.session_state["extracted_lists"]
@@ -12899,9 +12947,6 @@ def _render_review(st: Any) -> None:
                 offers=review_offers,
                 child_labels=child_labels,
                 source_context_by_review_id=source_context_by_review_id,
-                view_revision=int(
-                    st.session_state[PERSONALIZE_VIEW_REVISION_KEY]
-                ),
                 )
             )
             edited_by_id.update(summary_edits)
@@ -12962,7 +13007,6 @@ def _render_review(st: Any) -> None:
                         "Approve all AI recommendations",
                         key=(
                             "personalize-action:approve-section:"
-                            f"{st.session_state[PERSONALIZE_VIEW_REVISION_KEY]}:"
                             f"{child_id}"
                         ),
                         on_click=_approve_personalize_groups,
@@ -13031,9 +13075,6 @@ def _render_review(st: Any) -> None:
                     flag_messages=group.messages,
                     original_items=original_items,
                     source_context_by_review_id=source_context_by_review_id,
-                    view_revision=int(
-                        st.session_state[PERSONALIZE_VIEW_REVISION_KEY]
-                    ),
                 )
                 edited_by_id.update(edited)
                 if confirmed and group.group_id not in confirmed_flag_group_ids:
@@ -13286,10 +13327,12 @@ def _render_review(st: Any) -> None:
     back_column, continue_column = _navigation_button_columns(st)
     return_to_lists = back_column.button(
         "Back to lists",
+        key="personalize-action:back-to-lists",
         use_container_width=True,
     )
     submitted = continue_column.button(
         "Use these choices and build my shopping plan",
+        key="personalize-action:build-plan",
         type="primary",
         use_container_width=True,
     )
