@@ -649,7 +649,7 @@ def _composition_review_rows(test_app: AppTest) -> tuple[Any, ...]:
 
 
 def test_merge_exclusion_checkbox_keeps_every_variant_out() -> None:
-    """The production checkbox alone excludes both displayed variants."""
+    """The production checkbox keeps one visible removed row out of the cart."""
 
     test_app = _run_composition_merge_screen()
     checkbox = next(
@@ -661,7 +661,14 @@ def test_merge_exclusion_checkbox_keeps_every_variant_out() -> None:
     _assert_no_exception(test_app)
     _click_label(test_app, "Continue with these choices")
 
-    assert _composition_review_rows(test_app) == ()
+    rows = _composition_review_rows(test_app)
+    assert len(rows) == 1
+    assert rows[0].item_name == "composition_notebooks"
+    assert rows[0].review_status == "deleted"
+    assert tuple(source.exact_line for source in rows[0].sources) == (
+        "1 graph paper composition notebook",
+        "4 regular composition notebooks",
+    )
 
 
 def test_merge_restoring_one_variant_does_not_restore_its_sibling() -> None:
@@ -1597,6 +1604,12 @@ def test_personalize_decision_purchase_status_actions_are_applied_in_place(
 
     test_app = _run_personalize_student_and_classroom_decision_screen()
     _click_label(test_app, f"Open {entry_label}")
+    navigation_before = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    labels_before = tuple(navigation_before.proto.options)
     _click_label(test_app, action)
     _assert_no_exception(test_app)
 
@@ -1612,6 +1625,12 @@ def test_personalize_decision_purchase_status_actions_are_applied_in_place(
     )
     assert len(changed) == 1
     assert test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY] == entry_id
+    navigation_after = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    assert tuple(navigation_after.proto.options) == labels_before
 
 
 @pytest.mark.parametrize(
@@ -1639,10 +1658,8 @@ def test_personalize_bulk_approval_resolves_only_the_open_entry(
         if radio.label == "Choose a student or Summary"
     )
     labels = tuple(navigation.proto.options)
-    selected_label = next(label for label in labels if entry_label in label)
-    other_labels = tuple(label for label in labels if entry_label not in label)
-    assert "[" not in selected_label
-    assert any("[2]" in label for label in other_labels)
+    assert entry_label in labels
+    assert all("[" not in label for label in labels)
 
 
 def test_summary_decision_editor_stays_visible_after_action_rerun() -> None:

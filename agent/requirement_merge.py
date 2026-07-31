@@ -28,6 +28,7 @@ from agent.rules import (
     SYSTEM_DECISION_MERGED_QUANTITY_PREFIX,
     SYSTEM_DECISION_PARENT_CONFIRMED_PRODUCT_IDENTITY,
     SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY,
+    SYSTEM_DECISION_PARENT_REMOVED_MERGED_ITEM,
     SYSTEM_DECISION_AMBIGUOUS_DESCRIPTOR_PREFIX,
     SYSTEM_DECISION_RECONCILED_ATTRIBUTE_PREFIX,
     SYSTEM_DECISION_RECONCILED_BRAND,
@@ -1014,6 +1015,30 @@ def consolidate_requirements(
         )
         default_identity = CONFLICT_IDENTITY_DEFAULTS[conflict_type]
         if decision_id in excluded_ids:
+            removed_quantity = requirement_quantity_default(
+                first.canonical_item,
+                quantities,
+            ).selected_quantity
+            merged.append(
+                first.model_copy(
+                    update={
+                        "quantity": removed_quantity,
+                        "quantity_is_range": False,
+                        "quantity_max": None,
+                        "sources": sources,
+                        "variant_sources": sources,
+                        "system_decisions": tuple(
+                            dict.fromkeys(
+                                (
+                                    *first.system_decisions,
+                                    SYSTEM_DECISION_CONSOLIDATED_SOURCES,
+                                    SYSTEM_DECISION_PARENT_REMOVED_MERGED_ITEM,
+                                )
+                            )
+                        ),
+                    }
+                )
+            )
             continue
         selected_identity = active_identity_choices.get(
             decision_id,

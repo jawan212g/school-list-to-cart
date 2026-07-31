@@ -21,6 +21,7 @@ from agent.rules import (
     STANDARD_PACK_COUNTS,
     SYSTEM_DECISION_PARENT_CONFIRMED_PRODUCT_IDENTITY,
     SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY,
+    SYSTEM_DECISION_PARENT_REMOVED_MERGED_ITEM,
     unnamed_brand_requirement_needs_review,
 )
 from agent.schema import (
@@ -503,7 +504,14 @@ def organize_extractions(
                     system_decisions=requirement.system_decisions,
                     source_text=requirement.raw_text,
                     confidence=requirement.extraction_confidence,
-                    review_status="pending",
+                    review_status=(
+                        "deleted"
+                        if (
+                            SYSTEM_DECISION_PARENT_REMOVED_MERGED_ITEM
+                            in requirement.system_decisions
+                        )
+                        else "pending"
+                    ),
                     already_owned=False,
                     allow_equivalents=requirement.brand_lock is None,
                     issue_codes=_review_issues(requirement),

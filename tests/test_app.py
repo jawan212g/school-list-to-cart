@@ -3618,7 +3618,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         key.startswith("personalize-visit:0:")
         for key in state.button_keys
     )
-    assert summary.tab_labels == ("Summary", "Jawan  [1]")
+    assert summary.tab_labels == ("Summary", "Jawan")
     assert summary.radio_label_visibility == "collapsed"
     assert "1 decision remains." in summary.messages
     assert "Approve all AI recommendations" in summary.buttons
@@ -4783,6 +4783,53 @@ def test_personalize_typed_list_omits_page_count_and_names_skipped_content(
     assert all("page" not in caption.casefold() for caption in recorder.captions)
     assert recorder.markdowns == ["**List lines not added to the cart (1)**"]
     assert recorder.writes == ["Teacher direction: Bring on Monday"]
+
+
+def test_personalize_hides_blank_matrix_cell_diagnostics_from_parent() -> None:
+    """Matrix-layout diagnostics are not presented as cart exclusions."""
+
+    class Recorder:
+        session_state: dict[str, object] = {"list_inputs": ()}
+
+        def __init__(self) -> None:
+            self.markdowns: list[str] = []
+            self.writes: list[str] = []
+
+        def caption(self, value: object) -> None:
+            del value
+
+        def markdown(self, value: object) -> None:
+            self.markdowns.append(str(value))
+
+        def write(self, value: object) -> None:
+            self.writes.append(str(value))
+
+        def warning(self, value: object) -> None:
+            self.writes.append(str(value))
+
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="composition",
+                child_id="child-1",
+                raw_text="1 composition notebook",
+                canonical_item="composition_notebooks",
+                quantity=1,
+                extraction_confidence=1.0,
+            ),
+        ),
+        skipped_lines=(
+            "Blank selected 5th cell: Subject dividers",
+            "Blank selected 5th cell: Composition book - lined paper",
+        ),
+    )
+    recorder = Recorder()
+
+    app._personalize_source_summary(recorder, "child-1", envelope)
+
+    assert app._personalize_has_list_details(envelope, False) is False
+    assert recorder.markdowns == []
+    assert recorder.writes == []
 
 
 def test_one_uploaded_document_builds_inputs_for_every_child() -> None:
@@ -6431,7 +6478,8 @@ def test_merge_exclusion_reaches_personalize_cart(
         app._render_requirement_merge(recorder)
 
     merged = recorder.session_state["extracted_lists"]
-    assert tuple(merged["child-1"].requirements) == ()
+    merged_requirements = tuple(merged["child-1"].requirements)
+    assert len(merged_requirements) == 1
 
     rebuilt = app._refresh_personalize_review_cache(
         recorder.session_state,
@@ -6439,13 +6487,20 @@ def test_merge_exclusion_reaches_personalize_cart(
     )
     assert rebuilt is True
     personalize_rows = tuple(recorder.session_state["review_items"])
-    assert personalize_rows == ()
+    assert len(personalize_rows) == 1
+    assert personalize_rows[0].review_status == "deleted"
+    assert tuple(
+        source.exact_line for source in personalize_rows[0].sources
+    ) == ("2 folders", "3 folders")
     sections = app.build_personalize_student_sections(
         tuple(recorder.session_state["intake"]["children"]),
         personalize_rows,
         review_flag_groups(personalize_rows),
     )
     assert sections[0].cart_item_ids == ()
+    assert sections[0].excluded_item_ids == (
+        personalize_rows[0].review_id,
+    )
 
 
 def _submit_composition_variant_state(
@@ -6650,7 +6705,14 @@ def test_merge_checkbox_zeroes_submit_as_a_complete_exclusion(
 ) -> None:
     """Displayed zeroes from the exclusion action keep every variant out."""
 
-    assert _submit_composition_variant_state(monkeypatch, (0, 0)) == ()
+    rows = _submit_composition_variant_state(monkeypatch, (0, 0))
+
+    assert len(rows) == 1
+    assert rows[0].review_status == "deleted"
+    assert tuple(source.exact_line for source in rows[0].sources) == (
+        "1 graph paper composition notebook",
+        "4 regular composition notebooks",
+    )
 
 
 def test_merge_restoring_one_variant_keeps_the_other_variant_excluded(

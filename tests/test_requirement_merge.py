@@ -21,6 +21,7 @@ from agent.rules import (
     SINGLE_INSTANCE_REQUIREMENT_ITEMS,
     SYSTEM_DECISION_PARENT_CONFIRMED_PRODUCT_IDENTITY,
     SYSTEM_DECISION_PARENT_CONFIRMED_QUANTITY,
+    SYSTEM_DECISION_PARENT_REMOVED_MERGED_ITEM,
 )
 from agent.aggregate import aggregate_requirements
 from agent.optimize import OptimizationConfig, optimize_cart
@@ -280,7 +281,7 @@ def test_quantity_classification_covers_the_full_plausible_maximum_table() -> No
 
 
 def test_parent_can_exclude_an_entire_conflicted_item() -> None:
-    """A8: exclusion removes the production requirement without a quantity."""
+    """A8: exclusion remains visible for review but cannot reach the cart."""
 
     requirements = (
         _requirement("grade-5", 1, "5th Grade", 2),
@@ -294,7 +295,21 @@ def test_parent_can_exclude_an_entire_conflicted_item() -> None:
         excluded_decision_ids=(decision_id,),
     )
 
-    assert resolved.requirements == ()
+    assert len(resolved.requirements) == 1
+    removed = resolved.requirements[0]
+    assert SYSTEM_DECISION_PARENT_REMOVED_MERGED_ITEM in (
+        removed.system_decisions
+    )
+    assert tuple(source.exact_line for source in removed.sources) == (
+        "1 backpacks",
+        "2 backpacks",
+    )
+    review_rows = organize_extractions(
+        {"child-1": ExtractionEnvelope(requirements=(removed,))}
+    )
+    assert len(review_rows) == 1
+    assert review_rows[0].review_status == "deleted"
+    assert confirmed_requirements(review_rows) == ()
     assert resolved.interrupts == ()
     assert resolved.constraint_interrupts == ()
 

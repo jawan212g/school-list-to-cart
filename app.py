@@ -12429,6 +12429,20 @@ def _legacy_catalog_unavailable_lines(
     return tuple(unavailable), tuple(remaining)
 
 
+def _parent_visible_skipped_lines(
+    lines: Sequence[str],
+) -> tuple[str, ...]:
+    """Hide matrix-layout diagnostics that are not parent cart exclusions."""
+
+    blank_matrix_cell = re.compile(
+        r"^\s*Blank selected .+ cell:\s*",
+        flags=re.IGNORECASE,
+    )
+    return tuple(
+        line for line in lines if blank_matrix_cell.match(line) is None
+    )
+
+
 def _catalog_unavailable_display_text(item: CatalogUnavailableItem) -> str:
     """Show unavailable quantity and item name without BR-46 delimiters."""
 
@@ -12664,6 +12678,7 @@ def _personalize_source_summary(
             )
 
     _, remaining_skipped = _legacy_catalog_unavailable_lines(envelope)
+    remaining_skipped = _parent_visible_skipped_lines(remaining_skipped)
     if remaining_skipped:
         st.markdown(
             f"**List lines not added to the cart ({len(remaining_skipped)})**"
@@ -12694,6 +12709,7 @@ def _personalize_has_list_details(
     if envelope is None:
         return False
     _, remaining_skipped = _legacy_catalog_unavailable_lines(envelope)
+    remaining_skipped = _parent_visible_skipped_lines(remaining_skipped)
     return bool(envelope.uninterpreted_lines or remaining_skipped)
 
 
@@ -12906,14 +12922,7 @@ def _render_review(st: Any) -> None:
     tab_labels = {
         "summary": "Summary",
         **{
-            section.child_id: (
-                section.child_label
-                + (
-                    f"  [{section.decision_count}]"
-                    if section.decision_count
-                    else ""
-                )
-            )
+            section.child_id: section.child_label
             for section in student_sections
         },
     }

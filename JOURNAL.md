@@ -4693,6 +4693,44 @@ assertion was relaxed.
 No extraction, matching, pricing, optimizer, gate, or business-threshold
 behavior changed.
 
+## 2026-07-30 — Personalize removal stays visible and duplicate exclusions survive
+
+### Diagnosis
+
+The student navigation labels embedded a mutable decision count. Removing a
+decision changed the selected radio option's rendered label during the same
+rerun, creating a browser reconciliation risk even though the durable selected
+student ID remained correct in AppTest.
+
+The duplicate-resolution exclusion had a separate data-loss defect. Its
+checkbox reached deterministic merge code, but that code used `continue` to
+discard the entire requirement group. Personalize therefore had no row it
+could classify as removed. Unrelated model-produced `Blank selected ... cell`
+matrix diagnostics remained in `skipped_lines` and were then presented under
+the misleading parent-facing heading "List lines not added to the cart."
+
+### Resolution
+
+- Made Personalize navigation option labels stable student/classroom names;
+  decision counts remain visible in each entry's content and Summary.
+- Preserve an excluded duplicate group with all contributing source evidence
+  and a deterministic parent-removal marker.
+- Convert that marker into a deleted review row, so it appears under "Removed
+  from cart" but `confirmed_requirements()` cannot send it to the cart.
+- Retain blank-matrix diagnostics internally while filtering them from
+  parent-facing cart-exclusion copy.
+
+### Verification
+
+The ARM64 suite passed with 442 tests and one Streamlit AppTest skip. The x86
+AppTest run is required to verify real widget reconciliation after the
+navigation-label change.
+
+### Architecture
+
+No model call, extraction prompt, matching rule, price, money path, optimizer,
+approval gate, or BR threshold changed.
+
 ## 2026-07-30 — Named products and decision controls stay aligned
 
 ### Defects
