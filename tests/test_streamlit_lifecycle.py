@@ -699,6 +699,86 @@ app._render_review(st)
     return test_app
 
 
+def _run_classroom_personalize_screen() -> AppTest:
+    """Mount production Personalize for a five-student per-student list."""
+
+    test_app = AppTest.from_string(
+        """
+import streamlit as st
+import app
+from agent.review import organize_extractions
+from agent.schema import ExtractionEnvelope, Requirement
+
+st.session_state.setdefault(
+    "intake",
+    {
+        "children": (
+            {
+                "child_id": "classroom-1",
+                "label": "Ms. Q's class",
+                "grade": "Grade 3",
+                "entity_type": "classroom",
+                "student_count": 5,
+            },
+        )
+    },
+)
+st.session_state.setdefault(
+    "extracted_lists",
+    {
+        "classroom-1": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="glue",
+                    child_id="classroom-1",
+                    raw_text="1 packs Elmer's glue sticks",
+                    canonical_item="glue_sticks",
+                    quantity=1,
+                    unit_type="pack",
+                    brand="Elmer's",
+                    supply_scope="individual",
+                    extraction_confidence=1.0,
+                ),
+                Requirement(
+                    req_id="pencils",
+                    child_id="classroom-1",
+                    raw_text="10 pencils",
+                    canonical_item="pencils",
+                    quantity=10,
+                    supply_scope="individual",
+                    extraction_confidence=1.0,
+                ),
+                Requirement(
+                    req_id="notes",
+                    child_id="classroom-1",
+                    raw_text="2 packs of Post-Its",
+                    canonical_item="sticky_notes",
+                    quantity=2,
+                    unit_type="pack",
+                    brand="Post-It",
+                    supply_scope="individual",
+                    extraction_confidence=1.0,
+                ),
+            )
+        )
+    },
+)
+st.session_state.setdefault(
+    "review_items",
+    organize_extractions(dict(st.session_state["extracted_lists"])),
+)
+st.session_state.setdefault("parent_added_review_items", ())
+st.session_state.setdefault("extraction_errors", {})
+st.session_state.setdefault("list_inputs", ())
+st.session_state.setdefault(app.PERSONALIZE_SELECTED_VIEW_KEY, "classroom-1")
+app._render_review(st)
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
 def _run_personalize_decision_screen() -> AppTest:
     """Mount the production Personalize screen with one flagged source item."""
 
@@ -1639,6 +1719,31 @@ def test_personalize_item_expanders_and_controls_keep_independent_state() -> Non
         )
     )
     assert pencils_expander.proto.expanded is True
+
+
+def test_classroom_personalize_shows_per_student_quantities_as_class_totals() -> None:
+    """BR-33: the real Personalize screen shows five-student totals."""
+
+    test_app = _run_classroom_personalize_screen()
+    labels = {expander.label for expander in test_app.expander}
+
+    assert "5 packs of Elmer's glue sticks" in labels
+    assert "50 pencils" in labels
+    assert "10 packs of Post-It sticky notes" in labels
+
+    pencil_row = next(
+        expander for expander in test_app.expander
+        if expander.label == "50 pencils"
+    )
+    quantity = next(
+        widget for widget in pencil_row.number_input
+        if widget.label == "Quantity for each student"
+    )
+    assert quantity.value == 10
+    assert any(
+        "Class total: 50 (10 for each student x 5 students)." in caption.value
+        for caption in pencil_row.caption
+    )
 
     test_app.number_input(key=pencils_quantity.key).set_value(24).run()
     _assert_no_exception(test_app)

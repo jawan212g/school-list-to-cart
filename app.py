@@ -7509,10 +7509,31 @@ REVIEW_HEADING_ATTRIBUTE_FIELDS = (
 )
 
 
-def review_understanding_text(item: SupplyItemReview) -> str:
+def _personalize_quantity_multiplier(
+    item: SupplyItemReview,
+    student_counts_by_child: Mapping[str, int] | None = None,
+) -> int:
+    """Return BR-33's display multiplier without changing stored quantities."""
+
+    if item.supply_scope != CLASSROOM_INDIVIDUAL_SCOPE:
+        return 1
+    counts = student_counts_by_child or {}
+    return max(1, int(counts.get(item.child_id, 1)))
+
+
+def review_understanding_text(
+    item: SupplyItemReview,
+    *,
+    student_counts_by_child: Mapping[str, int] | None = None,
+) -> str:
     """Describe one extracted purchase in plain parent-facing language."""
 
     quantity = item.required_quantity
+    if quantity is not None:
+        quantity *= _personalize_quantity_multiplier(
+            item,
+            student_counts_by_child,
+        )
     display_name = _item_display_name(item.item_name).casefold()
     singular_name = REVIEW_SINGULAR_ITEM_NAMES.get(
         item.item_name,
@@ -7576,12 +7597,20 @@ def review_understanding_text(item: SupplyItemReview) -> str:
     return ", ".join((text, *details))
 
 
-def _review_summary_quantity_text(item: SupplyItemReview) -> str:
+def _review_summary_quantity_text(
+    item: SupplyItemReview,
+    *,
+    student_counts_by_child: Mapping[str, int] | None = None,
+) -> str:
     """Show quantity separately from the item in BR-52's Summary table."""
 
     quantity = item.required_quantity
     if quantity is None:
         return "Not stated"
+    quantity *= _personalize_quantity_multiplier(
+        item,
+        student_counts_by_child,
+    )
     if item.unit == "each":
         return str(quantity)
     container = {
@@ -9349,6 +9378,7 @@ def _render_personalize_summary(
     original_items: Mapping[str, SupplyItemReview] | None = None,
     offers: Sequence[Offer] = (),
     child_labels: Mapping[str, str] | None = None,
+    student_counts_by_child: Mapping[str, int] | None = None,
     source_context_by_review_id: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[dict[str, SupplyItemReview], tuple[str, ...]]:
     """Render BR-52's complete production Personalize summary."""
@@ -9467,6 +9497,7 @@ def _render_personalize_summary(
                             offers=offers,
                             flag_messages=group.messages,
                             original_items=originals,
+                            student_counts_by_child=student_counts_by_child,
                             source_context_by_review_id=(
                                 source_context_by_review_id
                             ),
@@ -9504,8 +9535,12 @@ def _render_personalize_summary(
             item = item_by_id.get(item_id)
             unavailable_text = unavailable_items.get(item_id)
             if item is not None:
+                quantity_text = _review_summary_quantity_text(
+                    item,
+                    student_counts_by_child=student_counts_by_child,
+                )
                 text = (
-                    f"{_review_summary_quantity_text(item)} "
+                    f"{quantity_text} "
                     f"{_review_summary_item_text(item)}"
                 )
             else:
@@ -9555,6 +9590,10 @@ def _render_personalize_summary(
                 st.markdown(f"**{group_label} ({len(group_items)})**")
                 for item in group_items:
                     child_label = labels_for_item[item.review_id]
+                    quantity_text = _review_summary_quantity_text(
+                        item,
+                        student_counts_by_child=student_counts_by_child,
+                    )
                     with st.container(
                         border=True,
                         key=(
@@ -9565,7 +9604,7 @@ def _render_personalize_summary(
                         st.markdown(
                             escape_streamlit_dollars(
                                 f"**{child_label}: "
-                                f"{_review_summary_quantity_text(item)} "
+                                f"{quantity_text} "
                                 f"{_review_summary_item_text(item)}**"
                             )
                         )
@@ -9583,6 +9622,9 @@ def _render_personalize_summary(
                                     offers=offers,
                                     original_item=originals.get(
                                         item.review_id
+                                    ),
+                                    student_counts_by_child=(
+                                        student_counts_by_child
                                     ),
                                 )
                             )
@@ -10592,6 +10634,7 @@ def _render_compact_review_row(
     offers: Sequence[Offer],
     flag_messages: Sequence[str] = (),
     original_items: Mapping[str, SupplyItemReview] | None = None,
+    student_counts_by_child: Mapping[str, int] | None = None,
     source_context_by_review_id: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[dict[str, SupplyItemReview], bool]:
     """Render one parent-first item card in the required verification order."""
@@ -10626,7 +10669,10 @@ def _render_compact_review_row(
                 for member in members
             )
         )
-        item_heading = review_understanding_text(preview)
+        item_heading = review_understanding_text(
+            preview,
+            student_counts_by_child=student_counts_by_child,
+        )
         if len(affected_labels) > 1:
             item_heading += " · " + _join_names(affected_labels)
         st.markdown(
@@ -10747,6 +10793,7 @@ def _render_settled_review_row(
     original_item: SupplyItemReview | None = None,
     ai_recommendation_approved: bool = False,
     source_context: Sequence[str] = (),
+    student_counts_by_child: Mapping[str, int] | None = None,
 ) -> SupplyItemReview:
     """Render one settled item as a keyed in-place disclosure."""
 
@@ -10756,8 +10803,17 @@ def _render_settled_review_row(
         key_prefix=key_prefix,
     )
     expander_key = personalize_row_expander_key(key_prefix)
+    quantity_multiplier = _personalize_quantity_multiplier(
+        item,
+        student_counts_by_child,
+    )
     with st.expander(
-        escape_streamlit_dollars(review_understanding_text(item)),
+        escape_streamlit_dollars(
+            review_understanding_text(
+                item,
+                student_counts_by_child=student_counts_by_child,
+            )
+        ),
         expanded=_personalize_expander_open_state(
             st.session_state,
             expander_key,
@@ -10782,9 +10838,20 @@ def _render_settled_review_row(
             st.caption("AI recommendation approved by you")
 
         quantity_key = f"{key_prefix}:quantity"
+        if quantity_multiplier > 1 and item.required_quantity is not None:
+            class_total = item.required_quantity * quantity_multiplier
+            st.caption(
+                f"Class total: {class_total} "
+                f"({item.required_quantity} for each student x "
+                f"{quantity_multiplier} students)."
+            )
         quantity = int(
             st.number_input(
-                "Quantity",
+                (
+                    "Quantity for each student"
+                    if quantity_multiplier > 1
+                    else "Quantity"
+                ),
                 min_value=EXCLUDED_REQUIREMENT_QUANTITY,
                 value=(
                     item.required_quantity
@@ -10886,6 +10953,7 @@ def _render_excluded_review_row(
     offers: Sequence[Offer],
     original_item: SupplyItemReview | None = None,
     source_context: Sequence[str] = (),
+    student_counts_by_child: Mapping[str, int] | None = None,
 ) -> SupplyItemReview:
     """Render one parent-excluded item with a reversible disclosure."""
 
@@ -10896,7 +10964,12 @@ def _render_excluded_review_row(
             escape_streamlit_dollars(_review_summary_item_text(item))
         )
         columns[1].write(
-            escape_streamlit_dollars(_review_summary_quantity_text(original))
+            escape_streamlit_dollars(
+                _review_summary_quantity_text(
+                    original,
+                    student_counts_by_child=student_counts_by_child,
+                )
+            )
         )
         st.caption("Already provided by school")
         _render_split_source_context(
@@ -10922,6 +10995,7 @@ def _render_excluded_review_row(
         offers=offers,
         original_item=original,
         source_context=source_context,
+        student_counts_by_child=student_counts_by_child,
     )
 
 
@@ -10986,6 +11060,7 @@ def _render_optional_review_row(
     offers: Sequence[Offer],
     original_item: SupplyItemReview | None = None,
     source_context: Sequence[str] = (),
+    student_counts_by_child: Mapping[str, int] | None = None,
 ) -> SupplyItemReview:
     """Render an optional item with the same reversible controls as other rows."""
 
@@ -10997,6 +11072,7 @@ def _render_optional_review_row(
         offers=offers,
         original_item=original,
         source_context=source_context,
+        student_counts_by_child=student_counts_by_child,
     )
 
 
@@ -13040,6 +13116,7 @@ def _render_personalize_unavailable(
     unstocked_items: Sequence[SupplyItemReview],
     *,
     scroll_target: str | None = None,
+    student_counts_by_child: Mapping[str, int] | None = None,
 ) -> None:
     """Render one collapsed unavailable section with one document source."""
 
@@ -13091,7 +13168,10 @@ def _render_personalize_unavailable(
             )
             st.write(
                 escape_streamlit_dollars(
-                    review_understanding_text(item)
+                    review_understanding_text(
+                        item,
+                        student_counts_by_child=student_counts_by_child,
+                    )
                 )
             )
         for index, item in enumerate(catalog_unavailable, start=1):
@@ -13284,6 +13364,13 @@ def _render_review(st: Any) -> None:
     child_order = {
         str(child["child_id"]): index
         for index, child in enumerate(children)
+    }
+    student_counts_by_child = {
+        str(child["child_id"]): max(
+            1,
+            int(child.get("student_count", 1)),
+        )
+        for child in children
     }
     pending_added_items = tuple(
         st.session_state.get("parent_added_review_items", ())
@@ -13558,6 +13645,7 @@ def _render_review(st: Any) -> None:
                 original_items=original_items,
                 offers=review_offers,
                 child_labels=child_labels,
+                student_counts_by_child=student_counts_by_child,
                 source_context_by_review_id=source_context_by_review_id,
                 )
             )
@@ -13686,6 +13774,7 @@ def _render_review(st: Any) -> None:
                     offers=review_offers,
                     flag_messages=group.messages,
                     original_items=original_items,
+                    student_counts_by_child=student_counts_by_child,
                     source_context_by_review_id=source_context_by_review_id,
                 )
                 edited_by_id.update(edited)
@@ -13725,6 +13814,7 @@ def _render_review(st: Any) -> None:
                             item.review_id,
                             (),
                         ),
+                        student_counts_by_child=student_counts_by_child,
                     )
 
             optional_items = tuple(
@@ -13754,6 +13844,7 @@ def _render_review(st: Any) -> None:
                                 item.review_id,
                                 (),
                             ),
+                            student_counts_by_child=student_counts_by_child,
                         )
                     )
 
@@ -13809,6 +13900,7 @@ def _render_review(st: Any) -> None:
                                 )
                                 else None
                             ),
+                            student_counts_by_child=student_counts_by_child,
                         )
                 for group_label, group_items in (
                     _group_personalize_excluded_items(excluded_items)
@@ -13840,6 +13932,9 @@ def _render_review(st: Any) -> None:
                                         item.review_id,
                                         (),
                                     )
+                                ),
+                                student_counts_by_child=(
+                                    student_counts_by_child
                                 ),
                             )
                         )

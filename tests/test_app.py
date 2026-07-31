@@ -5439,6 +5439,61 @@ def test_personalize_item_names_do_not_expose_supply_scope_codes() -> None:
     assert app._review_summary_item_text(shared) == "Tissues"
 
 
+def test_personalize_classroom_totals_use_the_saved_student_count() -> None:
+    """BR-33: the screen's own formatter shows whole-class quantities."""
+
+    counts = {"classroom-1": 5}
+    items = (
+        SupplyItemReview(
+            review_id="classroom-1:glue",
+            req_id="glue",
+            child_id="classroom-1",
+            item_name="glue_sticks",
+            required_quantity=1,
+            unit="pack",
+            brand="Elmer's",
+            supply_scope="individual",
+            source_text="1 packs Elmer's glue sticks",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="classroom-1:pencils",
+            req_id="pencils",
+            child_id="classroom-1",
+            item_name="pencils",
+            required_quantity=10,
+            supply_scope="individual",
+            source_text="10 pencils",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="classroom-1:notes",
+            req_id="notes",
+            child_id="classroom-1",
+            item_name="sticky_notes",
+            required_quantity=2,
+            unit="pack",
+            brand="Post-It",
+            supply_scope="individual",
+            source_text="2 packs of Post-Its",
+            confidence=1.0,
+        ),
+    )
+
+    assert [
+        app.review_understanding_text(
+            item,
+            student_counts_by_child=counts,
+        )
+        for item in items
+    ] == [
+        "5 packs of Elmer's glue sticks",
+        "50 pencils",
+        "10 packs of Post-It sticky notes",
+    ]
+    assert [item.required_quantity for item in items] == [1, 10, 2]
+
+
 def test_section_picker_uses_only_section_choices_when_details_add_nothing() -> None:
     """A simple grade picker does not render a redundant evidence table."""
 

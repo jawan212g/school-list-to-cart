@@ -5921,3 +5921,38 @@ low-confidence catalog-match decision remains.
 
 - Obtain the deployed crash traceback or Streamlit log tail and reproduce that
   exact cart-build failure before changing its handler or timeout behavior.
+
+## 2026-07-31 â€” Personalize now shows classroom totals
+
+### What changed
+
+- Traced BR-33 from the mandatory classroom choice through extraction and the
+  cart. The selected `individual` scope was stored correctly and aggregation
+  multiplied it correctly, but Personalize formatted the raw per-student
+  `SupplyItemReview.required_quantity` before that aggregation boundary.
+- Personalize now derives its displayed quantity from the same saved classroom
+  count and scope. A five-student list with 1 pack of glue sticks, 10 pencils,
+  and 2 packs of sticky notes displays 5 packs, 50 pencils, and 10 packs.
+- Stored review quantities remain per student so aggregation still multiplies
+  exactly once. When a classroom row is opened, its editor says `Quantity for
+  each student` and names the resulting class total.
+
+### Defect finding
+
+- The prior end-to-end BR-33 test proved only that the final cart scaled. It did
+  not render Personalize, so it could not detect that the parent-facing review
+  showed unscaled values even while the later cart math was correct.
+
+### Testing performed
+
+- Added an ARM64 regression against the exact five-student example and verified
+  that display formatting does not mutate the stored quantities.
+- Added an x86 AppTest that renders the production Personalize screen, checks
+  all three class totals, and verifies the quantity editor remains per student.
+- `py -3.12-arm64 -m pytest -q`
+  - `480 passed, 1 skipped in 14.55s`.
+
+### Remaining work
+
+- The new real-render AppTest requires the x86 GitHub Actions runner because
+  Streamlit AppTest is unavailable in the local ARM64 environment.
