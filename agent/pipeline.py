@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from itertools import combinations
 from pathlib import Path
 from typing import Literal
 
@@ -15,7 +16,7 @@ from openai import OpenAI
 from agent.addons import AddOnProposal, propose_addons
 from agent.aggregate import UnitNeed, aggregate_requirements
 from agent.budget_plans import BudgetAnalysis, build_budget_analysis
-from agent.consolidate import consolidate_selected_skus
+from agent.consolidate import ConsolidationResult, consolidate_selected_skus
 from agent.decisions import Decision, DecisionLog
 from agent.extract import (
     apply_extraction_security_filters,
@@ -701,31 +702,14 @@ def run_pipeline(
         fulfillment_preference=session.fulfillment_pref,
         tax_basis_points=session.tax_basis_points,
     )
-    preliminary_optimization = optimize_cart(
+    optimization, consolidation = _optimize_and_consolidate(
         unit_needs,
+        matches,
         active_offers,
         active_stores,
         optimization_config,
-        candidate_skus_by_need=matches.candidate_skus_by_need,
-    )
-    consolidation = consolidate_selected_skus(
-        unit_needs,
-        matches,
-        preliminary_optimization,
     )
     final_matches = consolidation.matches
-    if consolidation.changed:
-        optimization = optimize_cart(
-            consolidation.unit_needs,
-            active_offers,
-            active_stores,
-            optimization_config,
-            candidate_skus_by_need=(
-                final_matches.candidate_skus_by_need
-            ),
-        )
-    else:
-        optimization = preliminary_optimization
     proposed_cart = _decorate_optimization(optimization, final_matches)
     if progress_callback is not None:
         progress_callback(
@@ -932,6 +916,11 @@ def replan_after_catalog_change(
     changed_sku: str,
     approval_outcomes: Mapping[str, str] | None = None,
     budget_action_ids: Sequence[str] = (),
+    current_optimization: OptimizationResult | None = None,
+    omitted_source_requirement_ids: frozenset[tuple[str, ...]] = frozenset(),
+    forced_skus_by_source: Mapping[
+        tuple[str, ...], frozenset[str]
+    ] | None = None,
 ) -> ReplanTransition:
     """Replan from cached matches after an FR-32 stock or price change."""
 
@@ -951,6 +940,46 @@ def replan_after_catalog_change(
         source_matches,
         active_offers,
     )
+    forced_skus = forced_skus_by_source or {}
+    constrained_needs = tuple(
+        need
+        for need in prior.unit_needs
+        if need.source_requirement_ids not in omitted_source_requirement_ids
+    )
+    constrained_matches = MatchResult(
+        needs=tuple(
+            replace(
+                need_matches,
+                candidates=tuple(
+                    candidate
+                    for candidate in need_matches.candidates
+                    if (
+                        need_matches.unit_need.source_requirement_ids
+                        not in forced_skus
+                        or candidate.offer.sku
+                        in forced_skus[
+                            need_matches.unit_need.source_requirement_ids
+                        ]
+                    )
+                ),
+                review_blocked_candidates=tuple(
+                    candidate
+                    for candidate in need_matches.review_blocked_candidates
+                    if (
+                        need_matches.unit_need.source_requirement_ids
+                        not in forced_skus
+                        or candidate.offer.sku
+                        in forced_skus[
+                            need_matches.unit_need.source_requirement_ids
+                        ]
+                    )
+                ),
+            )
+            for need_matches in refreshed_source_matches.needs
+            if need_matches.unit_need.source_requirement_ids
+            not in omitted_source_requirement_ids
+        )
+    )
     config = OptimizationConfig(
         shopping_mode=prior.session.shopping_mode,
         budget_cents=prior.session.budget_total,
@@ -960,31 +989,14 @@ def replan_after_catalog_change(
         fulfillment_preference=prior.session.fulfillment_pref,
         tax_basis_points=prior.session.tax_basis_points,
     )
-    preliminary = optimize_cart(
-        prior.unit_needs,
+    optimization, consolidation = _optimize_and_consolidate(
+        constrained_needs,
+        constrained_matches,
         active_offers,
         active_stores,
         config,
-        candidate_skus_by_need=(
-            refreshed_source_matches.candidate_skus_by_need
-        ),
-    )
-    consolidation = consolidate_selected_skus(
-        prior.unit_needs,
-        refreshed_source_matches,
-        preliminary,
     )
     final_matches = consolidation.matches
-    if consolidation.changed:
-        optimization = optimize_cart(
-            consolidation.unit_needs,
-            active_offers,
-            active_stores,
-            config,
-            candidate_skus_by_need=final_matches.candidate_skus_by_need,
-        )
-    else:
-        optimization = preliminary
     proposed_cart = _decorate_optimization(optimization, final_matches)
 
     decision_log = DecisionLog(
@@ -992,7 +1004,9 @@ def replan_after_catalog_change(
     )
     affected_lines = tuple(
         line.line_id
-        for line in _selected_lines(prior.proposed_cart)
+        for line in _selected_lines(
+            current_optimization or prior.proposed_cart
+        )
         if line.sku == changed_sku
     )
     decision_log.record(
@@ -1065,21 +1079,8 @@ def replan_after_catalog_change(
     )
     current_ids = frozenset(_ungrouped_interrupt_ids(approval_batch))
     previous_outcomes = approval_outcomes or {}
-    preserved_outcomes = {
-        interrupt_id: outcome
-        for interrupt_id, outcome in previous_outcomes.items()
-        if interrupt_id in current_ids
-    }
-    actions_by_id = (
-        {}
-        if budget_analysis is None
-        else budget_analysis.actions_by_id
-    )
-    preserved_budget_actions = tuple(
-        action_id
-        for action_id in dict.fromkeys(budget_action_ids)
-        if action_id in actions_by_id
-    )
+    preserved_outcomes = dict(previous_outcomes)
+    preserved_budget_actions = tuple(dict.fromkeys(budget_action_ids))
     return ReplanTransition(
         result=result,
         preserved_approval_outcomes=preserved_outcomes,
@@ -1092,6 +1093,120 @@ def replan_after_catalog_change(
         changed_sku=changed_sku,
     )
 
+
+def _optimize_with_match_candidates(
+    unit_needs: Sequence[UnitNeed],
+    matches: MatchResult,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    config: OptimizationConfig,
+) -> OptimizationResult:
+    """Prefer exact matches, widening only to improve custom coverage (FR-04)."""
+
+    preferred = optimize_cart(
+        unit_needs,
+        offers,
+        stores,
+        config,
+        candidate_skus_by_need=matches.candidate_skus_by_need,
+    )
+    if config.shopping_mode != "custom" or preferred.is_complete:
+        return preferred
+
+    offers_by_sku = {offer.sku: offer for offer in offers}
+    permitted_store_ids = tuple(
+        store.store_id
+        for store in stores
+        if config.allowed_store_ids is None
+        or store.store_id in config.allowed_store_ids
+    )
+    store_limit = config.max_stores or len(permitted_store_ids)
+    alternatives = [preferred]
+    preferred_candidates = matches.candidate_skus_by_need
+    all_candidates = matches.all_candidate_skus_by_need
+    for scope_size in range(
+        1,
+        min(store_limit, len(permitted_store_ids)) + 1,
+    ):
+        for scoped_store_ids in combinations(
+            permitted_store_ids,
+            scope_size,
+        ):
+            scope = frozenset(scoped_store_ids)
+            scoped_candidates = {}
+            for need in unit_needs:
+                source_ids = need.source_requirement_ids
+                exact_in_scope = frozenset(
+                    sku
+                    for sku in preferred_candidates.get(source_ids, ())
+                    if offers_by_sku[sku].store_id in scope
+                )
+                suitable_in_scope = frozenset(
+                    sku
+                    for sku in all_candidates.get(source_ids, ())
+                    if offers_by_sku[sku].store_id in scope
+                )
+                scoped_candidates[source_ids] = (
+                    exact_in_scope or suitable_in_scope
+                )
+            alternatives.append(
+                optimize_cart(
+                    unit_needs,
+                    offers,
+                    stores,
+                    replace(
+                        config,
+                        allowed_store_ids=scope,
+                        max_stores=scope_size,
+                    ),
+                    candidate_skus_by_need=scoped_candidates,
+                )
+            )
+
+    return min(
+        alternatives,
+        key=lambda result: (
+            not result.is_complete,
+            len(result.gap_items),
+            result.comparison_cost,
+            result.landed_cost,
+        ),
+    )
+
+
+def _optimize_and_consolidate(
+    unit_needs: Sequence[UnitNeed],
+    matches: MatchResult,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    config: OptimizationConfig,
+) -> tuple[OptimizationResult, ConsolidationResult]:
+    """Run the production optimization and shared-SKU consolidation path."""
+
+    preliminary = _optimize_with_match_candidates(
+        unit_needs,
+        matches,
+        offers,
+        stores,
+        config,
+    )
+    consolidation = consolidate_selected_skus(
+        unit_needs,
+        matches,
+        preliminary,
+    )
+    if not consolidation.changed:
+        return preliminary, consolidation
+    return (
+        _optimize_with_match_candidates(
+            consolidation.unit_needs,
+            consolidation.matches,
+            offers,
+            stores,
+            config,
+        ),
+        consolidation,
+    )
 
 def detect_cart_staleness(
     optimization: OptimizationResult,

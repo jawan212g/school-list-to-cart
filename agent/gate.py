@@ -499,7 +499,7 @@ def _need_interrupts(
     context: GateContext,
 ) -> list[ApprovalInterrupt]:
     interrupts: list[ApprovalInterrupt] = []
-    gap_labels = frozenset(context.optimization.gap_items)
+    gap_labels = frozenset(context.optimization.unfulfilled_gap_items)
     for need_matches in context.matches.needs:
         need = need_matches.unit_need
         if need_matches.requires_confidence_review:

@@ -383,6 +383,20 @@ class MatchResult:
             for need_matches in self.needs
         }
 
+    @property
+    def all_candidate_skus_by_need(
+        self,
+    ) -> Mapping[tuple[str, ...], frozenset[str]]:
+        """Return every above-floor suitable SKU for feasibility fallback."""
+
+        return {
+            need_matches.unit_need.source_requirement_ids: frozenset(
+                candidate.offer.sku
+                for candidate in need_matches.candidates
+            )
+            for need_matches in self.needs
+        }
+
     def candidate(
         self,
         source_requirement_ids: tuple[str, ...],

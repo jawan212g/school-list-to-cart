@@ -6734,24 +6734,12 @@ def _store_replan_transition(
         stores,
         child_labels,
     )
-    options_by_interrupt = {
-        presentation.interrupt.interrupt_id: {
-            option.alternative_id
-            for option in _all_presentation_options(presentation)
-        }
-        for presentation in presentations
-    }
-    preserved_outcomes = {
-        interrupt_id: outcome
-        for interrupt_id, outcome in (
-            transition.preserved_approval_outcomes.items()
-        )
-        if outcome in options_by_interrupt.get(interrupt_id, set())
-    }
+    preserved_outcomes = dict(transition.preserved_approval_outcomes)
     st.session_state["result"] = result
-    st.session_state["approval_generation"] = (
+    new_generation = (
         int(st.session_state["approval_generation"]) + 1
     )
+    st.session_state["approval_generation"] = new_generation
     st.session_state["approval_presentations_cache"] = presentations
     st.session_state["approval_outcomes"] = preserved_outcomes
     st.session_state["replan_preserved_approval_ids"] = frozenset(
@@ -6765,7 +6753,16 @@ def _store_replan_transition(
     )
     st.session_state["approved_optimization"] = None
     st.session_state["resolved_interrupts"] = {}
-    st.session_state["addon_selection_token"] = None
+    selected_addon_ids = frozenset(
+        st.session_state.get("replan_selected_addon_ids", ())
+    )
+    for item in result.addon_proposal.items:
+        st.session_state[
+            _addon_checkbox_key(new_generation, item.requirement_id)
+        ] = item.requirement_id in selected_addon_ids
+    st.session_state["addon_selection_token"] = (
+        f"{result.session.session_id}:{new_generation}"
+    )
     st.session_state["addon_evaluation"] = None
     st.session_state["checkout_confirmation"] = None
     st.session_state["catalog_change_notice"] = notice
@@ -6775,9 +6772,106 @@ def _store_replan_transition(
     st.session_state["screen"] = "working"
 
 
+def _stockout_replan_notice(
+    stockout_sku: str,
+    prior: OptimizationResult,
+    replanned: OptimizationResult,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    preserved_decision_count: int,
+) -> str:
+    """Explain the selected replacement and any fulfillment-fee movement."""
+
+    prior_lines = tuple(line for plan in _plans(prior) for line in plan.lines)
+    new_lines = tuple(
+        line for plan in _plans(replanned) for line in plan.lines
+    )
+    affected_source_ids = {
+        line.source_requirement_ids
+        for line in prior_lines
+        if line.sku == stockout_sku
+    }
+    replacement_skus = tuple(
+        dict.fromkeys(
+            line.sku
+            for line in new_lines
+            if line.source_requirement_ids in affected_source_ids
+            and line.sku != stockout_sku
+        )
+    )
+    old_product = _catalog_product_label(stockout_sku, offers, stores)
+    if replacement_skus:
+        replacements = _join_names(
+            tuple(
+                _catalog_product_label(sku, offers, stores)
+                for sku in replacement_skus
+            )
+        )
+        opening = f"{old_product} went out of stock and {replacements} replaced it."
+    else:
+        opening = (
+            f"{old_product} went out of stock and no stocked replacement "
+            "was available under the current preferences."
+        )
+
+    delta = replanned.landed_cost - prior.landed_cost
+    total_sentence = (
+        " Total cost did not change."
+        if delta == 0
+        else (
+            f" Total cost {'increased' if delta > 0 else 'decreased'} by "
+            f"{format_money(abs(delta))}."
+        )
+    )
+    prior_orders = {
+        order.store_id: order
+        for plan in _plans(prior)
+        for order in plan.store_orders
+    }
+    new_orders = {
+        order.store_id: order
+        for plan in _plans(replanned)
+        for order in plan.store_orders
+    }
+    stores_by_id = {store.store_id: store for store in stores}
+    fee_notes = []
+    for store_id in sorted(set(prior_orders) | set(new_orders)):
+        old_order = prior_orders.get(store_id)
+        new_order = new_orders.get(store_id)
+        old_fee = 0 if old_order is None else old_order.fulfillment_fee
+        new_fee = 0 if new_order is None else new_order.fulfillment_fee
+        if old_fee == new_fee or new_order is None:
+            continue
+        store = stores_by_id[store_id]
+        minimum = (
+            store.delivery_minimum
+            if new_order.fulfillment_method == "delivery"
+            else store.pickup_minimum
+        )
+        if new_fee > old_fee and new_order.item_subtotal < minimum:
+            fee_notes.append(
+                f"{store.name} fell below its {format_money(minimum)} "
+                f"free-{new_order.fulfillment_method} threshold, so its "
+                f"fee increased by {format_money(new_fee - old_fee)}."
+            )
+        else:
+            fee_notes.append(
+                f"{store.name}'s {new_order.fulfillment_method} fee changed "
+                f"by {format_cost_delta(new_fee - old_fee)}."
+            )
+    fee_sentence = "" if not fee_notes else " " + " ".join(fee_notes)
+    return (
+        opening
+        + total_sentence
+        + fee_sentence
+        + f" {preserved_decision_count} prior decision(s) remained in place."
+    )
+
+
 def _apply_stockout_replan(
     st: Any,
     result: PipelineResult,
+    current_optimization: OptimizationResult,
     stockout_sku: str,
     offers: Sequence[Offer],
     stores: Sequence[Store],
@@ -6794,14 +6888,76 @@ def _apply_stockout_replan(
         new_stockouts,
         st.session_state["price_overrides"],
     )
+    presentations = build_approval_presentations(
+        result,
+        offers,
+        stores,
+        child_labels,
+    )
+    active_outcomes = dict(st.session_state["approval_outcomes"])
+    stocked_out_approval_ids = {
+        presentation.interrupt.interrupt_id
+        for presentation, option in _selected_approval_options(
+            presentations,
+            active_outcomes,
+        )
+        if option.sku == stockout_sku
+    }
+    active_outcomes = {
+        interrupt_id: outcome
+        for interrupt_id, outcome in active_outcomes.items()
+        if interrupt_id not in stocked_out_approval_ids
+    }
+    active_budget_ids = tuple(
+        action_id
+        for action_id in st.session_state["budget_action_ids"]
+        if (
+            result.budget_analysis is None
+            or action_id not in result.budget_analysis.actions_by_id
+            or result.budget_analysis.actions_by_id[
+                action_id
+            ].replacement_sku
+            != stockout_sku
+        )
+    )
+    omitted, forced = _selected_requirement_constraints(
+        result,
+        presentations,
+        active_outcomes,
+        active_budget_ids,
+    )
+    omitted = frozenset(
+        set(st.session_state.get("replan_omitted_source_ids", ()))
+        | set(omitted)
+    )
+    forced = {
+        **dict(st.session_state.get("replan_forced_skus", {})),
+        **dict(forced),
+    }
+    forced = {
+        source_ids: skus
+        for source_ids, skus in forced.items()
+        if stockout_sku not in skus
+    }
+    st.session_state["replan_omitted_source_ids"] = omitted
+    st.session_state["replan_forced_skus"] = forced
+    prior_addon_evaluation = st.session_state.get("addon_evaluation")
+    st.session_state["replan_selected_addon_ids"] = tuple(
+        ()
+        if prior_addon_evaluation is None
+        else prior_addon_evaluation.selected_requirement_ids
+    )
     transition = replan_after_catalog_change(
         result,
         changed_offers,
         stores,
         change_kind="stockout",
         changed_sku=stockout_sku,
-        approval_outcomes=st.session_state["approval_outcomes"],
-        budget_action_ids=st.session_state["budget_action_ids"],
+        approval_outcomes=active_outcomes,
+        budget_action_ids=active_budget_ids,
+        current_optimization=current_optimization,
+        omitted_source_requirement_ids=omitted,
+        forced_skus_by_source=forced,
     )
     _store_replan_transition(
         st,
@@ -6809,11 +6965,13 @@ def _apply_stockout_replan(
         changed_offers,
         stores,
         child_labels,
-        (
-            f"{_catalog_product_label(stockout_sku, offers, stores)} "
-            "was marked out of stock. The cart was rebuilt and "
-            f"{len(transition.preserved_approval_outcomes)} prior "
-            "decision(s) remained valid."
+        _stockout_replan_notice(
+            stockout_sku,
+            current_optimization,
+            transition.result.proposed_cart,
+            offers,
+            stores,
+            len(transition.preserved_approval_outcomes),
         ),
     )
 
@@ -14689,7 +14847,7 @@ def _render_approval(st: Any) -> None:
     approval_cart_skus = tuple(
         dict.fromkeys(
             line.sku
-            for plan in _plans(result.proposed_cart)
+            for plan in _plans(current_optimization)
             for line in plan.lines
         )
     )
@@ -14714,6 +14872,7 @@ def _render_approval(st: Any) -> None:
                 _apply_stockout_replan(
                     st,
                     result,
+                    current_optimization,
                     approval_stockout_sku,
                     offers,
                     stores,
@@ -16441,6 +16600,7 @@ def _render_summary(st: Any) -> None:
                     _apply_stockout_replan(
                         st,
                         result,
+                        optimization,
                         stockout_sku,
                         offers,
                         stores,

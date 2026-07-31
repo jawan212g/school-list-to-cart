@@ -4693,6 +4693,58 @@ assertion was relaxed.
 No extraction, matching, pricing, optimizer, gate, or business-threshold
 behavior changed.
 
+## 2026-07-31 — Frozen cart boundary and deterministic re-plan corrections
+
+### Reproducible cart boundary
+
+The Maple regression fixture now freezes both confirmed extraction envelopes
+and every suitability decision used by matching. It records the human
+correction that the Grade 2 composition notebook says “NOT spiral bound.” The
+retained fixture produces a $110.04 required cart with two interrupts at a
+$150 budget, and a $76.97 recommended plan at an $85 budget. The historical
+$111.21/three-interrupt and $71.07 figures predate a frozen extraction and
+matching boundary and are retained as retired, unreproducible guards.
+
+### Custom-store crash
+
+The 14 failures shared one cause: exact-match pruning could leave every need
+individually matched while no joint assignment fit a one-store cap. Supply
+Cloud had suitable alternatives for the complete cart, but those alternatives
+had been removed before optimization. Custom feasibility now widens to all
+already-judged suitable candidates within each permitted store scope only when
+the preferred exact set is incomplete. All 14 full Maple cases select Supply
+Cloud at $150.89. The 180-choice domain is covered separately so the regression
+does not become a multi-minute performance benchmark.
+
+### Completed second trips
+
+`OptimizationResult.unfulfilled_gap_items` is now the single gate-facing truth
+for missing items. A minimum second trip closes the primary-plan gap, so the
+single-stop $117.49 Maple plan no longer produces the false claim that its
+headphones are unavailable.
+
+### Stockout state and preservation
+
+The stockout action formerly received the original `PipelineResult` even when
+the screen displayed a budget- or approval-adjusted optimization. It now takes
+the displayed optimization, carries parent omissions and forced products into
+the re-plan, reopens only a choice whose selected SKU stocked out, and retains
+unrelated approval outcomes, budget actions, and optional selections. Its
+notice names the stocked-out product, replacement, total-cost movement, and a
+store threshold when a fulfillment fee changes.
+
+The allocation algorithm still performs a full re-solve. A future minimal-
+change strategy should pin unaffected line allocations and free only the
+stocked-out requirement, widening constraints only when no replacement is
+feasible. That strategy can cost more than the global optimum; the parent
+should be shown that premium before it is adopted. It was deliberately not
+implemented in this pass pending review.
+
+### Verification
+
+Windows ARM64: 454 passed, 1 skipped. The skipped test is the x86 Streamlit
+AppTest coverage exercised by GitHub Actions.
+
 ## 2026-07-30 — Personalize removal stays visible and duplicate exclusions survive
 
 ### Diagnosis

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import combinations
 from typing import Literal
 
 from agent.aggregate import UnitNeed
@@ -157,7 +158,15 @@ class OptimizationResult:
     def is_complete(self) -> bool:
         """Return whether the primary plan or its second trip closes all gaps."""
 
-        return not self.gap_items or self.minimum_second_trip is not None
+        return not self.unfulfilled_gap_items
+
+    @property
+    def unfulfilled_gap_items(self) -> tuple[str, ...]:
+        """Return only gaps not supplied by the completed second-trip plan."""
+
+        if self.minimum_second_trip is not None:
+            return ()
+        return self.gap_items
 
 
 @dataclass(frozen=True)
@@ -686,6 +695,10 @@ def _best_multi_store_plan(
         raise ValueError("Custom max_stores must be positive")
 
     best_plan: CartPlan | None = None
+    best_prefix_by_state: dict[
+        tuple[int, tuple[tuple[str, int], ...]],
+        tuple[str, ...],
+    ] = {}
 
     def unavoidable_tax(
         item_subtotals_by_store: Mapping[str, int],
@@ -733,6 +746,20 @@ def _best_multi_store_plan(
         item_subtotals_by_store: dict[str, int],
     ) -> None:
         nonlocal best_plan
+
+        state_key = (
+            index,
+            tuple(sorted(item_subtotals_by_store.items())),
+        )
+        prefix_key = tuple(
+            line.sku
+            for _, selection in chosen
+            for line in selection.lines
+        )
+        prior_prefix = best_prefix_by_state.get(state_key)
+        if prior_prefix is not None and prior_prefix <= prefix_key:
+            return
+        best_prefix_by_state[state_key] = prefix_key
 
         lower_bound = (
             current_item_cost
@@ -795,6 +822,90 @@ def _best_multi_store_plan(
     if best_plan is None:
         raise ValueError("No cart satisfies the active store constraints")
     return best_plan
+
+
+def _best_custom_constrained_result(
+    unit_needs: Sequence[UnitNeed],
+    candidates: Sequence[Mapping[str, PackageSelection]],
+    eligible_stores: Sequence[Store],
+    stores_by_id: Mapping[str, Store],
+    config: OptimizationConfig,
+) -> tuple[CartPlan, tuple[str, ...]]:
+    """Return the best feasible partial or complete custom-store plan (FR-04)."""
+
+    store_limit = config.max_stores
+    if store_limit is None:
+        return (
+            _best_multi_store_plan(
+                unit_needs,
+                candidates,
+                stores_by_id,
+                config,
+            ),
+            (),
+        )
+    if store_limit <= 0:
+        raise ValueError("Custom max_stores must be positive")
+
+    try:
+        return (
+            _best_multi_store_plan(
+                unit_needs,
+                candidates,
+                stores_by_id,
+                config,
+            ),
+            (),
+        )
+    except ValueError:
+        pass
+
+    store_ids = tuple(store.store_id for store in eligible_stores)
+    candidates_by_scope: list[tuple[CartPlan, tuple[str, ...]]] = []
+    for scope_size in range(1, min(store_limit, len(store_ids)) + 1):
+        for scoped_ids in combinations(store_ids, scope_size):
+            scoped_id_set = frozenset(scoped_ids)
+            scoped_needs: list[UnitNeed] = []
+            scoped_candidates: list[Mapping[str, PackageSelection]] = []
+            gaps: list[str] = []
+            for unit_need, need_candidates in zip(
+                unit_needs,
+                candidates,
+                strict=True,
+            ):
+                available = {
+                    store_id: selection
+                    for store_id, selection in need_candidates.items()
+                    if store_id in scoped_id_set
+                }
+                if available:
+                    scoped_needs.append(unit_need)
+                    scoped_candidates.append(available)
+                else:
+                    gaps.append(unit_need.label)
+            scoped_stores = {
+                store_id: stores_by_id[store_id]
+                for store_id in scoped_ids
+            }
+            scoped_config = replace(config, max_stores=scope_size)
+            plan = _best_multi_store_plan(
+                scoped_needs,
+                scoped_candidates,
+                scoped_stores,
+                scoped_config,
+            )
+            candidates_by_scope.append((plan, tuple(gaps)))
+
+    if not candidates_by_scope:
+        return _empty_plan(), tuple(need.label for need in unit_needs)
+    return min(
+        candidates_by_scope,
+        key=lambda candidate: (
+            bool(candidate[1]),
+            len(candidate[1]),
+            _plan_sort_key(candidate[0]),
+        ),
+    )
 
 
 def _single_store_plan(
@@ -1064,6 +1175,25 @@ def optimize_cart(
             plan,
             gap_items,
             second_trip,
+            active_config.budget_cents,
+            fulfillment_tradeoffs,
+        )
+
+    if (
+        active_config.shopping_mode == "custom"
+        and active_config.max_stores is not None
+    ):
+        plan, gap_items = _best_custom_constrained_result(
+            unit_needs,
+            candidates,
+            eligible_stores,
+            stores_by_id,
+            active_config,
+        )
+        return _make_result(
+            plan,
+            gap_items,
+            None,
             active_config.budget_cents,
             fulfillment_tradeoffs,
         )
