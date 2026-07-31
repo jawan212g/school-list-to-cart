@@ -1416,6 +1416,55 @@ def test_unresolved_open_student_button_survives_a_view_round_trip() -> None:
     assert reopened_unresolved.key != first_unresolved_key
 
 
+def test_partial_personalize_actions_leave_the_same_decision_visible_to_gate() -> None:
+    """BR-52: Summary and submission consume one pending-decision truth."""
+
+    test_app = _run_personalize_two_decision_screen()
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    navigation.set_value("child-1").run()
+    _assert_no_exception(test_app)
+
+    _click_label(test_app, "Remove item from cart")
+
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    navigation.set_value("summary").run()
+    _assert_no_exception(test_app)
+
+    assert any(
+        markdown.value == "**1**  \nNeeds a decision"
+        for markdown in test_app.markdown
+    )
+    assert any(
+        expander.label == "Review 1 decision"
+        for expander in test_app.expander
+    )
+    assert any(
+        "sticky notes" in str(markdown.value).casefold()
+        for markdown in test_app.markdown
+    )
+
+    _click_label(test_app, "Use these choices and build my shopping plan")
+    warning_text = " ".join(
+        str(item.value)
+        for item in (*test_app.warning, *test_app.markdown)
+    ).casefold()
+    assert "sticky notes" in warning_text
+    assert "pencils" not in warning_text
+    assert any(
+        button.label == "Open Mr. G"
+        and "unresolved-student" in str(button.key)
+        for button in test_app.button
+    )
+
+
 def test_personalize_remove_action_uses_distinct_removed_group() -> None:
     """FR-12: removal is explicit and remains distinct from already-owned."""
 
