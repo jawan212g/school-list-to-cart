@@ -240,6 +240,93 @@ app._render_summary(st)
     return test_app
 
 
+def _run_cart_decisions_screen() -> AppTest:
+    """Mount the real cart-decision screen with one stocked substitution."""
+
+    test_app = AppTest.from_string(
+        """
+import sys
+from pathlib import Path
+
+import streamlit as st
+import app
+from data.loader import load_catalog
+
+tests_path = str(Path.cwd() / "tests")
+if tests_path not in sys.path:
+    sys.path.insert(0, tests_path)
+from conftest import load_frozen_maple_fixture
+from test_maple_cart import _run_maple
+
+app._initialize_state(st)
+fixture = load_frozen_maple_fixture()
+stockout_sku = "VD-GLU-VB-006"
+offers = tuple(
+    offer for offer in load_catalog() if offer.sku != stockout_sku
+)
+result = _run_maple(
+    fixture.extractions,
+    fixture.judge,
+    budget_cents=15_000,
+    offers=offers,
+)
+st.session_state["intake"] = {
+    "children": (
+        {
+            "child_id": "grade-2",
+            "label": "Grade 2",
+            "grade": "Grade 2",
+        },
+        {
+            "child_id": "grade-5",
+            "label": "Grade 5",
+            "grade": "Grade 5",
+        },
+    ),
+    "budget_total": 15_000,
+    "budget_allocations": {},
+}
+st.session_state["stockout_skus"] = frozenset({stockout_sku})
+st.session_state["result"] = result
+st.session_state["screen"] = "approval"
+app._render_approval(st)
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
+def test_cart_decision_uses_one_stage_appropriate_approval_action() -> None:
+    """FR-27: post-match cards choose products without Personalize actions."""
+
+    test_app = _run_cart_decisions_screen()
+    labels = tuple(button.label for button in test_app.button)
+
+    assert labels.count("Approve selection") == 1
+    assert "Approve this recommendation" not in labels
+    assert "Change item or quantity" not in labels
+    assert "We already own this item" not in labels
+
+    approve = next(
+        button
+        for button in test_app.button
+        if button.label == "Approve selection"
+    )
+    approve.click().run()
+    _assert_no_exception(test_app)
+    assert any(
+        success.value == "Selection approved."
+        for success in test_app.success
+    )
+    continue_button = next(
+        button
+        for button in test_app.button
+        if button.label == "Save decisions and continue"
+    )
+    assert continue_button.disabled is False
+
+
 def _run_section_screen() -> AppTest:
     """Mount the production section screen with production Pydantic models."""
 

@@ -5704,3 +5704,96 @@ for the prototype.
 
 - The brand-lock-break interrupt branch remains unreachable through production
   matching and is unchanged in this pass.
+
+## 2026-07-31 — Cart-decision controls and attribute vocabulary
+
+### Objective
+
+Keep the post-match screen limited to stocked-product choices and prevent safe
+source/catalog synonyms from creating false substitution decisions.
+
+### Work completed
+
+- Removed Personalize actions from shopping-decision cards. Each active
+  product card now presents the list request, stocked choices with actual
+  prices, a source-it-myself choice, and one explicit `Approve selection`
+  action. Budget-plan controls remain separate.
+- Required each visible product selection to be approved before the batched
+  continue action can apply it.
+- Amended BR-13's deterministic attribute normalization with field-specific
+  safe synonyms. Fine-tip wording now matches catalog `fine`; pencil-top and
+  cap erasers now share `cap`; existing ruling aliases were centralized; and
+  safe tip and material vocabulary was audited and canonicalized without
+  merging genuinely different products.
+- Made every shopping-decision title and recommendation branch on the actual
+  interrupt kind. Matching reasons can explain the decision but can no longer
+  rename a major substitution as an attribute choice.
+- Kept the gate conservative when only one mismatching stocked product exists.
+  The parent still chooses between buying it and sourcing it independently;
+  the card no longer implies that several attribute variants are available.
+
+### Attribute-vocabulary audit
+
+- Ruling: `wide-ruled`, `wide ruled`, and `wide ruling` map to `wide`; the
+  equivalent college-ruled forms map to `college`.
+- Tip: `fine tip` and `fine point` map to `fine`; ultra-fine and chisel forms
+  are canonicalized within their own distinct values; blunt and rounded tips
+  map to `blunt`.
+- Eraser style: pencil-top, pencil-cap, cap-eraser, and arrowhead-cap wording
+  map to catalog style `cap`. Block and kneaded erasers remain different.
+- Material: `poly` and `polypropylene` map to catalog material `plastic`.
+- Size measurements and approximation words were already canonicalized;
+  numeric tab counts and sharpening booleans were already typed and needed no
+  synonym rule.
+
+### Named finding — sixth defined-but-unconsumed mechanism
+
+The parent-facing `item_fulfillment_preference` behind “Are extra items
+acceptable?” is collected on `Requirement`, retained on the Personalize row,
+and then dropped when aggregation constructs `UnitNeed`. Neither matching nor
+optimization can read it. It is the sixth mechanism found defined but
+unconsumed, and the second parent preference lost at the Requirement-to-
+`UnitNeed` seam after `brand_hint`.
+
+Two parent preferences dying at the same boundary is a structural seam, not
+two isolated UI defects. Future work should define an explicit set of parent
+matching and package preferences carried by `UnitNeed`, then make every
+consumer declare which fields it uses. This pass records the finding only;
+package-selection behavior remains deferred.
+
+### Files changed
+
+- `BRD.md`
+- `agent/rules.py`
+- `agent/schema.py`
+- `agent/normalize.py`
+- `agent/match.py`
+- `app.py`
+- `tests/test_aggregate.py`
+- `tests/test_normalize.py`
+- `tests/test_match.py`
+- `tests/test_gate.py`
+- `tests/test_approval_options.py`
+- `tests/test_streamlit_lifecycle.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Exact synonym matches create no gate interrupt.
+- Genuine fine-versus-chisel and cap-versus-block changes still create their
+  respective major-substitution and attribute-choice interrupts.
+- The production cart-decision renderer has an x86 AppTest covering the single
+  approval action and the absence of Personalize controls.
+- Full Windows ARM64 suite: 475 passed, 1 skipped. The skipped AppTest module
+  runs in the x86 GitHub Actions workflow.
+
+### Remaining work
+
+- `item_fulfillment_preference` remains intentionally unconsumed pending an
+  optimizer-scoped design.
+- Brand-lock-break remains unreachable through production matching.
+
+### Recommended next step
+
+Rebuild the Kevin session after deployment and confirm that only its genuine
+low-confidence catalog-match decision remains.

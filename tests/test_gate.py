@@ -1,6 +1,7 @@
 """Exact, model-free tests for every active FR-26 approval condition."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 from agent.aggregate import UnitNeed
 from agent.decisions import DecisionLog
@@ -361,6 +362,101 @@ def test_condition_4_preference_attribute_choice_fires_once() -> None:
     )
 
 
+def test_equivalent_tip_and_eraser_style_create_no_interrupt() -> None:
+    """BR-13/FR-19: equivalent source/catalog words are exact matches."""
+
+    cases = (
+        (
+            replace(
+                _need(),
+                canonical_item="permanent_markers",
+                attributes={"tip_style": "fine tip"},
+            ),
+            replace(
+                _offer(),
+                category="permanent_markers",
+                attributes={"tip": "fine"},
+            ),
+        ),
+        (
+            replace(
+                _need(),
+                canonical_item="erasers",
+                attributes={"style": "pencil top"},
+            ),
+            replace(
+                _offer(),
+                category="erasers",
+                attributes={"style": "cap"},
+            ),
+        ),
+    )
+
+    for need, offer in cases:
+        matches = match_offers([need], [offer], [_store()])
+        batch = evaluate_gate(
+            GateContext(
+                optimization=_optimization(offer),
+                matches=matches,
+                normalization=NormalizationResult(requirements=()),
+                extractions={},
+                offers=(offer,),
+                stores=(_store(),),
+                tax_basis_points=0,
+            )
+        )
+        assert matches.needs[0].candidates[0].attribute_status == "exact"
+        assert batch.interrupts == ()
+
+
+def test_genuine_tip_and_style_changes_keep_their_gate_conditions() -> None:
+    """FR-19/26: safe aliases do not suppress real attribute differences."""
+
+    cases = (
+        (
+            replace(
+                _need(),
+                canonical_item="permanent_markers",
+                attributes={"tip_style": "fine"},
+            ),
+            replace(
+                _offer(),
+                category="permanent_markers",
+                attributes={"tip": "chisel"},
+            ),
+            "major_substitution",
+        ),
+        (
+            replace(
+                _need(),
+                canonical_item="erasers",
+                attributes={"style": "cap"},
+            ),
+            replace(
+                _offer(),
+                category="erasers",
+                attributes={"style": "block"},
+            ),
+            "attribute_choice",
+        ),
+    )
+
+    for need, offer, expected_kind in cases:
+        matches = match_offers([need], [offer], [_store()])
+        batch = evaluate_gate(
+            GateContext(
+                optimization=_optimization(offer),
+                matches=matches,
+                normalization=NormalizationResult(requirements=()),
+                extractions={},
+                offers=(offer,),
+                stores=(_store(),),
+                tax_basis_points=0,
+            )
+        )
+        assert tuple(item.kind for item in batch.interrupts) == (
+            expected_kind,
+        )
 def test_retired_br08_ignores_legacy_returnability_data() -> None:
     offer = _offer(price=1_501, returnable=False)
     need = _need()

@@ -295,7 +295,7 @@ The proposal named three interrupt conditions. Five are active here; the former 
 
 - **BR-12 Cart staleness.** Within a session, prices and stock re-validate before checkout is simulated, and any change since the cart was built is surfaced first.
 
-- **BR-13 Duplicate suppression.** Identical canonical items across children never generate separate purchases unless a brand lock or a meaningful attribute difference requires it. Before identity is frozen, attribute text is case-folded, punctuation and hyphens become spaces, repeated whitespace collapses, approximation words are removed, and common measurement-unit spellings are canonicalized; exact source lines remain unchanged for provenance.
+- **BR-13 Duplicate suppression.** Identical canonical items across children never generate separate purchases unless a brand lock or a meaningful attribute difference requires it. Before identity is frozen, attribute text is case-folded, punctuation and hyphens become spaces, repeated whitespace collapses, approximation words are removed, common measurement-unit spellings are canonicalized, and safe field-specific synonyms such as “fine tip”/“fine” and “pencil top”/“cap” are reconciled; exact source lines remain unchanged for provenance.
 
 ## 10. Edge Case Register
 

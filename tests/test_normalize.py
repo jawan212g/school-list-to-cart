@@ -83,9 +83,39 @@ def test_br13_attribute_spelling_is_normalized_before_identity() -> None:
         )
     )
 
-    assert hyphenated.attributes["ruling"] == "wide ruled"
-    assert spaced.attributes["ruling"] == "wide ruled"
+    assert hyphenated.attributes["ruling"] == "wide"
+    assert spaced.attributes["ruling"] == "wide"
     assert pencil_box.attributes["size"] == "8 inch"
+
+
+def test_source_attribute_wording_overrides_model_phrasing() -> None:
+    """BR-13: deterministic source evidence fixes equivalent model wording."""
+
+    marker = _requirement(
+        "1 Fine tip black sharpie",
+        "permanent_markers",
+        1,
+        attributes={"tip_style": "fine tip"},
+    )
+    erasers = _requirement(
+        "Pencil top erasers | 5th: 1 pkg.",
+        "erasers",
+        1,
+        attributes={"style": "pencil top"},
+    )
+    folder = _requirement(
+        "1 poly pocket folder",
+        "folders",
+        1,
+        attributes={"material": "poly"},
+    )
+
+    assert marker.attributes.tip_style == "fine"
+    assert normalize_requirement(marker).attributes["tip_style"] == "fine"
+    assert erasers.attributes.style == "cap"
+    assert normalize_requirement(erasers).attributes["style"] == "cap"
+    assert folder.attributes.material == "plastic"
+    assert normalize_requirement(folder).attributes["material"] == "plastic"
 
 
 def test_e01_quantity_range_uses_minimum_and_preserves_maximum() -> None:

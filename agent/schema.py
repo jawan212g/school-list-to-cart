@@ -123,16 +123,19 @@ def _correct_attribute_fields(
             corrected["style"] = None
             changed = True
 
-    if re.search(r"\bultra[\s-]+fine(?:\s+tip)?\b", raw_evidence):
+    if re.search(
+        r"\bultra[\s-]+fine(?:\s+(?:tip|point))?\b",
+        raw_evidence,
+    ):
         if corrected.get("tip_style") != "ultra-fine":
             corrected["tip_style"] = "ultra-fine"
             changed = True
-    elif re.search(r"\bfine(?:\s+tip)?\b", raw_evidence):
-        if corrected.get("tip_style") is None:
+    elif re.search(r"\bfine(?:\s+(?:tip|point))?\b", raw_evidence):
+        if corrected.get("tip_style") != "fine":
             corrected["tip_style"] = "fine"
             changed = True
-    if re.search(r"\bchisel(?:\s+tip)?\b", raw_evidence):
-        if corrected.get("tip_style") is None:
+    if re.search(r"\bchisel(?:\s+(?:tip|point))?\b", raw_evidence):
+        if corrected.get("tip_style") != "chisel":
             corrected["tip_style"] = "chisel"
             changed = True
 
@@ -186,12 +189,21 @@ def _correct_attribute_fields(
         corrected["count"] = int(count_match.group(1))
         changed = True
 
-    if "blunt tip" in raw_evidence:
-        if corrected.get("tip_style") is None:
+    if "blunt tip" in raw_evidence or "rounded tip" in raw_evidence:
+        if corrected.get("tip_style") != "blunt":
             corrected["tip_style"] = "blunt"
             changed = True
         if style == "blunt tip":
             corrected["style"] = None
+            changed = True
+
+    if canonical_item == "erasers" and re.search(
+        r"\b(?:pencil[ -]?(?:top|cap)(?:\s+erasers?)?|"
+        r"(?:cap|arrowhead cap)\s+erasers?)\b",
+        raw_evidence,
+    ):
+        if corrected.get("style") != "cap":
+            corrected["style"] = "cap"
             changed = True
 
     if (
@@ -213,6 +225,14 @@ def _correct_attribute_fields(
         corrected["size"] = size_value
         changed = True
 
+    material_alias_evidence = frozenset(
+        word
+        for word in ("poly", "polypropylene")
+        if word in raw_evidence.split()
+    )
+    if material_alias_evidence and corrected.get("material") != "plastic":
+        corrected["material"] = "plastic"
+        changed = True
     for material in ATTRIBUTE_MATERIALS:
         if material in raw_evidence.split():
             if corrected.get("material") is None:
@@ -223,6 +243,10 @@ def _correct_attribute_fields(
     if (
         isinstance(material, str)
         and _evidence_text(material) not in raw_evidence.split()
+        and not (
+            material == "plastic"
+            and bool(material_alias_evidence)
+        )
     ):
         corrected["material"] = None
         changed = True

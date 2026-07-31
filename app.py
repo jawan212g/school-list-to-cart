@@ -2481,7 +2481,9 @@ def _approval_options(
             options.append(
                 ApprovalDisplayOption(
                     alternative_id=removal.alternative_id,
-                    label="Source this item myself",
+                    label=(
+                        "Source this item myself — no purchase in this cart"
+                    ),
                     cost_delta_cents=removal.cost_delta_cents,
                     explanation=(
                         availability_explanation
@@ -2532,12 +2534,12 @@ def _approval_heading(
     line: CartLine | None,
 ) -> str:
     item_name = _interrupt_item_name(result, interrupt, line)
-    attributes = _attribute_labels(result, line)
-    if attributes:
-        detail = _join_names(attributes) if attributes else "requested details"
-        return f"{item_name} — choose an acceptable {detail}"
     if interrupt.kind == "major_substitution":
-        return f"{item_name} — choose an acceptable substitute"
+        return f"{item_name} — major substitution"
+    if interrupt.kind == "attribute_choice":
+        attributes = _attribute_labels(result, line)
+        detail = _join_names(attributes) if attributes else "requested details"
+        return f"{item_name} — attribute choice: {detail}"
     if interrupt.kind == "brand_lock_break":
         return f"{item_name} — required brand is unavailable"
     if interrupt.kind == "budget_exceeded":
@@ -2563,12 +2565,24 @@ def _approval_message(
             )
         )
         store_name = store.name if store is not None else "the selected store"
-        if _attribute_labels(result, line):
-            source_lines = _source_lines(result, interrupt)
-            request = source_lines[0] if source_lines else line.canonical_item
+        source_lines = _source_lines(result, interrupt)
+        request = source_lines[0] if source_lines else line.canonical_item
+        attribute_labels = _attribute_labels(result, line)
+        if interrupt.kind == "attribute_choice":
             return (
-                f'The list requests “{request}.” Choose from the stocked '
-                "catalog options that look like matches below."
+                f'The list asks for “{request}.” The proposed product changes '
+                f"the requested {_join_names(attribute_labels)}."
+            )
+        if interrupt.kind == "major_substitution":
+            difference = (
+                f" Its different {_join_names(attribute_labels)} contributed "
+                "to that classification."
+                if attribute_labels
+                else ""
+            )
+            return (
+                f'The list asks for “{request}.” The proposed product is a '
+                f"major substitution.{difference}"
             )
         return (
             f"{product_name} from {store_name} needs your approval before "
@@ -2598,11 +2612,16 @@ def _approval_recommendation(
         else "Leave this decision pending"
     )
     attribute_labels = _attribute_labels(result, line)
-    if attribute_labels:
+    if interrupt.kind == "attribute_choice":
         return (
             f"{recommended}; it is the current lowest-total-cost stocked "
             "option we believe fits, but the parent should choose the acceptable "
             f"{_join_names(attribute_labels)}."
+        )
+    if interrupt.kind == "major_substitution":
+        return (
+            f"{recommended}; it is the current lowest-total-cost stocked "
+            "substitution, but its product differences need approval."
         )
     if line is not None:
         return f"{recommended}; it preserves coverage for the required item."
@@ -14772,8 +14791,16 @@ def _render_contextual_approval_radio(
             st.session_state[canonical_key] = selected
 
     primary_labels = dict(all_by_id)
+    catalog_option_count = sum(
+        option.sku is not None for option in presentation.options
+    )
+    choice_prompt = (
+        "Buy this product or source it yourself"
+        if catalog_option_count == 1
+        else "Choose one"
+    )
     primary_choice = st.radio(
-        "Choose one",
+        choice_prompt,
         radio_ids,
         format_func=lambda option_id: (
             "Choose from other matches"
@@ -14890,150 +14917,14 @@ def _render_approval_plan_context(
             )
 
 
-def _approval_review_members(
-    state: Mapping[str, Any],
-    presentation: ApprovalDisplayDecision,
-) -> tuple[SupplyItemReview, ...]:
-    """Find the Personalize rows represented by one shopping decision."""
-
-    source_ids = frozenset(presentation.interrupt.source_requirement_ids)
-    if not source_ids:
-        return ()
-    rows = tuple(state.get("review_items", ())) + tuple(
-        state.get("parent_added_review_items", ())
-    )
-    return tuple(
-        row
-        for row in rows
-        if source_ids.intersection(
-            {
-                row.req_id,
-                *(
-                    source.source_req_id
-                    for source in row.sources
-                ),
-            }
-        )
-    )
-
-
-def _approval_choose_recommendation(
+def _approval_confirm_selection(
     state: MutableMapping[str, Any],
+    confirmation_key: str,
     selection_key: str,
-    option_id: str,
 ) -> None:
-    """Select the recommendation using the same state as the comparison list."""
+    """Record the stocked-product choice currently visible in one card."""
 
-    state[selection_key] = option_id
-
-
-def _approval_edit_in_personalize(
-    state: MutableMapping[str, Any],
-    member: SupplyItemReview,
-) -> None:
-    """Return to the source-backed Personalize editor for one decision."""
-
-    _select_personalize_tab(
-        state,
-        member.child_id,
-        _personalize_item_anchor(member.review_id),
-    )
-    state["progress_substep"] = "personalizing the cart"
-    state["screen"] = "review"
-
-
-def _approval_mark_owned_and_rebuild(
-    state: MutableMapping[str, Any],
-    presentation: ApprovalDisplayDecision,
-    members: Sequence[SupplyItemReview],
-) -> None:
-    """Apply Personalize's owned action, then rebuild from confirmed rows."""
-
-    _mark_personalize_group_owned(
-        state,
-        presentation.interrupt.interrupt_id,
-        tuple(members),
-    )
-    extractions = dict(state.get("extracted_lists", {}))
-    reviewed = tuple(state.get("review_items", ())) + tuple(
-        state.get("parent_added_review_items", ())
-    )
-    confirmed = reviewed_envelopes(extractions, reviewed)
-    state["extracted_lists"] = confirmed
-    state[PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY] = (
-        _extraction_envelope_fingerprints(confirmed)
-    )
-    state["organized_list_confirmed"] = True
-    _invalidate_plan_state(state)
-    state["progress_substep"] = "rebuilding the plan with what you already own"
-    state[WORK_EPISODE_ACTIVE_KEY] = None
-    state["screen"] = "working"
-
-
-def _render_approval_card_actions(
-    st: Any,
-    generation: int,
-    presentation: ApprovalDisplayDecision,
-) -> None:
-    """Render the same primary actions used by Personalize decision cards."""
-
-    members = _approval_review_members(st.session_state, presentation)
-    recommended = next(
-        (
-            option
-            for option in presentation.options
-            if option.is_recommended
-        ),
-        None,
-    )
-    if recommended is None:
-        return
-    selection_key = _approval_selection_key(
-        generation,
-        presentation.interrupt.interrupt_id,
-    )
-    approve_column, edit_column, owned_column = st.columns(3)
-    approve_column.button(
-        "Approve this recommendation",
-        key=(
-            f"approval-action:{generation}:approve:"
-            f"{presentation.interrupt.interrupt_id}"
-        ),
-        type="primary",
-        on_click=_approval_choose_recommendation,
-        args=(st.session_state, selection_key, recommended.alternative_id),
-        use_container_width=True,
-    )
-    edit_column.button(
-        "Change item or quantity",
-        key=(
-            f"approval-action:{generation}:edit:"
-            f"{presentation.interrupt.interrupt_id}"
-        ),
-        disabled=not members,
-        on_click=(
-            _approval_edit_in_personalize if members else None
-        ),
-        args=(st.session_state, members[0]) if members else None,
-        use_container_width=True,
-    )
-    owned_column.button(
-        "We already own this item",
-        key=(
-            f"approval-action:{generation}:owned:"
-            f"{presentation.interrupt.interrupt_id}"
-        ),
-        disabled=not members,
-        on_click=(
-            _approval_mark_owned_and_rebuild if members else None
-        ),
-        args=(
-            st.session_state,
-            presentation,
-            members,
-        ) if members else None,
-        use_container_width=True,
-    )
+    state[confirmation_key] = str(state[selection_key])
 
 
 def _render_approval(st: Any) -> None:
@@ -15274,6 +15165,7 @@ def _render_approval(st: Any) -> None:
         "is selected until you change it."
     )
     selections: dict[str, ApprovalDisplayOption] = {}
+    unconfirmed_product_decisions: set[str] = set()
 
     for index, presentation in enumerate(presentations):
         interrupt = presentation.interrupt
@@ -15552,29 +15444,64 @@ def _render_approval(st: Any) -> None:
                     presentation.recommendation
                 )
             )
-            _render_approval_card_actions(
-                st,
-                generation,
-                presentation,
+            catalog_option_count = sum(
+                option.sku is not None for option in presentation.options
             )
             st.caption(
-                "Compare the stocked products and their prices below."
-            )
-            selections[interrupt.interrupt_id] = (
-                _render_contextual_approval_radio(
-                    st,
-                    generation,
-                    result,
-                    presentation,
-                    offers,
+                (
+                    "Choose whether to buy this stocked product or source "
+                    "the item yourself."
+                    if catalog_option_count == 1
+                    else "Compare the stocked products and their prices below."
                 )
+            )
+            selected_option = _render_contextual_approval_radio(
+                st,
+                generation,
+                result,
+                presentation,
+                offers,
+            )
+            selections[interrupt.interrupt_id] = selected_option
+            selection_key = _approval_selection_key(
+                generation,
+                interrupt.interrupt_id,
+            )
+            confirmation_key = (
+                f"approval_confirmed_{generation}_{interrupt.interrupt_id}"
+            )
+            is_confirmed = (
+                st.session_state.get(confirmation_key)
+                == selected_option.alternative_id
+            )
+            if is_confirmed:
+                st.success("Selection approved.")
+            else:
+                unconfirmed_product_decisions.add(interrupt.interrupt_id)
+            st.button(
+                "Approve selection",
+                key=(
+                    f"approval-action:{generation}:confirm:"
+                    f"{interrupt.interrupt_id}"
+                ),
+                type="primary",
+                on_click=_approval_confirm_selection,
+                args=(
+                    st.session_state,
+                    confirmation_key,
+                    selection_key,
+                ),
+                use_container_width=True,
             )
 
     submitted = st.button(
         "Save decisions and continue",
         type="primary",
         use_container_width=True,
-        disabled=budget_selection_error is not None,
+        disabled=(
+            budget_selection_error is not None
+            or bool(unconfirmed_product_decisions)
+        ),
     )
     if not submitted:
         return

@@ -214,6 +214,97 @@ def test_fr19_color_outside_acceptable_set_is_major() -> None:
     )
 
 
+def test_equivalent_tip_and_eraser_style_vocabulary_matches_exactly() -> None:
+    """BR-13/FR-19: safe source/catalog synonyms do not invent changes."""
+
+    cases = (
+        (
+            _need(
+                "permanent_markers",
+                req_id="marker",
+                attributes={"tip_style": "fine tip"},
+            ),
+            _offer(
+                "FINE-MARKER",
+                "S",
+                "permanent_markers",
+                attributes={"tip": "fine"},
+            ),
+        ),
+        (
+            _need(
+                "erasers",
+                req_id="eraser",
+                attributes={"style": "pencil top"},
+            ),
+            _offer(
+                "CAP-ERASER",
+                "S",
+                "erasers",
+                attributes={"style": "cap"},
+            ),
+        ),
+    )
+
+    for need, offer in cases:
+        candidate = match_offers(
+            [need],
+            [offer],
+            [_store("S", 1.0)],
+        ).needs[0].candidates[0]
+        assert candidate.attribute_status == "exact"
+        assert candidate.requires_approval is False
+        assert not any(
+            reason.startswith("attribute_change:")
+            for reason in candidate.substitution_reasons
+        )
+
+
+def test_genuine_tip_and_eraser_style_changes_remain_major() -> None:
+    """FR-19: canonicalization does not erase real product differences."""
+
+    cases = (
+        (
+            _need(
+                "permanent_markers",
+                req_id="marker",
+                attributes={"tip_style": "fine"},
+            ),
+            _offer(
+                "CHISEL-MARKER",
+                "S",
+                "permanent_markers",
+                attributes={"tip": "chisel"},
+            ),
+            "attribute_change:tip_style",
+        ),
+        (
+            _need(
+                "erasers",
+                req_id="eraser",
+                attributes={"style": "cap"},
+            ),
+            _offer(
+                "BLOCK-ERASER",
+                "S",
+                "erasers",
+                attributes={"style": "block"},
+            ),
+            "attribute_change:style",
+        ),
+    )
+
+    for need, offer, expected_reason in cases:
+        candidate = match_offers(
+            [need],
+            [offer],
+            [_store("S", 1.0)],
+        ).needs[0].candidates[0]
+        assert candidate.attribute_status == "different"
+        assert candidate.requires_approval is True
+        assert expected_reason in candidate.substitution_reasons
+
+
 def test_exact_attribute_match_is_selected_over_cheaper_substitution() -> None:
     """FR-19: price cannot silently displace an available exact attribute."""
 

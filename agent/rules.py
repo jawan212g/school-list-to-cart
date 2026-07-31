@@ -1039,6 +1039,41 @@ ATTRIBUTE_SENSITIVE_FIELDS = frozenset(
     }
 )  # FR-19: changes to specified preference-sensitive attributes need approval.
 
+ATTRIBUTE_VALUE_ALIASES_BY_FIELD = {
+    "ruling": {
+        "wide ruled": "wide",
+        "wide ruling": "wide",
+        "college ruled": "college",
+        "college ruling": "college",
+    },
+    "tip_style": {
+        "fine tip": "fine",
+        "fine point": "fine",
+        "ultra fine tip": "ultra fine",
+        "ultra fine point": "ultra fine",
+        "chisel tip": "chisel",
+        "chisel point": "chisel",
+        "blunt tip": "blunt",
+        "rounded tip": "blunt",
+    },
+    "style": {
+        "pencil top": "cap",
+        "pencil top eraser": "cap",
+        "pencil cap": "cap",
+        "pencil cap eraser": "cap",
+        "cap eraser": "cap",
+        "arrowhead cap": "cap",
+    },
+    "material": {
+        "poly": "plastic",
+        "polypropylene": "plastic",
+    },
+}
+# BR-13 amended: safe source and catalog synonyms are canonicalized by
+# attribute field before requirement identity and matching are frozen. A model
+# spelling such as "fine tip" cannot create a substitution from catalog
+# spelling "fine", while genuinely different attribute values stay distinct.
+
 PREFERENCE_DEPENDENT_ATTRIBUTES = frozenset(
     {"acceptable_colors", "color", "character", "style"}
 )  # FR-26 condition 4: these parent preferences get their own interrupt type.

@@ -194,7 +194,7 @@ def _pipeline_result(
                 520,
                 attributes={"capacity_inches": 2},
             ),
-            "Binder — choose an acceptable size",
+            "Binder — major substitution",
         ),
         (
             "dividers",
@@ -217,7 +217,7 @@ def _pipeline_result(
                 600,
                 attributes={"tabs_per_set": 8},
             ),
-            "Dividers — choose an acceptable tab count",
+            "Dividers — major substitution",
         ),
     ],
 )
@@ -298,7 +298,9 @@ def test_no_exact_match_keeps_catalog_choices_and_self_source_last(
         alternative_offer.pack_price
     )
     assert presentation.options[1].explanation is None
-    assert presentation.options[-1].label == "Source this item myself"
+    assert presentation.options[-1].label == (
+        "Source this item myself — no purchase in this cart"
+    )
     assert presentation.options[-1].leaves_required_unmet is True
     assert "source it myself" not in presentation.recommendation
     assert all(
@@ -310,60 +312,21 @@ def test_no_exact_match_keeps_catalog_choices_and_self_source_last(
     )
 
 
-def test_approval_owned_action_reuses_personalize_and_rebuilds() -> None:
-    """FR-12: the approval card's owned action is the Personalize action."""
+def test_approval_confirmation_records_only_the_visible_selection() -> None:
+    """FR-27: cart-stage approval records the selected product, not edits."""
 
-    envelope = ExtractionEnvelope(
-        requirements=(
-            Requirement(
-                req_id="headphones",
-                child_id="grade2",
-                raw_text="1 pair of headphones",
-                canonical_item="headphones",
-                quantity=1,
-                extraction_confidence=1.0,
-            ),
-        )
+    state: dict[str, object] = {"selection": "catalog-choice"}
+
+    app._approval_confirm_selection(
+        state,
+        "confirmed-selection",
+        "selection",
     )
-    member = organize_extractions({"grade2": envelope})[0].model_copy(
-        update={"review_status": "confirmed"}
-    )
-    interrupt = ApprovalInterrupt(
-        interrupt_id="approval-headphones",
-        kind="major_substitution",
-        message="Choose headphones",
-        recommendation="Use the proposed headphones",
-        alternatives=(),
-        cost_impact_cents=0,
-        source_requirement_ids=("headphones",),
-    )
-    presentation = app.ApprovalDisplayDecision(
-        interrupt=interrupt,
-        item_name="Headphones",
-        heading="Headphones — choose what to buy",
-        message="The list asks for headphones.",
-        recommendation="Use the proposed headphones.",
-        affected_children=("Grade 2",),
-        options=(),
-    )
-    state: dict[str, object] = {
-        "review_items": (member,),
-        "parent_added_review_items": (),
-        "extracted_lists": {"grade2": envelope},
-        "result": object(),
-        "approval_outcomes": {"old": "choice"},
-        "parent_decisions": (object(),),
+
+    assert state == {
+        "selection": "catalog-choice",
+        "confirmed-selection": "catalog-choice",
     }
-
-    members = app._approval_review_members(state, presentation)
-    assert members == (member,)
-    app._approval_mark_owned_and_rebuild(state, presentation, members)
-
-    assert state["review_items"][0].already_owned is True
-    assert state["extracted_lists"]["grade2"].requirements == ()
-    assert state["result"] is None
-    assert state["approval_outcomes"] == {}
-    assert state["screen"] == "working"
 
 
 def test_substitution_removal_keeps_internal_delta_but_shows_no_purchase() -> None:
@@ -465,12 +428,14 @@ def test_substitution_removal_keeps_internal_delta_but_shows_no_purchase() -> No
         {"grade2": "Grade 2", "grade5": "Grade 5"},
     )[0]
 
-    assert presentation.heading == "Headphones — choose an acceptable connector"
+    assert presentation.heading == "Headphones — major substitution"
     assert presentation.affected_children == ("Grade 2", "Grade 5")
     assert tuple(
         option.cost_delta_cents for option in presentation.options
     ) == (0, -3_101)
-    assert presentation.options[1].label == "Source this item myself"
+    assert presentation.options[1].label == (
+        "Source this item myself — no purchase in this cart"
+    )
     assert presentation.options[1].purchase_price_cents is None
     assert presentation.options[1].explanation == (
         "No other stocked catalog match is available. No product will be "

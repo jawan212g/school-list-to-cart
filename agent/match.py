@@ -29,6 +29,7 @@ from agent.store_scope import (
 )
 from agent.rules import (
     ATTRIBUTE_SENSITIVE_FIELDS,
+    ATTRIBUTE_VALUE_ALIASES_BY_FIELD,
     CONFIDENCE_FLOOR,
     MAXIMUM_MATCH_CONFIDENCE,
     MINIMUM_MATCH_CONFIDENCE,
@@ -105,13 +106,6 @@ EXCLUSION_NOISE_WORDS = frozenset(
         "without",
     }
 )
-
-VALUE_ALIASES: Mapping[str, str] = {
-    "wide ruled": "wide",
-    "college ruled": "college",
-    "blunt tip": "blunt",
-    "three ring": "3 ring",
-}
 
 APPROXIMATION_WORDS = frozenset(
     {
@@ -493,9 +487,12 @@ def _normalized_words(value: object) -> tuple[str, ...]:
     return tuple(word for word in text.split() if word)
 
 
-def _normalized_value(value: object) -> str:
+def _normalized_value(value: object, field_name: str) -> str:
     text = " ".join(_normalized_words(value))
-    return VALUE_ALIASES.get(text, text)
+    return ATTRIBUTE_VALUE_ALIASES_BY_FIELD.get(field_name, {}).get(
+        text,
+        text,
+    )
 
 
 def _attribute_words(
@@ -627,17 +624,17 @@ def _attribute_evidence(
             continue
         if field_name == "acceptable_colors":
             acceptable = frozenset(
-                _normalized_value(value)
+                _normalized_value(value, field_name)
                 for value in requested
             )
             actual = frozenset(
-                _normalized_value(value)
+                _normalized_value(value, field_name)
                 for value in offered_values
             )
             if not acceptable.intersection(actual):
                 changes.append(field_name)
             continue
-        requested_value = _normalized_value(requested)
+        requested_value = _normalized_value(requested, field_name)
         requested_words = _attribute_words(requested_value, field_name)
         actual_word_sets = tuple(
             _attribute_words(value, field_name)
