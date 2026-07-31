@@ -3236,26 +3236,36 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
             source_text="1 pack notebook paper",
             confidence=0.8,
         ),
-            SupplyItemReview(
-                review_id="owned",
-                req_id="owned",
-                child_id="child-1",
-                item_name="backpacks",
+        SupplyItemReview(
+            review_id="owned",
+            req_id="owned",
+            child_id="child-1",
+            item_name="backpacks",
             required_quantity=0,
             already_owned=True,
-                source_text="1 backpack",
-                confidence=1.0,
-            ),
-            SupplyItemReview(
-                review_id="optional",
-                req_id="optional",
-                child_id="child-1",
-                item_name="tissues",
-                required_quantity=1,
-                optional=True,
-                source_text="1 optional box of tissues",
-                confidence=1.0,
-            ),
+            source_text="1 backpack",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="removed",
+            req_id="removed",
+            child_id="child-1",
+            item_name="folders",
+            required_quantity=0,
+            review_status="deleted",
+            source_text="2 folders",
+            confidence=1.0,
+        ),
+        SupplyItemReview(
+            review_id="optional",
+            req_id="optional",
+            child_id="child-1",
+            item_name="tissues",
+            required_quantity=1,
+            optional=True,
+            source_text="1 optional box of tissues",
+            confidence=1.0,
+        ),
     )
     class WidgetAwareState(dict[str, object]):
         """Enforce Streamlit's widget and stricter button state rules."""
@@ -3315,6 +3325,52 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         },
         "extracted_lists": {
             "child-1": ExtractionEnvelope(
+                requirements=(
+                    Requirement(
+                        req_id="clear",
+                        child_id="child-1",
+                        raw_text="12 pencils",
+                        canonical_item="pencils",
+                        quantity=12,
+                        extraction_confidence=1.0,
+                    ),
+                    Requirement(
+                        req_id="flagged",
+                        child_id="child-1",
+                        raw_text="1 pack notebook paper",
+                        canonical_item="notebook_paper",
+                        quantity=1,
+                        unit_type="pack",
+                        package_quantity_state="assumed",
+                        extraction_confidence=0.8,
+                    ),
+                    Requirement(
+                        req_id="owned",
+                        child_id="child-1",
+                        raw_text="1 backpack",
+                        canonical_item="backpacks",
+                        quantity=1,
+                        extraction_confidence=1.0,
+                    ),
+                    Requirement(
+                        req_id="removed",
+                        child_id="child-1",
+                        raw_text="2 folders",
+                        canonical_item="folders",
+                        quantity=2,
+                        extraction_confidence=1.0,
+                    ),
+                    Requirement(
+                        req_id="optional",
+                        child_id="child-1",
+                        raw_text="1 optional box of tissues",
+                        canonical_item="tissues",
+                        quantity=1,
+                        is_required=False,
+                        requirement_type="optional",
+                        extraction_confidence=1.0,
+                    ),
+                ),
                 catalog_unavailable_items=(
                     CatalogUnavailableItem(
                         child_id="child-1",
@@ -3564,7 +3620,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     assert summary.tab_labels == ("Summary", "Jawan  [1]")
     assert summary.radio_label_visibility == "collapsed"
     assert "1 decision remains." in summary.messages
-    assert "Use these recommendations" in summary.buttons
+    assert "Approve all AI recommendations" in summary.buttons
     assert "Open Jawan" in summary.buttons
     count_messages = (
         "**1**  \nIn cart",
@@ -3582,7 +3638,9 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     assert ("popover", "Pencils") not in summary.events
     assert [4.8, 1.2] in summary.column_specs
     assert 3 in summary.column_specs
-    assert ("Left out of cart (1)", None) in summary.expanders
+    assert ("Left out of cart (2)", None) in summary.expanders
+    assert "**Already owned (1)**" in summary.messages
+    assert "**Removed from cart (1)**" in summary.messages
     assert any(
         message.startswith("**Jawan:")
         for message in summary.messages
@@ -3602,7 +3660,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     app._render_review(returned_summary)
     assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "summary"
 
-    returned_summary.click("Use these recommendations")
+    returned_summary.click("Approve all AI recommendations")
     final_summary = ReviewScreenRecorder()
     app._render_review(final_summary)
     assert any(
@@ -3615,7 +3673,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         {"review-flag-1"}
     )
     assert "Nothing left to decide." in final_summary.messages
-    assert "Use these recommendations" not in final_summary.buttons
+    assert "Approve all AI recommendations" not in final_summary.buttons
 
 
 def test_personalize_student_cards_render_each_decision_before_acknowledgement(
@@ -3964,11 +4022,19 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     events = recorder.events
 
     assert sum(
-        event == ("button", "Use this recommendation")
+        event == ("button", "Approve this recommendation")
         for event in events
     ) == 7
     assert sum(
-        event == ("button", "Change this recommendation")
+        event == ("button", "We already own this item")
+        for event in events
+    ) == 7
+    assert sum(
+        event == ("button", "Remove item from cart")
+        for event in events
+    ) == 7
+    assert sum(
+        event == ("button", "Change item or quantity")
         for event in events
     ) == 5
     assert ("button", "Change package quantity") in events
@@ -4025,12 +4091,23 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     accepting_default = [
         callback
         for callback in recorder.button_callbacks
-        if callback[0] == "Use this recommendation"
+        if callback[0] == "Approve this recommendation"
     ][1]
     accepting_default[1](*accepting_default[2])  # type: ignore[operator]
     assert state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] == frozenset(
         {"review-flag-2"}
     )
+
+    remove_action = next(
+        callback
+        for callback in recorder.button_callbacks
+        if callback[0] == "Remove item from cart"
+    )
+    remove_action[1](*remove_action[2])  # type: ignore[operator]
+    removed = tuple(state["review_items"])[0]
+    assert removed.required_quantity == 0
+    assert removed.review_status == "deleted"
+    assert removed.already_owned is False
 
     unavailable_position = events.index(
         ("expander", "Not available from these stores (1)")

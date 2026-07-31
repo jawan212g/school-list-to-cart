@@ -4919,3 +4919,60 @@ so the final visual behavior still requires deployed-browser confirmation.
 
 No extraction, matching, pricing, optimizer, gate, or business-threshold
 behavior changed.
+
+## 2026-07-30 — Personalize actions and not-in-cart meaning
+
+### Objective
+
+Make the Personalize decision actions explicit and keep “already owned” distinct
+from a parent's choice to remove an item from the cart.
+
+### Work completed
+
+- Renamed the recommendation actions consistently in the student view and
+  Summary.
+- Split each decision card into two two-button rows: interpretation actions
+  first, purchase-status actions second.
+- Added an explicit “Remove item from cart” action that records deletion without
+  setting the already-owned flag.
+- Grouped excluded items by reason in both Personalize views so “Already owned”
+  and “Removed from cart” are separate lists under “Left out of cart.”
+- Added production-render-path coverage for the labels, grouping, callback
+  state, and the x86 Streamlit remove interaction.
+
+### Decisions made
+
+Optional items, school-provided items, conditional branches, and unavailable
+items keep their current positions and behavior in this pass. A complete
+taxonomy was reported for later consolidation, but only the two requested
+parent-choice groups were changed.
+
+### Problems or limitations
+
+Catalog-unavailable and unstocked items remain feasibility limits rather than
+reversible cart choices. The x86-only AppTest is required to verify Streamlit's
+real button lifecycle.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `tests/test_streamlit_lifecycle.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- Focused Personalize tests on Windows ARM64.
+- Full suite on Windows ARM64.
+- GitHub Actions x86 result to be recorded in the delivery report.
+
+### Remaining work
+
+The broader taxonomy proposal can be applied later if the parent-facing
+placement of optional, school-provided, conditional, and unavailable items is
+approved.
+
+### Recommended next step
+
+Review the two-row decision-card layout and the separate Already owned and
+Removed from cart groups in the deployed x86 build.

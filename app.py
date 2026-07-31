@@ -8278,6 +8278,38 @@ def _mark_personalize_group_owned(
     )
 
 
+def _remove_personalize_group_from_cart(
+    state: MutableMapping[str, Any],
+    group_id: str,
+    members: Sequence[SupplyItemReview],
+) -> None:
+    """Resolve one decision by recording the parent's removal choice."""
+
+    replacements = {
+        member.review_id: member.model_copy(
+            update={
+                "required_quantity": EXCLUDED_REQUIREMENT_QUANTITY,
+                "already_owned": False,
+                "review_status": "deleted",
+            }
+        )
+        for member in members
+    }
+    _replace_review_items_in_state(state, replacements)
+    confirmed = set(
+        state.get(PERSONALIZE_CONFIRMED_GROUP_IDS_KEY, ())
+    )
+    confirmed.discard(group_id)
+    state[PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] = frozenset(confirmed)
+    parent_edited = set(
+        state.get(PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY, ())
+    )
+    parent_edited.add(group_id)
+    state[PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] = frozenset(
+        parent_edited
+    )
+
+
 def _personalize_total_decision_count(
     sections: Sequence[PersonalizeStudentSection],
 ) -> int:
@@ -8883,7 +8915,7 @@ def _render_personalize_summary(
                         f"{section.child_label}."
                     )
                     st.button(
-                        "Use these recommendations",
+                        "Approve all AI recommendations",
                         key=(
                             "personalize-action:approve-student:"
                             f"{view_revision}:{section.child_id}"
@@ -8946,31 +8978,50 @@ def _render_personalize_summary(
 
     if excluded_items:
         with st.expander(f"Left out of cart ({len(excluded_items)})"):
-            for child_label, item in excluded_items:
-                with st.container(
-                    border=True,
-                    key=f"personalize-left-out-summary:{item.review_id}",
-                ):
-                    st.markdown(
-                        escape_streamlit_dollars(
-                            f"**{child_label}: "
-                            f"{_review_summary_quantity_text(item)} "
-                            f"{_review_summary_item_text(item)}**"
-                        )
-                    )
-                    with st.popover(
-                        "Review or change",
-                        use_container_width=True,
+            grouped_exclusions = _group_personalize_excluded_items(
+                tuple(item for _, item in excluded_items)
+            )
+            labels_for_item = {
+                item.review_id: child_label
+                for child_label, item in excluded_items
+            }
+            for group_label, group_items in grouped_exclusions:
+                if not group_items:
+                    continue
+                st.markdown(f"**{group_label} ({len(group_items)})**")
+                for item in group_items:
+                    child_label = labels_for_item[item.review_id]
+                    with st.container(
+                        border=True,
+                        key=(
+                            "personalize-left-out-summary:"
+                            f"{item.review_id}"
+                        ),
                     ):
-                        edited_by_id[item.review_id] = (
-                            _render_excluded_review_row(
-                                st,
-                                item,
-                                key_prefix=f"excluded:{item.review_id}",
-                                offers=offers,
-                                original_item=originals.get(item.review_id),
+                        st.markdown(
+                            escape_streamlit_dollars(
+                                f"**{child_label}: "
+                                f"{_review_summary_quantity_text(item)} "
+                                f"{_review_summary_item_text(item)}**"
                             )
                         )
+                        with st.popover(
+                            "Review or change",
+                            use_container_width=True,
+                        ):
+                            edited_by_id[item.review_id] = (
+                                _render_excluded_review_row(
+                                    st,
+                                    item,
+                                    key_prefix=(
+                                        f"excluded:{item.review_id}"
+                                    ),
+                                    offers=offers,
+                                    original_item=originals.get(
+                                        item.review_id
+                                    ),
+                                )
+                            )
 
     return edited_by_id, tuple(confirmed_group_ids)
 
@@ -9348,7 +9399,7 @@ def _render_review_detail_controls(
                 key=f"{key_prefix}:optional",
             )
             already_owned = first.checkbox(
-                "We already own this",
+                "We already own this item",
                 value=item.already_owned,
                 key=f"{key_prefix}:owned",
                 on_change=apply_review_exclusion_quantity,
@@ -9360,7 +9411,7 @@ def _render_review_detail_controls(
                 ),
             )
             delete = second.checkbox(
-                "Remove this incorrect item",
+                "Remove item from cart",
                 value=item.review_status == "deleted",
                 key=f"{key_prefix}:delete",
                 on_change=apply_review_exclusion_quantity,
@@ -9513,7 +9564,7 @@ def _render_legacy_primary_review_decisions(
             (
                 "Accept this reading",
                 "Edit the item or quantity",
-                "Remove this item",
+                "Remove item from cart",
             ),
             key=f"{key_prefix}:reading-action",
         )
@@ -9540,7 +9591,7 @@ def _render_legacy_primary_review_decisions(
                 )
             )
             hidden_fields.update({"item", "quantity"})
-        elif reading_action == "Remove this item":
+        elif reading_action == "Remove item from cart":
             updates["required_quantity"] = EXCLUDED_REQUIREMENT_QUANTITY
             updates["review_status"] = "deleted"
             hidden_fields.update({"item", "quantity"})
@@ -9749,6 +9800,8 @@ def _personalize_quantity_input_label(item: SupplyItemReview) -> str:
 def _personalize_edit_button_label(fields: frozenset[str]) -> str:
     """Name the field the compact decision action will actually expose."""
 
+    if fields.intersection({"item", "quantity"}):
+        return "Change item or quantity"
     if fields == {"package"}:
         return "Change package quantity"
     if fields == {"brand"}:
@@ -9832,9 +9885,9 @@ def _render_primary_review_decisions(
 
     action_key = f"{key_prefix}:decision-action"
     fields = _personalize_decision_edit_fields(item)
-    accept_column, edit_column, owned_column = st.columns(3)
+    accept_column, edit_column = st.columns(2)
     accept_column.button(
-        "Use this recommendation",
+        "Approve this recommendation",
         key=f"personalize-action:accept:{button_scope}",
         type="primary",
         on_click=_approve_personalize_groups,
@@ -9852,10 +9905,18 @@ def _render_primary_review_decisions(
         ),
         use_container_width=True,
     )
+    owned_column, remove_column = st.columns(2)
     owned_column.button(
-        "We already own this",
+        "We already own this item",
         key=f"personalize-action:owned:{button_scope}",
         on_click=_mark_personalize_group_owned,
+        args=(st.session_state, key_prefix, tuple(members)),
+        use_container_width=True,
+    )
+    remove_column.button(
+        "Remove item from cart",
+        key=f"personalize-action:remove:{button_scope}",
+        on_click=_remove_personalize_group_from_cart,
         args=(st.session_state, key_prefix, tuple(members)),
         use_container_width=True,
     )
@@ -10181,7 +10242,7 @@ def _render_settled_review_row(
             key=f"{key_prefix}:optional",
         )
         already_owned = status_columns[1].checkbox(
-            "We already own this",
+            "We already own this item",
             value=item.already_owned,
             key=f"{key_prefix}:owned",
             on_change=apply_review_exclusion_quantity,
@@ -10193,7 +10254,7 @@ def _render_settled_review_row(
             ),
         )
         delete = status_columns[2].checkbox(
-            "Don't buy this",
+            "Remove item from cart",
             value=item.review_status == "deleted",
             key=f"{key_prefix}:delete",
             on_change=apply_review_exclusion_quantity,
@@ -10301,6 +10362,59 @@ def _render_excluded_review_row(
         offers=offers,
         original_item=original,
         source_context=source_context,
+    )
+
+
+def _group_personalize_excluded_items(
+    items: Sequence[SupplyItemReview],
+) -> tuple[tuple[str, tuple[SupplyItemReview, ...]], ...]:
+    """Keep each parent-facing reason for exclusion visibly distinct."""
+
+    already_owned = tuple(item for item in items if item.already_owned)
+    removed = tuple(
+        item
+        for item in items
+        if (
+            not item.already_owned
+            and not item.provided_by_school
+            and item.condition_applies is not False
+            and (
+                item.review_status == "deleted"
+                or item.required_quantity == EXCLUDED_REQUIREMENT_QUANTITY
+            )
+        )
+    )
+    provided_by_school = tuple(
+        item for item in items if item.provided_by_school
+    )
+    does_not_apply = tuple(
+        item
+        for item in items
+        if (
+            not item.already_owned
+            and not item.provided_by_school
+            and item.condition_applies is False
+        )
+    )
+    grouped_ids = {
+        item.review_id
+        for group in (
+            already_owned,
+            removed,
+            provided_by_school,
+            does_not_apply,
+        )
+        for item in group
+    }
+    other = tuple(
+        item for item in items if item.review_id not in grouped_ids
+    )
+    return (
+        ("Already owned", already_owned),
+        ("Removed from cart", removed),
+        ("Provided by school", provided_by_school),
+        ("Doesn't apply to this student", does_not_apply),
+        ("Other", other),
     )
 
 
@@ -12760,7 +12874,7 @@ def _render_review(st: Any) -> None:
                 )
                 if default_group_ids:
                     decision_action.button(
-                        "Use all recommendations here",
+                        "Approve all AI recommendations",
                         key=(
                             "personalize-action:approve-section:"
                             f"{st.session_state[PERSONALIZE_VIEW_REVISION_KEY]}:"
@@ -12928,29 +13042,39 @@ def _render_review(st: Any) -> None:
                                 else None
                             ),
                         )
-                for item in excluded_items:
+                for group_label, group_items in (
+                    _group_personalize_excluded_items(excluded_items)
+                ):
+                    if not group_items:
+                        continue
                     st.markdown(
-                        (
-                            f'<span id="{_personalize_item_anchor(item.review_id)}">'
-                            "</span>"
-                        ),
-                        unsafe_allow_html=True,
+                        f"**{group_label} ({len(group_items)})**"
                     )
-                    edited_by_id[item.review_id] = (
-                        _render_excluded_review_row(
-                            st,
-                            item,
-                            key_prefix=f"excluded:{item.review_id}",
-                            offers=review_offers,
-                            original_item=original_items.get(
-                                item.review_id
+                    for item in group_items:
+                        st.markdown(
+                            (
+                                f'<span id="{_personalize_item_anchor(item.review_id)}">'
+                                "</span>"
                             ),
-                            source_context=source_context_by_review_id.get(
-                                item.review_id,
-                                (),
-                            ),
+                            unsafe_allow_html=True,
                         )
-                    )
+                        edited_by_id[item.review_id] = (
+                            _render_excluded_review_row(
+                                st,
+                                item,
+                                key_prefix=f"excluded:{item.review_id}",
+                                offers=review_offers,
+                                original_item=original_items.get(
+                                    item.review_id
+                                ),
+                                source_context=(
+                                    source_context_by_review_id.get(
+                                        item.review_id,
+                                        (),
+                                    )
+                                ),
+                            )
+                        )
 
             if _personalize_has_list_details(
                 envelope,

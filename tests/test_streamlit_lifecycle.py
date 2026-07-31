@@ -1255,10 +1255,10 @@ def test_personalize_edit_survives_summary_round_trip_without_button_crash() -> 
     first_bulk_key = next(
         button.key
         for button in test_app.button
-        if button.label == "Use all recommendations here"
+        if button.label == "Approve all AI recommendations"
     )
 
-    _click_label(test_app, "Change this recommendation")
+    _click_label(test_app, "Change item or quantity")
     assert (
         test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY]
         == "child-1"
@@ -1290,9 +1290,38 @@ def test_personalize_edit_survives_summary_round_trip_without_button_crash() -> 
     reopened_bulk_key = next(
         button.key
         for button in test_app.button
-        if button.label == "Use all recommendations here"
+        if button.label == "Approve all AI recommendations"
     )
     assert reopened_bulk_key != first_bulk_key
+
+
+def test_personalize_remove_action_uses_distinct_removed_group() -> None:
+    """FR-12: removal is explicit and remains distinct from already-owned."""
+
+    test_app = _run_personalize_decision_screen()
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    navigation.set_value("child-1").run()
+    _assert_no_exception(test_app)
+
+    _click_label(test_app, "Remove item from cart")
+    _assert_no_exception(test_app)
+
+    item = test_app.session_state["review_items"][0]
+    assert item.required_quantity == 0
+    assert item.review_status == "deleted"
+    assert item.already_owned is False
+    assert any(
+        markdown.value == "**Removed from cart (1)**"
+        for markdown in test_app.markdown
+    )
+    assert not any(
+        markdown.value.startswith("**Already owned")
+        for markdown in test_app.markdown
+    )
 
 
 def test_package_count_decision_edits_items_per_package_not_order_quantity() -> None:
