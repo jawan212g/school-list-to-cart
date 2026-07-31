@@ -5956,3 +5956,10 @@ low-confidence catalog-match decision remains.
 
 - The new real-render AppTest requires the x86 GitHub Actions runner because
   Streamlit AppTest is unavailable in the local ARM64 environment.
+
+### x86 follow-up
+
+- The first x86 run rejected the new fixture before the screen rendered because
+  it supplied a nonexistent `Requirement.brand` field. Production stores that
+  source-derived value in `brand_hint`; the fixture now uses the real schema
+  field rather than weakening validation.
