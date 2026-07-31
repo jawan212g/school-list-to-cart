@@ -5220,6 +5220,162 @@ def test_classroom_scope_from_section_screen_controls_quantity_math(
     assert needs[0].quantity == expected_quantity
 
 
+def test_classroom_per_student_scope_reaches_the_production_cart() -> None:
+    """BR-33: the screen's cached-extraction path scales the final cart."""
+
+    intake = {
+        "session_id": "classroom-scaling",
+        "children": (
+            {
+                "child_id": "classroom-1",
+                "label": "Ms. Q's class",
+                "grade": "Grade 3",
+                "student_count": 20,
+                "entity_type": "classroom",
+            },
+        ),
+        "budget_total": 100_000,
+        "budget_mode": "combined",
+        "budget_allocations": {},
+        "shopping_mode": "budget",
+        "store_radius_miles": 10.0,
+        "allowed_stores": None,
+        "fulfillment_pref": "pickup",
+        "tax_basis_points": 0,
+        "max_stores": None,
+    }
+    requirements = (
+        Requirement(
+            req_id="glue",
+            child_id="classroom-1",
+            raw_text="1 pack Elmer's glue sticks",
+            canonical_item="glue_sticks",
+            quantity=1,
+            unit_type="pack",
+            supply_scope="individual",
+            attributes={"count": 4},
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="pencils",
+            child_id="classroom-1",
+            raw_text="10 pencils",
+            canonical_item="pencils",
+            quantity=10,
+            supply_scope="individual",
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="notes",
+            child_id="classroom-1",
+            raw_text="2 packs of Post-Its",
+            canonical_item="sticky_notes",
+            quantity=2,
+            unit_type="pack",
+            supply_scope="individual",
+            attributes={"count": 3},
+            extraction_confidence=1.0,
+        ),
+    )
+    offers = (
+        Offer(
+            sku="GLUE-4",
+            store_id="VALUE_DEPOT",
+            brand="Elmer's",
+            title="Elmer's Glue Sticks, 4 Count",
+            category="glue_sticks",
+            pack_size=4,
+            unit_price=10,
+            pack_price=40,
+            stock_qty=100,
+            is_returnable=True,
+            attributes={},
+        ),
+        Offer(
+            sku="PENCILS-10",
+            store_id="VALUE_DEPOT",
+            brand="Generic",
+            title="Pencils, 10 Count",
+            category="pencils",
+            pack_size=10,
+            unit_price=10,
+            pack_price=100,
+            stock_qty=100,
+            is_returnable=True,
+            attributes={},
+        ),
+        Offer(
+            sku="NOTES-3",
+            store_id="VALUE_DEPOT",
+            brand="Post-It",
+            title="Post-It Notes, 3 Count",
+            category="sticky_notes",
+            pack_size=3,
+            unit_price=10,
+            pack_price=30,
+            stock_qty=100,
+            is_returnable=True,
+            attributes={},
+        ),
+    )
+
+    result = app._run_pipeline_from_cached_extractions(
+        app._pipeline_session(intake),
+        (),
+        {"classroom-1": ExtractionEnvelope(requirements=requirements)},
+        {},
+        offers,
+        StructuredSuitabilityJudge(),
+    )
+
+    assert {
+        need.canonical_item: need.quantity for need in result.unit_needs
+    } == {
+        "glue_sticks": 80,
+        "pencils": 200,
+        "sticky_notes": 120,
+    }
+    assert {
+        line.sku: line.units_needed
+        for line in result.proposed_cart.plan.lines
+    } == {
+        "GLUE-4": 80,
+        "PENCILS-10": 200,
+        "NOTES-3": 120,
+    }
+
+
+def test_personalize_item_names_do_not_expose_supply_scope_codes() -> None:
+    """BR-33: parent item names omit internal scope vocabulary."""
+
+    individual = SupplyItemReview(
+        review_id="classroom-1:pencils",
+        req_id="pencils",
+        child_id="classroom-1",
+        item_name="pencils",
+        required_quantity=10,
+        supply_scope="individual",
+        source_text="10 pencils",
+        confidence=1.0,
+    )
+    shared = individual.model_copy(
+        update={
+            "review_id": "classroom-1:tissues",
+            "req_id": "tissues",
+            "item_name": "tissues",
+            "required_quantity": 1,
+            "unit": "box",
+            "supply_scope": "shared",
+            "source_text": "1 box of tissues",
+        }
+    )
+
+    assert app.review_understanding_text(individual) == "10 pencils"
+    assert app._review_summary_item_text(individual) == "Pencils"
+    assert app.review_understanding_text(shared) == "1 box of tissues"
+    assert app._review_summary_item_text(shared) == "Tissues"
+
+
 def test_section_picker_uses_only_section_choices_when_details_add_nothing() -> None:
     """A simple grade picker does not render a redundant evidence table."""
 

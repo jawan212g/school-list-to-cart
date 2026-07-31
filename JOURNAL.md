@@ -5797,3 +5797,74 @@ package-selection behavior remains deferred.
 
 Rebuild the Kevin session after deployment and confirm that only its genuine
 low-confidence catalog-match decision remains.
+
+## 2026-07-31 — Verify classroom scaling and remove scope jargon
+
+### Objective
+
+- Diagnose a live report that a classroom list marked per student retained its
+  source quantities, prove whether BR-33 reached cart arithmetic, and remove
+  internal `individual supply` / `shared supply` wording from Personalize.
+
+### Work completed
+
+- Traced classroom size from setup into `PipelineSession.student_counts` and
+  the parent scope choice from extraction stamping through confirmed
+  requirements.
+- Confirmed BR-33 is consumed in deterministic aggregation: package contents
+  are normalized first, then per-student quantities are multiplied by the
+  classroom count; whole-class quantities are not multiplied.
+- Added a production-path regression using the same cached-extraction pipeline
+  entry point as the working screen. For a 20-student classroom, 1 four-count
+  glue-stick pack, 10 pencils, and 2 three-count sticky-note packs per student
+  become cart needs of 80, 200, and 120 units.
+- Removed `individual supply` and `shared supply` suffixes from Personalize item
+  names and its Summary item labels. The underlying scope data and calculation
+  remain unchanged.
+
+### Decisions made
+
+- No quantity logic changed because the final cart already scaled correctly.
+  The misleading 1 / 10 / 2 display was the Personalize source-reading view,
+  not the aggregated shopping-plan quantity.
+- This is not a seventh defined-but-unconsumed mechanism: `supply_scope` is read
+  by `aggregate_requirements`. The scope is not retained on `UnitNeed` after
+  multiplication, so a future plain-language explanation would require adding
+  calculation provenance rather than moving or repeating the multiplication.
+- BR-33 was not amended.
+
+### Problems or limitations
+
+- The requested arithmetic regression could not honestly be made to fail
+  before the fix because the production cart already contained the multiplied
+  quantities. The parent-copy regression did fail first on the leaked scope
+  suffix and passed after its removal.
+- The final plan does not yet explain a scaled line as, for example, `10 for
+  each of 20 students = 200 needed`; that wording was requested as a proposal,
+  not an implementation in this pass.
+
+### Files changed
+
+- `app.py`
+- `tests/test_app.py`
+- `JOURNAL.md`
+
+### Testing performed
+
+- `py -3.12-arm64 -m pytest -q tests/test_app.py -k "classroom_per_student_scope_reaches_the_production_cart or personalize_item_names_do_not_expose_supply_scope_codes"`
+  - Before copy fix: cart regression passed; scope-copy regression failed.
+  - After copy fix: both passed.
+- `py -3.12-arm64 -m pytest -q`
+  - `477 passed, 1 skipped in 13.97s`.
+
+### Remaining work
+
+- If approved later, retain enough BR-33 provenance after aggregation to show
+  the class-size multiplication once on the shopping plan without repeating an
+  internal scope label on every Personalize item.
+
+### Recommended next step
+
+- Verify the same classroom session in the deployed x86 app and confirm that
+  the shopping-plan line shows the scaled `needed` quantity while Personalize
+  no longer shows the internal scope suffix.

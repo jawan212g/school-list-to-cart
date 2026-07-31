@@ -7482,10 +7482,6 @@ def review_understanding_text(item: SupplyItemReview) -> str:
             details.append(
                 rule_parent_attribute_value(field_name, value)
             )
-    if item.supply_scope == "individual":
-        details.append("individual supply")
-    elif item.supply_scope == "shared":
-        details.append("shared supply")
     if item.optional:
         details.append("optional")
     if item.condition:
@@ -7531,10 +7527,6 @@ def _review_summary_item_text(item: SupplyItemReview) -> str:
             details.append(
                 rule_parent_attribute_value(field_name, value)
             )
-    if item.supply_scope == "individual":
-        details.append("individual supply")
-    elif item.supply_scope == "shared":
-        details.append("shared supply")
     if item.optional:
         details.append("optional")
     if item.condition:
