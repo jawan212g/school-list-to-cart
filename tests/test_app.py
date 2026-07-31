@@ -3671,7 +3671,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     assert "personalize_active_tab" not in state
 
     assert state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] == frozenset(
-        {"review-flag-1"}
+        {app.review_flag_groups(rows)[0].group_id}
     )
     assert "Nothing left to decide." in final_summary.messages
     assert "Approve all AI recommendations" not in final_summary.buttons
@@ -4063,11 +4063,14 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
         "The list did not say how many notebook paper were in the package. "
         "The AI assumed 150 per package.",
     ) in events
+    flag_groups = app.review_flag_groups(rows)
+    first_group_id = flag_groups[0].group_id
+    second_group_id = flag_groups[1].group_id
     state.set_widget(
-        "review-flag-1:decision-action",
+        f"{first_group_id}:decision-action",
         app.PERSONALIZE_EDIT_RECOMMENDATION_ACTION,
     )
-    state.set_widget("review-flag-1:decision-quantity", 5)
+    state.set_widget(f"{first_group_id}:decision-quantity", 5)
     edited_recorder = DecisionScreenRecorder()
     app._render_review(edited_recorder)
     assert sum(
@@ -4089,7 +4092,7 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     )
     edited_send[1](*edited_send[2])  # type: ignore[operator]
     assert state[app.PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] == (
-        frozenset({"review-flag-1"})
+        frozenset({first_group_id})
     )
     assert tuple(state["review_items"])[0].item_name == "pencils"
     assert tuple(state["review_items"])[0].required_quantity == 5
@@ -4101,7 +4104,7 @@ def test_personalize_student_cards_render_each_decision_before_acknowledgement(
     ][1]
     accepting_default[1](*accepting_default[2])  # type: ignore[operator]
     assert state[app.PERSONALIZE_CONFIRMED_GROUP_IDS_KEY] == frozenset(
-        {"review-flag-2"}
+        {second_group_id}
     )
 
     remove_action = next(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
@@ -258,10 +259,17 @@ def review_flag_groups(
         grouped.setdefault(signature, []).append(row)
 
     groups: list[ReviewFlagGroup] = []
-    for index, members in enumerate(grouped.values(), start=1):
+    for members in grouped.values():
+        identity = "\x1f".join(
+            sorted(row.review_id for row in members)
+        )
+        group_id = (
+            "review-flag-"
+            + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        )
         groups.append(
             ReviewFlagGroup(
-                group_id=f"review-flag-{index}",
+                group_id=group_id,
                 child_ids=tuple(
                     dict.fromkeys(row.child_id for row in members)
                 ),

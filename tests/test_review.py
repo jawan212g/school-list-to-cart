@@ -55,6 +55,42 @@ def test_organize_extractions_sorts_and_preserves_source_text() -> None:
     assert all(row.review_status == "pending" for row in rows)
 
 
+def test_review_group_identity_does_not_shift_when_an_earlier_group_leaves() -> None:
+    """BR-52: one item's resolution cannot acknowledge a different item."""
+
+    rows = (
+        SupplyItemReview(
+            review_id="pencils-review",
+            req_id="pencils",
+            child_id="child-1",
+            item_name="pencils",
+            required_quantity=24,
+            source_text="24 pencils",
+            confidence=0.6,
+            issue_codes=("low_confidence",),
+        ),
+        SupplyItemReview(
+            review_id="sticky-notes-review",
+            req_id="sticky-notes",
+            child_id="child-1",
+            item_name="sticky_notes",
+            required_quantity=2,
+            source_text="2 packs of sticky notes",
+            confidence=0.6,
+            issue_codes=("low_confidence",),
+        ),
+    )
+    initial_groups = review_flag_groups(rows)
+    remaining_rows = (
+        rows[0].model_copy(update={"review_status": "deleted"}),
+        rows[1],
+    )
+    (remaining_group,) = review_flag_groups(remaining_rows)
+
+    assert remaining_group.group_id == initial_groups[1].group_id
+    assert remaining_group.group_id != initial_groups[0].group_id
+
+
 def test_unnamed_no_substitutes_routes_to_production_review() -> None:
     """BR-69: a strict generic line asks the parent instead of inventing a brand."""
 

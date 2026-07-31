@@ -5059,3 +5059,40 @@ happens to preserve the orphan.
 
 No item interpretation, matching, money path, optimizer, or approval-gate
 behavior changed.
+
+## 2026-07-30 — Personalize and submission share one decision truth
+
+### Defect
+
+The Personalize counts treated both accepted AI recommendations and submitted
+parent edits as completed, while submission confirmed only the AI-accepted
+set. A parent-edited row therefore disappeared from the decision screen and
+returned as pending at the boundary to plan building.
+
+Review groups also used positional IDs such as `review-flag-1`. Removing an
+earlier group renumbered every later group, allowing an acknowledgment for one
+item to attach to a different untouched item. The untouched row remained in
+`review_items`; only the screen's derived group filtering hid it.
+
+### Resolution
+
+- Derive each review-group ID from its stable source review-row membership
+  instead of its position.
+- Preserve separate durable outcome sets for accepted recommendations and
+  parent edits.
+- Derive their union once as the completed-decision set.
+- Use that exact set for both Personalize counts/rendering and submission's
+  `review_status` confirmation.
+
+### Failing-before evidence
+
+- x86 run `30596898242` showed that removing the first flagged item hid the
+  untouched second item because its positional group ID shifted.
+- x86 run `30597037538` showed that a submitted parent edit disappeared from
+  the screen but was still treated as pending at submission.
+
+### Architecture
+
+The change is deterministic review-state identity and consumption only. No
+model call, matching, money path, optimizer, gate condition, or BR threshold
+changed.

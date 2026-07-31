@@ -7739,6 +7739,33 @@ def _confirmed_personalize_group_ids(
     return resolved
 
 
+def _personalize_group_decision_state(
+    state: MutableMapping[str, Any],
+    group_ids: Iterable[str],
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """Derive one completed-decision set for both display and submission."""
+
+    known_group_ids = frozenset(group_ids)
+    confirmed = _confirmed_personalize_group_ids(
+        state,
+        known_group_ids,
+    )
+    parent_edited = frozenset(
+        str(group_id)
+        for group_id in state.get(
+            PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY,
+            (),
+        )
+        if str(group_id) in known_group_ids
+    )
+    if (
+        state.get(PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY)
+        != parent_edited
+    ):
+        state[PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] = parent_edited
+    return confirmed, parent_edited, confirmed | parent_edited
+
+
 def _set_personalize_group_confirmation(
     state: MutableMapping[str, Any],
     group_id: str,
@@ -12742,23 +12769,18 @@ def _render_review(st: Any) -> None:
     item_by_id = {item.review_id: item for item in items}
     source_context_by_review_id = review_split_source_context(items)
     flag_groups = review_flag_groups(items)
-    confirmed_group_ids = _confirmed_personalize_group_ids(
+    (
+        confirmed_group_ids,
+        _,
+        resolved_group_ids,
+    ) = _personalize_group_decision_state(
         st.session_state,
         (group.group_id for group in flag_groups),
-    )
-    parent_edited_group_ids = frozenset(
-        st.session_state.get(
-            PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY,
-            (),
-        )
-    )
-    acknowledged_group_ids = tuple(
-        confirmed_group_ids | parent_edited_group_ids
     )
     unhandled_groups = unhandled_review_flag_groups(
         items,
         flag_groups,
-        acknowledged_group_ids,
+        resolved_group_ids,
     )
     unhandled_group_ids = frozenset(
         group.group_id for group in unhandled_groups
@@ -12928,7 +12950,7 @@ def _render_review(st: Any) -> None:
         condition_answers.update(
             conditional_answers_for_selection(group, selected_label)
         )
-    confirmed_flag_group_ids = list(confirmed_group_ids)
+    resolved_flag_group_ids = list(resolved_group_ids)
     edited_by_id: dict[str, SupplyItemReview] = {}
     requested_scroll_target = st.session_state.get(
         "personalize_scroll_target"
@@ -12951,8 +12973,8 @@ def _render_review(st: Any) -> None:
             )
             edited_by_id.update(summary_edits)
             for group_id in summary_confirmed_ids:
-                if group_id not in confirmed_flag_group_ids:
-                    confirmed_flag_group_ids.append(group_id)
+                if group_id not in resolved_flag_group_ids:
+                    resolved_flag_group_ids.append(group_id)
         else:
             student_section = student_section_by_child[str(active_tab)]
             child_id = student_section.child_id
@@ -13077,8 +13099,8 @@ def _render_review(st: Any) -> None:
                     source_context_by_review_id=source_context_by_review_id,
                 )
                 edited_by_id.update(edited)
-                if confirmed and group.group_id not in confirmed_flag_group_ids:
-                    confirmed_flag_group_ids.append(group.group_id)
+                if confirmed and group.group_id not in resolved_flag_group_ids:
+                    resolved_flag_group_ids.append(group.group_id)
             settled_items = tuple(
                 item_by_id[item_id]
                 for item_id in student_section.settled_item_ids
@@ -13354,7 +13376,7 @@ def _render_review(st: Any) -> None:
         reviewed = apply_review_confirmations(
             reviewed,
             flag_groups,
-            confirmed_flag_group_ids,
+            resolved_flag_group_ids,
         )
         unresolved = unresolved_required_items(reviewed)
         if unresolved:
