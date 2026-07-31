@@ -1491,7 +1491,7 @@ def test_personalize_accept_keeps_the_open_entry_and_records_the_choice(
     assert test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY] == entry_id
     assert len(after - before) == 1
     assert any(
-        markdown.value == "**1**  \nNeeds a decision"
+        markdown.value == "**Needs your decision (1)**"
         for markdown in test_app.markdown
     )
 
