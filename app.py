@@ -1895,28 +1895,6 @@ def _source_lines(
     )
 
 
-def _has_exact_catalog_match(
-    result: PipelineResult,
-    line: CartLine,
-) -> bool:
-    need_matches = next(
-        (
-            item
-            for item in result.matches.needs
-            if item.unit_need.source_requirement_ids
-            == line.source_requirement_ids
-        ),
-        None,
-    )
-    return bool(
-        need_matches
-        and any(
-            candidate.attribute_status == "exact"
-            for candidate in need_matches.candidates
-        )
-    )
-
-
 def _short_cost_component(label: str, cents: int) -> str | None:
     if cents == 0:
         return None
@@ -2457,13 +2435,6 @@ def _approval_options(
             )
         if line is None:
             return _with_one_recommended_option(options)
-        should_offer_self_source = (
-            not _has_exact_catalog_match(result, line)
-            or len(catalog_choices) <= 1
-        )
-        if not should_offer_self_source:
-            return _with_one_recommended_option(options)
-
         removal = next(
             (
                 alternative
