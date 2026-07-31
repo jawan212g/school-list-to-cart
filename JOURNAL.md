@@ -5091,6 +5091,11 @@ item to attach to a different untouched item. The untouched row remained in
 - x86 run `30597037538` showed that a submitted parent edit disappeared from
   the screen but was still treated as pending at submission.
 
+The first post-fix x86 run (`30597282371`) retained the removed pencils row and
+correctly named only sticky notes at the gate. One assertion had concatenated
+both regions and mistaken the retained removal record for a gate blocker; it
+was narrowed to the gate's exact rendered line.
+
 ### Architecture
 
 The change is deterministic review-state identity and consumption only. No

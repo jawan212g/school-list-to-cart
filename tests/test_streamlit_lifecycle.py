@@ -1452,12 +1452,13 @@ def test_partial_personalize_actions_leave_the_same_decision_visible_to_gate() -
     )
 
     _click_label(test_app, "Use these choices and build my shopping plan")
-    warning_text = " ".join(
-        str(item.value)
-        for item in (*test_app.warning, *test_app.markdown)
-    ).casefold()
-    assert "sticky notes" in warning_text
-    assert "pencils" not in warning_text
+    rendered_lines = tuple(
+        str(item.value).strip()
+        for item in test_app.markdown
+    )
+    assert "Mr. G: Sticky notes" in rendered_lines
+    assert "Mr. G: Pencils" not in rendered_lines
+    assert "Mr. G: Pencils and Sticky notes" not in rendered_lines
     assert any(
         button.label == "Open Mr. G"
         and "unresolved-student" in str(button.key)
