@@ -1,6 +1,10 @@
 """Model-free coverage for BR-05 add-on proposals."""
 
-from agent.addons import evaluate_addon_selection
+from agent.addons import (
+    addon_selection_is_feasible,
+    evaluate_addon_selection,
+    recommend_affordable_addons,
+)
 from agent.match import StructuredSuitabilityJudge
 from agent.optimize import OptimizationConfig
 from agent.pipeline import ListInput, PipelineSession, run_pipeline
@@ -25,10 +29,11 @@ def _offer(
     sku: str,
     category: str,
     price: int,
+    store_id: str = "S",
 ) -> Offer:
     return Offer(
         sku=sku,
-        store_id="S",
+        store_id=store_id,
         brand="Generic",
         title=sku,
         category=category,
@@ -130,6 +135,116 @@ def test_br05_hides_addons_when_base_is_above_ninety_percent() -> None:
     assert result.addon_proposal.optimization is None
 
 
+def test_optional_item_starts_unselected_when_exact_total_exceeds_budget() -> None:
+    """BR-05: an eligible optional item cannot make the cart exceed budget."""
+
+    offers = [
+        _offer("BACKPACK", "backpacks", 8_000),
+        _offer("PENCILS", "pencils", 3_000),
+    ]
+    stores = [_store()]
+    result = run_pipeline(
+        PipelineSession(
+            session_id="optional-over-budget",
+            children=("child",),
+            budget_total=10_000,
+            fulfillment_pref="pickup",
+            tax_basis_points=0,
+        ),
+        [ListInput(child_id="child", source="list")],
+        stores=stores,
+        offers=offers,
+        suitability_judge=StructuredSuitabilityJudge(),
+        extractor=_extractor,
+    )
+    config = OptimizationConfig(
+        shopping_mode="budget",
+        budget_cents=10_000,
+        fulfillment_preference="pickup",
+        tax_basis_points=0,
+    )
+
+    recommended = recommend_affordable_addons(
+        result.addon_proposal,
+        result.proposed_cart,
+        result.purchase_needs,
+        result.matches,
+        offers,
+        stores,
+        config,
+    )
+    attempted = evaluate_addon_selection(
+        result.addon_proposal,
+        ("child:donation",),
+        result.proposed_cart,
+        result.purchase_needs,
+        result.matches,
+        offers,
+        stores,
+        config,
+    )
+
+    assert result.addon_proposal.eligible is True
+    assert attempted.resulting_landed_cost_cents == 11_000
+    assert addon_selection_is_feasible(attempted, 10_000) is False
+    assert recommended == ()
+
+
+def test_optional_item_stays_out_when_preferences_make_it_unavailable() -> None:
+    """BR-05: optional items must fit the selected fulfillment preference."""
+
+    delivery_only = Store(
+        store_id="D",
+        name="Delivery only",
+        distance_miles=50.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=0,
+        delivery_minimum=0,
+        tax_applies=False,
+        pickup_available=False,
+    )
+    stores = [_store(), delivery_only]
+    offers = [
+        _offer("BACKPACK", "backpacks", 8_000),
+        _offer("PENCILS", "pencils", 500, store_id="D"),
+    ]
+    result = run_pipeline(
+        PipelineSession(
+            session_id="optional-preference-gap",
+            children=("child",),
+            budget_total=10_000,
+            fulfillment_pref="pickup",
+            tax_basis_points=0,
+        ),
+        [ListInput(child_id="child", source="list")],
+        stores=stores,
+        offers=offers,
+        suitability_judge=StructuredSuitabilityJudge(),
+        extractor=_extractor,
+    )
+    config = OptimizationConfig(
+        shopping_mode="budget",
+        budget_cents=10_000,
+        fulfillment_preference="pickup",
+        tax_basis_points=0,
+    )
+
+    recommended = recommend_affordable_addons(
+        result.addon_proposal,
+        result.proposed_cart,
+        result.purchase_needs,
+        result.matches,
+        offers,
+        stores,
+        config,
+    )
+
+    assert result.addon_proposal.eligible is True
+    assert result.addon_proposal.gap_items == ("pencils",)
+    assert recommended == ()
+
+
 def test_br05_hides_donations_while_a_required_item_is_unmet() -> None:
     """BR-04/BR-05: optional giving waits until required coverage is complete."""
 
@@ -192,6 +307,24 @@ def test_no_budget_still_minimizes_cost_and_offers_donations() -> None:
     assert "does not apply" in result.addon_proposal.reason
     assert result.addon_proposal.resulting_landed_cost_cents == 9_000
     assert result.addon_proposal.incremental_landed_cost_cents == 1_000
+    assert recommend_affordable_addons(
+        result.addon_proposal,
+        result.proposed_cart,
+        result.purchase_needs,
+        result.matches,
+        [
+            _offer("BACKPACK-HIGH", "backpacks", 9_000),
+            _offer("BACKPACK-LOW", "backpacks", 8_000),
+            _offer("PENCILS", "pencils", 1_000),
+        ],
+        [_store()],
+        OptimizationConfig(
+            shopping_mode="budget",
+            budget_cents=None,
+            fulfillment_preference="pickup",
+            tax_basis_points=0,
+        ),
+    ) == ("child:donation",)
 
 
 def test_individual_donations_reoptimize_exactly_and_stay_separate() -> None:

@@ -4731,6 +4731,65 @@ navigation-label change.
 No model call, extraction prompt, matching rule, price, money path, optimizer,
 approval gate, or BR threshold changed.
 
+## 2026-07-30 — Optional items remain visibly conditional
+
+### Objective
+
+Make optional-list status clear during Personalize and ensure optional items
+enter the effective shopping plan only when the exact result satisfies both
+the budget and the parent's shopping preferences.
+
+### Work completed
+
+- Renamed the Personalize group to "Optional — left out of cart" and placed it
+  immediately above the broader out-of-cart group.
+- Added an Out of cart count to each Personalize Summary entry. It combines
+  excluded rows and items unavailable from the permitted stores while keeping
+  optional items in their own count.
+- Amended BR-05 so exact re-optimization must remain within budget and satisfy
+  the active store, radius, and fulfillment constraints before an optional
+  item is applied.
+- Added deterministic feasible-default selection for optional items.
+- Kept an over-budget or preference-infeasible attempted selection outside the
+  effective cart and added a plain-language reason.
+- Generalized final-plan copy from donations to optional items because the
+  proposal already contains both optional and donation requirements.
+
+### Decisions and limitations
+
+BR-05's existing ninety-percent eligibility threshold remains unchanged.
+Feasible optional defaults are considered in stable source order; this is a
+deterministic inclusion policy, not a new optimization objective for ranking
+optional wishes.
+
+### Files changed
+
+- `BRD.md`
+- `agent/addons.py`
+- `agent/rules.py`
+- `app.py`
+- `tests/test_addons.py`
+- `tests/test_app.py`
+
+### Testing
+
+The Windows ARM64 suite passed with 444 tests and one Streamlit AppTest skip.
+New fixed-cost coverage verifies an optional item stays out when it would raise
+an $80 required cart above a $100 budget and when pickup-only preferences
+exclude its delivery-only store.
+
+### Remaining work and recommended next step
+
+Run the x86 GitHub Actions suite to exercise the four-column Streamlit Summary
+and optional widget lifecycle with the production Streamlit runtime.
+
+### Architecture
+
+No model calls were added. All optional-item feasibility, budget comparison,
+matching reuse, and re-optimization remain deterministic and use integer
+cents. Extraction, the approval gate, and required-item optimization behavior
+were not changed.
+
 ## 2026-07-30 — Named products and decision controls stay aligned
 
 ### Defects

@@ -37,6 +37,9 @@ REQUIRED_ITEM_AUTO_DROP_ALLOWED = False  # BR-04: required items stay in the car
 
 OPTIONAL_ITEMS_INCLUDED_BY_DEFAULT = False  # BR-05: optional items start excluded.
 OPTIONAL_ITEM_HEADROOM_PERCENT = 90  # BR-05: add-ons appear at 90% of budget.
+OPTIONAL_ITEMS_REQUIRE_FEASIBLE_PLAN = True
+# BR-05: an optional item enters the effective cart only when exact
+# re-optimization satisfies the budget and the selected shopping preferences.
 OPTIONAL_ITEM_HEADROOM_BYPASSED_WITHOUT_BUDGET = True
 # BR-05 reconciliation: without a budget constraint there is no 90% threshold,
 # so optional items may be offered after required coverage is complete.

@@ -16,6 +16,7 @@ from agent.optimize import (
 from agent.rules import (
     OPTIONAL_ITEM_HEADROOM_BYPASSED_WITHOUT_BUDGET,
     OPTIONAL_ITEM_HEADROOM_PERCENT,
+    OPTIONAL_ITEMS_REQUIRE_FEASIBLE_PLAN,
     PERCENT_DENOMINATOR,
 )
 from data.loader import Offer, Store
@@ -63,6 +64,26 @@ class AddOnSelectionEvaluation:
     incremental_landed_cost_cents: int
     review_requirement_ids: tuple[str, ...] = ()
     gap_items: tuple[str, ...] = ()
+
+
+def addon_selection_is_feasible(
+    evaluation: AddOnSelectionEvaluation,
+    budget_cents: int | None,
+) -> bool:
+    """Return whether BR-05 permits the selected optional items (FR-09)."""
+
+    if not OPTIONAL_ITEMS_REQUIRE_FEASIBLE_PLAN:
+        raise RuntimeError(
+            "BR-05 must require optional items to satisfy the active plan"
+        )
+    return bool(
+        not evaluation.review_requirement_ids
+        and not evaluation.gap_items
+        and (
+            budget_cents is None
+            or evaluation.resulting_landed_cost_cents <= budget_cents
+        )
+    )
 
 
 def _optional_items(
@@ -180,6 +201,40 @@ def evaluate_addon_selection(
         review_requirement_ids=review_ids,
         gap_items=optimization.gap_items,
     )
+
+
+def recommend_affordable_addons(
+    proposal: AddOnProposal,
+    base_optimization: OptimizationResult,
+    base_purchase_needs: Sequence[UnitNeed],
+    base_matches: MatchResult,
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+    config: OptimizationConfig,
+    *,
+    base_candidate_skus_by_need: (
+        Mapping[tuple[str, ...], frozenset[str]] | None
+    ) = None,
+) -> tuple[str, ...]:
+    """Preselect optional items only while the exact plan remains feasible."""
+
+    selected: list[str] = []
+    for item in proposal.items:
+        candidate_ids = (*selected, item.requirement_id)
+        evaluation = evaluate_addon_selection(
+            proposal,
+            candidate_ids,
+            base_optimization,
+            base_purchase_needs,
+            base_matches,
+            offers,
+            stores,
+            config,
+            base_candidate_skus_by_need=base_candidate_skus_by_need,
+        )
+        if addon_selection_is_feasible(evaluation, config.budget_cents):
+            selected.append(item.requirement_id)
+    return tuple(selected)
 
 
 def propose_addons(

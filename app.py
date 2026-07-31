@@ -23,7 +23,12 @@ from uuid import uuid4
 import pypdfium2 as pdfium
 
 from agent.aggregate import UnitNeed
-from agent.addons import AddOnSelectionEvaluation, evaluate_addon_selection
+from agent.addons import (
+    AddOnSelectionEvaluation,
+    addon_selection_is_feasible,
+    evaluate_addon_selection,
+    recommend_affordable_addons,
+)
 from agent.approval_options import (
     CatalogApprovalChoice,
     RemovalCostContext,
@@ -619,6 +624,12 @@ class PersonalizeStudentSection:
         """Count understood items these simulated stores do not carry."""
 
         return len(self.unstocked_item_ids)
+
+    @property
+    def out_of_cart_count(self) -> int:
+        """Count non-optional items excluded or unavailable for this entry."""
+
+        return self.excluded_count + self.unstocked_count
 
     @property
     def pending_item_ids(self) -> tuple[str, ...]:
@@ -9002,7 +9013,8 @@ def _render_personalize_summary(
                 in_cart_column,
                 decision_column,
                 optional_column,
-            ) = st.columns(3, gap="large")
+                out_of_cart_column,
+            ) = st.columns(4, gap="large")
             in_cart_column.markdown(
                 f"**{len(section.settled_item_ids)}**  \nIn cart"
             )
@@ -9011,6 +9023,9 @@ def _render_personalize_summary(
             )
             optional_column.markdown(
                 f"**{len(section.optional_item_ids)}**  \nOptional"
+            )
+            out_of_cart_column.markdown(
+                f"**{section.out_of_cart_count}**  \nOut of cart"
             )
             groups_to_render = tuple(
                 group
@@ -13176,6 +13191,36 @@ def _render_review(st: Any) -> None:
                         ),
                     )
 
+            optional_items = tuple(
+                item_by_id[item_id]
+                for item_id in student_section.optional_item_ids
+                if item_id in item_by_id
+            )
+            if optional_items:
+                _render_personalize_heading(
+                    st,
+                    f"Optional — left out of cart ({len(optional_items)})",
+                    "These items were marked optional on the list. They stay "
+                    "out unless the exact shopping plan can include them "
+                    "within the budget and shopping preferences.",
+                )
+                for item in optional_items:
+                    edited_by_id[item.review_id] = (
+                        _render_optional_review_row(
+                            st,
+                            item,
+                            key_prefix=f"optional:{item.review_id}",
+                            offers=review_offers,
+                            original_item=original_items.get(
+                                item.review_id
+                            ),
+                            source_context=source_context_by_review_id.get(
+                                item.review_id,
+                                (),
+                            ),
+                        )
+                    )
+
             excluded_items = tuple(
                 item_by_id[item_id]
                 for item_id in student_section.excluded_item_ids
@@ -13326,35 +13371,6 @@ def _render_review(st: Any) -> None:
                     _item_display_name(added.item_name),
                 )
                 st.rerun()
-
-            optional_items = tuple(
-                item_by_id[item_id]
-                for item_id in student_section.optional_item_ids
-                if item_id in item_by_id
-            )
-            if optional_items:
-                _render_personalize_heading(
-                    st,
-                    f"Optional — your call ({len(optional_items)})",
-                    "These items were marked optional on the list and are "
-                    "currently left out of the cart.",
-                )
-                for item in optional_items:
-                    edited_by_id[item.review_id] = (
-                        _render_optional_review_row(
-                            st,
-                            item,
-                            key_prefix=f"optional:{item.review_id}",
-                            offers=review_offers,
-                            original_item=original_items.get(
-                                item.review_id
-                            ),
-                            source_context=source_context_by_review_id.get(
-                                item.review_id,
-                                (),
-                            ),
-                        )
-                    )
 
             scroll_target = st.session_state.pop(
                 "personalize_scroll_target",
@@ -15198,7 +15214,7 @@ def donation_offer_is_visible(
     result: PipelineResult,
     required_plan_is_complete: bool,
 ) -> bool:
-    """Offer BR-05 donations after every required item is covered."""
+    """Offer BR-05 optional items after every required item is covered."""
 
     return (
         result.addon_proposal.eligible
@@ -15209,24 +15225,62 @@ def donation_offer_is_visible(
 def _selected_addon_requirement_ids(
     st: Any,
     result: PipelineResult,
+    default_requirement_ids: Sequence[str] = (),
 ) -> tuple[str, ...]:
-    """Initialize donations selected and read the current checkbox state."""
+    """Initialize feasible optional selections and read current checkbox state."""
 
     generation = int(st.session_state["approval_generation"])
     token = f"{result.session.session_id}:{generation}"
     if st.session_state.get("addon_selection_token") != token:
+        default_ids = frozenset(default_requirement_ids)
         for item in result.addon_proposal.items:
             st.session_state[
                 _addon_checkbox_key(generation, item.requirement_id)
-            ] = True
+            ] = item.requirement_id in default_ids
         st.session_state["addon_selection_token"] = token
     return tuple(
         item.requirement_id
         for item in result.addon_proposal.items
         if st.session_state.get(
             _addon_checkbox_key(generation, item.requirement_id),
-            True,
+            False,
         )
+    )
+
+
+def _recommended_addon_requirement_ids(
+    result: PipelineResult,
+    base_optimization: OptimizationResult,
+    presentations: Sequence[ApprovalDisplayDecision],
+    outcomes: Mapping[str, str],
+    budget_action_ids: Sequence[str],
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+) -> tuple[str, ...]:
+    """Return BR-05's exact preference- and budget-feasible defaults."""
+
+    omitted, forced = _selected_requirement_constraints(
+        result,
+        presentations,
+        outcomes,
+        budget_action_ids,
+    )
+    base_needs = tuple(
+        need
+        for need in result.purchase_needs
+        if need.source_requirement_ids not in omitted
+    )
+    candidate_skus = dict(result.matches.candidate_skus_by_need)
+    candidate_skus.update(forced)
+    return recommend_affordable_addons(
+        result.addon_proposal,
+        base_optimization,
+        base_needs,
+        result.matches,
+        offers,
+        stores,
+        _optimization_config(result),
+        base_candidate_skus_by_need=candidate_skus,
     )
 
 
@@ -15285,23 +15339,23 @@ def _render_addons(
         return
     if evaluation is None or base_optimization is None:
         raise ValueError(
-            "Eligible donations require an exact selection evaluation."
+            "Eligible optional items require an exact selection evaluation."
         )
     if result.session.budget_total is None:
         st.success(
             "No set budget was selected, so the 90% threshold does not "
-            "apply. Each donation below shows its exact added total cost."
+            "apply. Each optional item below shows its exact added total cost."
         )
     else:
         st.success(
             "The required-item cart is at or below 90% of the budget, so "
-            "these donation items can be considered. Each amount below is "
+            "these optional items can be considered. Each amount below is "
             "recalculated against the current selection."
         )
     generation = int(st.session_state["approval_generation"])
     select_all, clear_all = st.columns(2)
     if select_all.button(
-        "Select all donations",
+        "Select all optional items",
         use_container_width=True,
     ):
         for item in proposal.items:
@@ -15310,7 +15364,7 @@ def _render_addons(
             ] = True
         st.rerun()
     if clear_all.button(
-        "Clear all donations",
+        "Clear all optional items",
         use_container_width=True,
     ):
         for item in proposal.items:
@@ -15413,12 +15467,21 @@ def _render_addons(
         )
     blockers = []
     if evaluation.review_requirement_ids:
-        blockers.append("one or more add-ons needs review")
+        blockers.append("one or more optional items need review")
     if evaluation.gap_items:
-        blockers.append("some add-ons are unavailable")
+        blockers.append(
+            "some optional items cannot be obtained with these shopping "
+            "preferences"
+        )
+    if (
+        result.session.budget_total is not None
+        and evaluation.resulting_landed_cost_cents
+        > result.session.budget_total
+    ):
+        blockers.append("the resulting total cost is over budget")
     if blockers:
         st.warning(
-            "This add-on cannot be included yet because "
+            "This optional selection stays out of the cart because "
             + " and ".join(blockers)
             + "."
         )
@@ -16013,7 +16076,20 @@ def _render_summary(st: Any) -> None:
     selected_addon_ids: tuple[str, ...] = ()
     addon_evaluation: AddOnSelectionEvaluation | None = None
     if donation_offer_is_visible(result, required_plan_is_complete):
-        selected_addon_ids = _selected_addon_requirement_ids(st, result)
+        recommended_addon_ids = _recommended_addon_requirement_ids(
+            result,
+            required_optimization,
+            approval_presentations,
+            st.session_state["approval_outcomes"],
+            st.session_state["budget_action_ids"],
+            offers,
+            stores,
+        )
+        selected_addon_ids = _selected_addon_requirement_ids(
+            st,
+            result,
+            recommended_addon_ids,
+        )
         addon_evaluation = _evaluate_selected_addons(
             result,
             selected_addon_ids,
@@ -16024,8 +16100,15 @@ def _render_summary(st: Any) -> None:
             offers,
             stores,
         )
-        optimization = addon_evaluation.optimization
-        matches = addon_evaluation.matches
+        if addon_selection_is_feasible(
+            addon_evaluation,
+            result.session.budget_total,
+        ):
+            optimization = addon_evaluation.optimization
+            matches = addon_evaluation.matches
+        else:
+            optimization = required_optimization
+            matches = required_matches
         st.session_state["addon_evaluation"] = addon_evaluation
     else:
         optimization = required_optimization
@@ -16259,9 +16342,9 @@ def _render_summary(st: Any) -> None:
         else:
             st.info("There are no selected cart products to change.")
 
-    # 7. BR-05 donations are last, collapsed, exact, and individually selectable.
+    # 7. BR-05 optional items are last, collapsed, exact, and selectable.
     if addon_evaluation is not None:
-        with st.expander("Optional classroom donations"):
+        with st.expander("Optional items"):
             _render_addons(
                 st,
                 result,

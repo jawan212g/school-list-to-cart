@@ -283,7 +283,7 @@ The proposal named three interrupt conditions. Seven are specified here; the fou
 
 - **BR-04 Budget shortfall.** When the cheapest valid cart exceeds the budget, the agent reports the minimum achievable cost, the shortfall, the available cheaper substitutions, and the specific items driving the gap. It then requests approval to raise the budget or to drop a required item. It never drops one itself.
 
-- **BR-05 Optional items.** Excluded from the budgeted cart. Offered as an add-on only when total cost is at or below ninety percent of budget, and presented with the resulting new total.
+- **BR-05 Optional items.** Excluded from the budgeted cart. Offered as an add-on only when total cost is at or below ninety percent of budget, and presented with the resulting new total. An optional item enters the effective cart only when exact re-optimization keeps the plan within budget and satisfies the selected shopping preferences; otherwise it remains visibly left out.
 
 - **BR-06 Overage ceiling.** Purchased units may exceed the unit need by at most fifty percent, or six units, whichever is greater, unless the larger pack is the only option available, in which case it proceeds with a note.
 

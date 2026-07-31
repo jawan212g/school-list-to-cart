@@ -3194,7 +3194,7 @@ def test_personalize_screen_groups_sources_in_student_summary() -> None:
     assert "Personalize what goes in your cart" in source
     assert "_personalize_source_summary" in source
     assert "Needs your decision" in source
-    assert "Optional — your call" in source
+    assert "Optional — left out of cart" in source
     assert "In your cart" in source
     assert "Left out" in source
     assert "Not available from these stores" not in source
@@ -3627,6 +3627,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         "**1**  \nIn cart",
         "**1**  \nNeeds a decision",
         "**1**  \nOptional",
+        "**3**  \nOut of cart",
     )
     assert all(message in summary.messages for message in count_messages)
     count_positions = tuple(
@@ -3638,7 +3639,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     assert ("popover", "Tissues, optional") not in summary.events
     assert ("popover", "Pencils") not in summary.events
     assert [4.8, 1.2] in summary.column_specs
-    assert 3 in summary.column_specs
+    assert 4 in summary.column_specs
     assert ("Left out of cart (2)", None) in summary.expanders
     assert "**Already owned (1)**" in summary.messages
     assert "**Removed from cart (1)**" in summary.messages
@@ -3651,10 +3652,12 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
     student = ReviewScreenRecorder()
     app._render_review(student)
     assert state[app.PERSONALIZE_SELECTED_VIEW_KEY] == "child-1"
-    assert "**Optional — your call (1)**" in student.messages
+    optional_heading = "**Optional — left out of cart (1)**"
+    assert optional_heading in student.messages
     add_index = student.messages.index("**Need to add something?**")
-    optional_index = student.messages.index("**Optional — your call (1)**")
-    assert add_index < optional_index
+    optional_index = student.messages.index(optional_heading)
+    left_out_index = student.messages.index("**Left out of cart (3)**")
+    assert optional_index < left_out_index < add_index
 
     student.select_view("summary")
     returned_summary = ReviewScreenRecorder()
@@ -4405,6 +4408,10 @@ def test_personalize_edit_updates_student_summary_and_detail_together(
         "markdown",
         "**0**  \nOptional",
     ) in summary.messages
+    assert (
+        "markdown",
+        "**0**  \nOut of cart",
+    ) in summary.messages
 
 
 def test_personalize_summary_opens_typed_and_uploaded_sources(
@@ -4622,7 +4629,7 @@ def test_personalize_summary_opens_typed_and_uploaded_sources(
     assert recorder.text_sources == [typed_text]
     assert len(recorder.pdf_pages) == 2
     assert recorder.column_specs.count([4.8, 1.2]) == 2
-    assert recorder.column_specs.count(3) == 2
+    assert recorder.column_specs.count(4) == 2
     assert "**Sources used**" not in recorder.messages
     assert any("Sections read: 5th Grade and Highly Capable Class" in message for message in recorder.messages)
     assert any(f"{pdf_path.name} · page 2" in message for message in recorder.messages)
