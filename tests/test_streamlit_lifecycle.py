@@ -95,6 +95,58 @@ app.main()
     return test_app
 
 
+def _run_shopping_plan_screen() -> AppTest:
+    """Mount the real plan screen with the frozen Maple pipeline result."""
+
+    test_app = AppTest.from_string(
+        """
+import sys
+from pathlib import Path
+
+import streamlit as st
+import app
+
+tests_path = str(Path.cwd() / "tests")
+if tests_path not in sys.path:
+    sys.path.insert(0, tests_path)
+from conftest import load_frozen_maple_fixture
+from test_maple_cart import _run_maple
+
+app._initialize_state(st)
+fixture = load_frozen_maple_fixture()
+result = _run_maple(
+    fixture.extractions,
+    fixture.judge,
+    budget_cents=12_000,
+)
+st.session_state["intake"] = {
+    "children": (
+        {
+            "child_id": "grade-2",
+            "label": "Grade 2",
+            "grade": "Grade 2",
+        },
+        {
+            "child_id": "grade-5",
+            "label": "Grade 5",
+            "grade": "Grade 5",
+        },
+    ),
+    "budget_total": 12_000,
+    "budget_allocations": {},
+}
+st.session_state["result"] = result
+st.session_state["approved_optimization"] = result.proposed_cart
+st.session_state["screen"] = "summary"
+app._sync_shopping_plan_visit(st.session_state, "summary")
+app._render_summary(st)
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
 def _run_section_screen() -> AppTest:
     """Mount the production section screen with production Pydantic models."""
 
@@ -2039,3 +2091,38 @@ def test_package_count_decision_edits_items_per_package_not_order_quantity() -> 
     assert item.package_size == 24
     assert item.required_quantity == 1
     assert item.unit == "pack"
+
+
+def test_shopping_checklist_survives_reruns_without_changing_the_plan() -> None:
+    """The production plan checklist is durable and purely presentational."""
+
+    test_app = _run_shopping_plan_screen()
+    original = test_app.session_state["approved_optimization"]
+    original_total = original.landed_cost
+    checklist = tuple(
+        checkbox
+        for checkbox in test_app.checkbox
+        if checkbox.label == "Mark this product as collected"
+    )
+    assert checklist
+
+    first_key = checklist[0].key
+    checklist[0].check().run()
+    _assert_no_exception(test_app)
+
+    refreshed = test_app.checkbox(key=first_key)
+    assert refreshed.value is True
+    assert test_app.session_state["approved_optimization"] == original
+    assert (
+        test_app.session_state["approved_optimization"].landed_cost
+        == original_total
+    )
+
+    _click_label(test_app, "Clear all ticks")
+    _assert_no_exception(test_app)
+    assert all(
+        checkbox.value is False
+        for checkbox in test_app.checkbox
+        if checkbox.label == "Mark this product as collected"
+    )
+    assert test_app.session_state["approved_optimization"] == original

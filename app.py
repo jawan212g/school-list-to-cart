@@ -224,6 +224,10 @@ PERSONALIZE_REVIEW_SOURCE_FINGERPRINTS_KEY = (
 PERSONALIZE_SOURCE_CHANGE_NOTICES_KEY = (
     "personalize_source_change_notices"
 )
+SHOPPING_PLAN_VIEW_REVISION_KEY = "shopping_plan_view_revision"
+SHOPPING_PLAN_LAST_SCREEN_KEY = "shopping_plan_last_screen"
+SHOPPING_CHECKLIST_TICKS_KEY = "shopping_plan_checklist_ticks"
+SHOPPING_LIST_PREVIEW_ITEM_COUNT = 4
 WORK_EPISODE_COUNTER_KEY = "working_progress_episode_counter"
 WORK_EPISODE_ACTIVE_KEY = "working_progress_active_episode"
 WORK_SCROLL_COMPLETED_KEY = "working_scroll_completed_episode"
@@ -720,6 +724,113 @@ class _PersonalizeViewScope:
                 key=f"personalize-visit:{visit}:{stable_key}",
                 **kwargs,
             )
+        )
+
+
+class _ShoppingPlanViewScope:
+    """Give every Shopping Plan control a visit-scoped widget identity."""
+
+    def __init__(self, target: Any, state: MutableMapping[str, Any]) -> None:
+        self._target = target
+        self._state = state
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+    def __enter__(self) -> "_ShoppingPlanViewScope":
+        self._target.__enter__()
+        return self
+
+    def __exit__(self, *args: object) -> object:
+        return self._target.__exit__(*args)
+
+    def widget_key(self, stable_key: str) -> str:
+        """Return one mounted key without putting mutable copy in identity."""
+
+        visit = int(self._state.get(SHOPPING_PLAN_VIEW_REVISION_KEY, 0))
+        return f"shopping-plan-visit:{visit}:{stable_key}"
+
+    def _scoped_widget(
+        self,
+        method_name: str,
+        label: str,
+        *args: object,
+        **kwargs: object,
+    ) -> Any:
+        stable_key = kwargs.pop("key", None)
+        if stable_key is None:
+            raise ValueError(
+                "Every Shopping Plan control requires a stable action key."
+            )
+        method = getattr(self._target, method_name)
+        return method(
+            label,
+            *args,
+            key=self.widget_key(str(stable_key)),
+            **kwargs,
+        )
+
+    def columns(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> tuple["_ShoppingPlanViewScope", ...]:
+        return tuple(
+            _ShoppingPlanViewScope(column, self._state)
+            for column in self._target.columns(*args, **kwargs)
+        )
+
+    def container(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> "_ShoppingPlanViewScope":
+        return _ShoppingPlanViewScope(
+            self._target.container(*args, **kwargs),
+            self._state,
+        )
+
+    def expander(
+        self,
+        label: str,
+        *args: object,
+        **kwargs: object,
+    ) -> "_ShoppingPlanViewScope":
+        stable_key = kwargs.pop("key", None)
+        if stable_key is None:
+            raise ValueError(
+                "Every Shopping Plan expander requires a stable key."
+            )
+        return _ShoppingPlanViewScope(
+            self._target.expander(
+                label,
+                *args,
+                key=self.widget_key(str(stable_key)),
+                **kwargs,
+            ),
+            self._state,
+        )
+
+    def button(self, label: str, *args: object, **kwargs: object) -> bool:
+        return bool(self._scoped_widget("button", label, *args, **kwargs))
+
+    def checkbox(self, label: str, *args: object, **kwargs: object) -> bool:
+        return bool(self._scoped_widget("checkbox", label, *args, **kwargs))
+
+    def selectbox(self, label: str, *args: object, **kwargs: object) -> Any:
+        return self._scoped_widget("selectbox", label, *args, **kwargs)
+
+    def text_input(self, label: str, *args: object, **kwargs: object) -> str:
+        return str(self._scoped_widget("text_input", label, *args, **kwargs))
+
+    def download_button(
+        self,
+        label: str,
+        *args: object,
+        **kwargs: object,
+    ) -> bool:
+        return bool(
+            self._scoped_widget("download_button", label, *args, **kwargs)
         )
 
 
@@ -3392,6 +3503,9 @@ def _initialize_state(st: Any) -> None:
         "addon_selection_token": None,
         "addon_evaluation": None,
         "checkout_confirmation": None,
+        SHOPPING_PLAN_VIEW_REVISION_KEY: 0,
+        SHOPPING_PLAN_LAST_SCREEN_KEY: None,
+        SHOPPING_CHECKLIST_TICKS_KEY: {},
         "stockout_skus": frozenset(),
         "price_overrides": {},
         "replan_preserved_approval_ids": frozenset(),
@@ -3412,6 +3526,20 @@ def clear_session_data(st: Any) -> None:
     """Remove every in-memory session value; nothing is persisted (BRD 11.3)."""
 
     st.session_state.clear()
+
+
+def _sync_shopping_plan_visit(
+    state: MutableMapping[str, Any],
+    screen: str,
+) -> None:
+    """Advance the plan visit token only when the screen is entered."""
+
+    previous_screen = state.get(SHOPPING_PLAN_LAST_SCREEN_KEY)
+    if screen == "summary" and previous_screen != "summary":
+        state[SHOPPING_PLAN_VIEW_REVISION_KEY] = (
+            int(state.get(SHOPPING_PLAN_VIEW_REVISION_KEY, 0)) + 1
+        )
+    state[SHOPPING_PLAN_LAST_SCREEN_KEY] = screen
 
 
 def _persistent_notice(st: Any) -> None:
@@ -15314,21 +15442,41 @@ def _effective_cart(
 def _render_cost_summary(
     st: Any,
     optimization: OptimizationResult,
+    stores: Sequence[Store] = (),
 ) -> None:
     item_subtotal, tax, fees = _combined_costs(optimization)
-    columns = st.columns(4)
-    columns[0].metric(
-        "Item subtotal",
-        format_streamlit_money(item_subtotal),
+    stores_by_id = {store.store_id: store for store in stores}
+    waived = tuple(
+        text
+        for plan in _plans(optimization)
+        for order in plan.store_orders
+        if (
+            text := _waived_fee_text(
+                order,
+                stores_by_id.get(order.store_id),
+            )
+        )
     )
-    columns[1].metric("Tax", format_streamlit_money(tax))
-    columns[2].metric(
-        "Fulfillment fees",
-        format_streamlit_money(fees),
-    )
-    columns[3].metric(
-        "Total cost",
-        format_streamlit_money(optimization.landed_cost),
+    fee_text = f"Fees: {format_money(fees)}"
+    if waived:
+        fee_text += " — " + "; ".join(waived)
+    elif fees == 0:
+        fee_text += " — no fulfillment fees"
+    st.markdown(
+        escape_streamlit_dollars(
+            " · ".join(
+                (
+                    f"Item subtotal: {format_money(item_subtotal)}",
+                    f"Tax: {format_money(tax)}",
+                    fee_text,
+                )
+            )
+        ),
+        help=(
+            "Total cost includes every item, tax calculated for each store "
+            "order, and pickup or delivery fees. Some stores waive a fee "
+            "when that order reaches their stated threshold."
+        ),
     )
 
 
@@ -15350,62 +15498,279 @@ def _render_budget_status(
         )
 
 
+def _shopping_checklist_line_id(
+    plan_index: int,
+    line: CartLine,
+) -> str:
+    """Return a stable shopping-aid identity independent of display copy."""
+
+    identity = "|".join(
+        (
+            str(plan_index),
+            line.store_id,
+            line.sku,
+            *line.source_requirement_ids,
+        )
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+
+
+def _record_shopping_check(
+    state: MutableMapping[str, Any],
+    line_id: str,
+    widget_key: str,
+) -> None:
+    """Persist one inert shopping tick without touching the cart."""
+
+    ticks = dict(state.get(SHOPPING_CHECKLIST_TICKS_KEY, {}))
+    ticks[line_id] = bool(state.get(widget_key, False))
+    state[SHOPPING_CHECKLIST_TICKS_KEY] = ticks
+
+
+def _clear_shopping_checks(
+    state: MutableMapping[str, Any],
+    line_ids: Sequence[str],
+    widget_keys: Sequence[str],
+) -> None:
+    """Clear visible shopping ticks without changing plan data."""
+
+    ticks = dict(state.get(SHOPPING_CHECKLIST_TICKS_KEY, {}))
+    for line_id in line_ids:
+        ticks[line_id] = False
+    state[SHOPPING_CHECKLIST_TICKS_KEY] = ticks
+    for widget_key in widget_keys:
+        state[widget_key] = False
+
+
+def _shopping_parent_notes(
+    state: Mapping[str, Any],
+    line: CartLine,
+    presentations: Sequence[ApprovalDisplayDecision],
+) -> tuple[str, ...]:
+    """Describe parent-originated cart choices without changing them."""
+
+    notes: list[str] = []
+    current_items = {
+        item.req_id: item
+        for item in tuple(state.get("review_items", ()))
+    }
+    originals = state.get(PERSONALIZE_ORIGINAL_ITEMS_KEY, {})
+    for requirement_id in line.source_requirement_ids:
+        item = current_items.get(requirement_id)
+        if item is None:
+            continue
+        if SYSTEM_DECISION_PARENT_CHOSE_SCHOOL_PROVIDED_ITEM in (
+            item.system_decisions
+        ):
+            notes.append(
+                "You added this even though the list says the school provides it."
+            )
+        original = (
+            originals.get(item.review_id)
+            if isinstance(originals, Mapping)
+            else None
+        )
+        if original is not None and any(
+            (
+                item.item_name != original.item_name,
+                item.quantity != original.quantity,
+                item.brand_lock != original.brand_lock,
+                item.attributes != original.attributes,
+            )
+        ):
+            notes.append("You changed this item or quantity.")
+    outcomes = state.get("approval_outcomes", {})
+    for presentation in presentations:
+        interrupt = presentation.interrupt
+        if not set(interrupt.source_requirement_ids).intersection(
+            line.source_requirement_ids
+        ):
+            continue
+        selected_id = outcomes.get(interrupt.interrupt_id)
+        selected = next(
+            (
+                option
+                for option in presentation.options
+                if option.alternative_id == selected_id
+            ),
+            None,
+        )
+        if selected is not None:
+            notes.append(f"Your choice: {selected.label}")
+    return tuple(dict.fromkeys(notes))
+
+
+def _render_shopping_line(
+    st: _ShoppingPlanViewScope,
+    line: CartLine,
+    matches: MatchResult,
+    child_labels: Mapping[str, str],
+    presentations: Sequence[ApprovalDisplayDecision],
+    *,
+    plan_index: int,
+) -> None:
+    line_id = _shopping_checklist_line_id(plan_index, line)
+    stable_widget_key = f"checklist:{line_id}"
+    mounted_widget_key = st.widget_key(stable_widget_key)
+    ticks = dict(st.session_state.get(SHOPPING_CHECKLIST_TICKS_KEY, {}))
+    if mounted_widget_key not in st.session_state:
+        st.session_state[mounted_widget_key] = bool(ticks.get(line_id, False))
+    check_column, item_column, cost_column = st.columns([0.35, 5.0, 1.1])
+    check_column.checkbox(
+        "Mark this product as collected",
+        key=stable_widget_key,
+        label_visibility="collapsed",
+        on_change=_record_shopping_check,
+        args=(st.session_state, line_id, mounted_widget_key),
+    )
+    package_word = "package" if line.packs_purchased == 1 else "packages"
+    item_column.markdown(
+        escape_streamlit_dollars(
+            f"**{line.packs_purchased} {package_word} · "
+            f"{_product_name(line, matches)}**"
+        )
+    )
+    allocations = _join_names(
+        tuple(
+            _child_display_label(child_id, child_labels)
+            for child_id in line.allocated_to
+        )
+    )
+    item_column.caption(
+        escape_streamlit_dollars(
+            f"For {allocations} · {line.units_needed} needed · "
+            f"{line.units_purchased} supplied"
+        )
+    )
+    for note in _shopping_parent_notes(
+        st.session_state,
+        line,
+        presentations,
+    ):
+        item_column.info(escape_streamlit_dollars(note))
+    cost_column.markdown(
+        escape_streamlit_dollars(f"**{format_money(line.line_cost)}**")
+    )
+
+
+def _waived_fee_text(order: Any, store: Store | None) -> str | None:
+    """Explain a zero fee only when a store threshold actually waived it."""
+
+    if store is None or order.fulfillment_fee != 0:
+        return None
+    if order.fulfillment_method == "pickup":
+        fee = store.pickup_fee
+        minimum = store.pickup_minimum
+    else:
+        fee = store.delivery_fee
+        minimum = store.delivery_minimum
+    if fee <= 0 or minimum <= 0 or order.item_subtotal < minimum:
+        return None
+    return (
+        f"Free {order.fulfillment_method} earned at "
+        f"{format_money(minimum)}"
+    )
+
+
 def _render_store_breakdown(
-    st: Any,
+    st: _ShoppingPlanViewScope,
     optimization: OptimizationResult,
     matches: MatchResult,
     stores: Sequence[Store],
     child_labels: Mapping[str, str],
+    presentations: Sequence[ApprovalDisplayDecision] = (),
 ) -> None:
+    """Render the plan as durable, inert shopping lists grouped by store."""
+
     stores_by_id = {store.store_id: store for store in stores}
-    for plan in _plans(optimization):
+    all_line_ids = tuple(
+        _shopping_checklist_line_id(plan_index, line)
+        for plan_index, plan in enumerate(_plans(optimization))
+        for line in plan.lines
+    )
+    all_widget_keys = tuple(
+        st.widget_key(f"checklist:{line_id}") for line_id in all_line_ids
+    )
+    header, clear_column = st.columns([4.5, 1.5])
+    header.subheader("Where to shop")
+    header.caption(
+        "Check items off while you shop. These ticks do not change the cart."
+    )
+    clear_column.button(
+        "Clear all ticks",
+        key="clear-shopping-checklist",
+        use_container_width=True,
+        on_click=_clear_shopping_checks,
+        args=(st.session_state, all_line_ids, all_widget_keys),
+    )
+    for plan_index, plan in enumerate(_plans(optimization)):
         for order in plan.store_orders:
             store = stores_by_id.get(order.store_id)
             store_name = store.name if store else "Unknown store"
-            with st.container(border=True):
+            with st.container(
+                border=True,
+                key=f"shopping-store:{plan_index}:{order.store_id}",
+            ):
                 st.markdown(
                     escape_streamlit_dollars(
-                        (
-                            f"#### {store_name} · "
-                            f"{order.fulfillment_method.title()} · "
-                            "Total cost "
-                            f"{format_money(order.landed_cost)}"
+                        f"### {store_name} · "
+                        f"{format_money(order.landed_cost)} total"
+                    )
+                )
+                item_word = "item" if len(order.lines) == 1 else "items"
+                st.markdown(
+                    escape_streamlit_dollars(
+                        f"{order.fulfillment_method.title()} · "
+                        f"{len(order.lines)} {item_word} · Item subtotal "
+                        f"{format_money(order.item_subtotal)} · Tax "
+                        f"{format_money(order.tax)}"
+                    ),
+                    help=(
+                        "Tax is calculated and rounded for this store order, "
+                        "the way it would be at this register or checkout."
+                    ),
+                )
+                fee_text = _waived_fee_text(order, store)
+                if fee_text is not None:
+                    st.success(escape_streamlit_dollars(fee_text), icon=None)
+                elif order.fulfillment_fee:
+                    st.caption(
+                        escape_streamlit_dollars(
+                            f"{order.fulfillment_method.title()} fee: "
+                            f"{format_money(order.fulfillment_fee)}"
                         )
                     )
-                )
-                rows = []
-                for line in order.lines:
-                    allocations = ", ".join(
-                        f"{_child_display_label(child_id, child_labels)}: {units}"
-                        for child_id, units in line.allocated_to.items()
+                visible_lines = order.lines[:SHOPPING_LIST_PREVIEW_ITEM_COUNT]
+                remaining_lines = order.lines[
+                    SHOPPING_LIST_PREVIEW_ITEM_COUNT:
+                ]
+                for line in visible_lines:
+                    _render_shopping_line(
+                        st,
+                        line,
+                        matches,
+                        child_labels,
+                        presentations,
+                        plan_index=plan_index,
                     )
-                    rows.append(
-                        {
-                            "Product": _product_name(line, matches),
-                            "Packs": line.packs_purchased,
-                            "Needed": line.units_needed,
-                            "Bought": line.units_purchased,
-                            "For": allocations,
-                            "Line cost": format_streamlit_money(
-                                line.line_cost
-                            ),
-                        }
-                    )
-                st.table(escape_streamlit_data(rows))
-                a, b, c, d = st.columns(4)
-                a.metric(
-                    "Item subtotal",
-                    format_streamlit_money(order.item_subtotal),
-                )
-                b.metric("Tax", format_streamlit_money(order.tax))
-                c.metric(
-                    "Fulfillment fee",
-                    format_streamlit_money(order.fulfillment_fee),
-                )
-                d.metric(
-                    "Total cost",
-                    format_streamlit_money(order.landed_cost),
-                )
+                if remaining_lines:
+                    with st.expander(
+                        "More items",
+                        key=f"store-more:{plan_index}:{order.store_id}",
+                    ):
+                        st.caption(
+                            f"{len(remaining_lines)} more "
+                            f"{'item' if len(remaining_lines) == 1 else 'items'}"
+                        )
+                        for line in remaining_lines:
+                            _render_shopping_line(
+                                st,
+                                line,
+                                matches,
+                                child_labels,
+                                presentations,
+                                plan_index=plan_index,
+                            )
 
 
 def _render_per_child(
@@ -15529,6 +15894,33 @@ def _addon_checkbox_key(
 ) -> str:
     safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "_", requirement_id)
     return f"addon_{generation}_{safe_id}"
+
+
+def _record_addon_choice(
+    state: MutableMapping[str, Any],
+    canonical_key: str,
+    widget_key: str,
+) -> None:
+    """Bridge a visit-scoped checkbox to durable optional-item intent."""
+
+    state[canonical_key] = bool(state.get(widget_key, False))
+
+
+def _set_all_addon_choices(
+    state: MutableMapping[str, Any],
+    canonical_keys: Sequence[str],
+    widget_keys: Sequence[str],
+    selected: bool,
+) -> None:
+    """Set every visible optional item without relying on widget labels."""
+
+    for canonical_key, widget_key in zip(
+        canonical_keys,
+        widget_keys,
+        strict=True,
+    ):
+        state[canonical_key] = selected
+        state[widget_key] = selected
 
 
 def donation_offer_is_visible(
@@ -15674,25 +16066,29 @@ def _render_addons(
             "recalculated against the current selection."
         )
     generation = int(st.session_state["approval_generation"])
+    canonical_keys = tuple(
+        _addon_checkbox_key(generation, item.requirement_id)
+        for item in proposal.items
+    )
+    widget_keys = tuple(
+        st.widget_key(f"optional-choice:{item.requirement_id}")
+        for item in proposal.items
+    )
     select_all, clear_all = st.columns(2)
-    if select_all.button(
+    select_all.button(
         "Select all optional items",
+        key="select-all-optional-items",
         use_container_width=True,
-    ):
-        for item in proposal.items:
-            st.session_state[
-                _addon_checkbox_key(generation, item.requirement_id)
-            ] = True
-        st.rerun()
-    if clear_all.button(
+        on_click=_set_all_addon_choices,
+        args=(st.session_state, canonical_keys, widget_keys, True),
+    )
+    clear_all.button(
         "Clear all optional items",
+        key="clear-all-optional-items",
         use_container_width=True,
-    ):
-        for item in proposal.items:
-            st.session_state[
-                _addon_checkbox_key(generation, item.requirement_id)
-            ] = False
-        st.rerun()
+        on_click=_set_all_addon_choices,
+        args=(st.session_state, canonical_keys, widget_keys, False),
+    )
 
     selected_set = frozenset(selected_requirement_ids)
     for item in proposal.items:
@@ -15747,16 +16143,34 @@ def _render_addons(
                 else "no total cost change"
             )
         )
-        st.checkbox(
+        canonical_key = _addon_checkbox_key(
+            generation,
+            item.requirement_id,
+        )
+        stable_widget_key = f"optional-choice:{item.requirement_id}"
+        mounted_widget_key = st.widget_key(stable_widget_key)
+        if mounted_widget_key not in st.session_state:
+            st.session_state[mounted_widget_key] = bool(
+                st.session_state.get(canonical_key, False)
+            )
+        check_column, item_column = st.columns([0.35, 5.65])
+        check_column.checkbox(
+            "Choose this optional item",
+            key=stable_widget_key,
+            label_visibility="collapsed",
+            on_change=_record_addon_choice,
+            args=(
+                st.session_state,
+                canonical_key,
+                mounted_widget_key,
+            ),
+        )
+        item_column.write(
             escape_streamlit_dollars(
                 f"{item.raw_text} — "
                 f"{_child_display_label(item.child_id, child_labels)} — "
                 f"{marginal_text}"
-            ),
-            key=_addon_checkbox_key(
-                generation,
-                item.requirement_id,
-            ),
+            )
         )
 
     budget_cents = result.session.budget_total
@@ -15853,6 +16267,114 @@ def _render_approvals_summary(
     st.table(escape_streamlit_data(rows))
 
 
+def _return_to_approval(
+    state: MutableMapping[str, Any],
+    interrupt_id: str,
+) -> None:
+    """Open the existing approval boundary without duplicating its logic."""
+
+    state["approval_focus_interrupt_id"] = interrupt_id
+    state["screen"] = "approval"
+
+
+def _render_plan_approvals(
+    st: _ShoppingPlanViewScope,
+    result: PipelineResult,
+    optimization: OptimizationResult,
+    matches: MatchResult,
+    presentations: Sequence[ApprovalDisplayDecision],
+) -> None:
+    """Keep the human-approval boundary visible immediately before checkout."""
+
+    outcomes = st.session_state.get("approval_outcomes", {})
+    resolved = st.session_state.get("resolved_interrupts", {})
+    with st.container(border=True, key="plan-approvals"):
+        st.markdown(
+            "### Approvals",
+            help=(
+                "An approval is a product or budget choice that the app will "
+                "not make for you."
+            ),
+        )
+        if not presentations:
+            st.write("No approvals were needed for this plan.")
+            return
+        all_lines = tuple(
+            line for plan in _plans(optimization) for line in plan.lines
+        )
+        for presentation in presentations:
+            interrupt = presentation.interrupt
+            selected_id = outcomes.get(interrupt.interrupt_id)
+            selected = next(
+                (
+                    option
+                    for option in presentation.options
+                    if option.alternative_id == selected_id
+                ),
+                None,
+            )
+            chosen_line = next(
+                (
+                    line
+                    for line in all_lines
+                    if (
+                        line.sku == interrupt.sku
+                        or set(line.source_requirement_ids).intersection(
+                            interrupt.source_requirement_ids
+                        )
+                    )
+                ),
+                None,
+            )
+            st.markdown(
+                escape_streamlit_dollars(f"**{presentation.heading}**")
+            )
+            source_lines = _source_lines(result, interrupt)
+            if source_lines:
+                st.write(
+                    escape_streamlit_dollars(
+                        f"The list asked for: {source_lines[0]}"
+                    )
+                )
+            if chosen_line is not None:
+                st.write(
+                    escape_streamlit_dollars(
+                        "The plan uses: "
+                        f"{_product_name(chosen_line, matches)}"
+                    )
+                )
+            st.caption(
+                escape_streamlit_dollars(f"Why: {presentation.message}")
+            )
+            outcome = (
+                selected.label
+                if selected is not None
+                else resolved.get(interrupt.interrupt_id)
+            )
+            if outcome:
+                st.success(
+                    escape_streamlit_dollars(f"Your decision: {outcome}"),
+                    icon=None,
+                )
+            else:
+                st.warning("This approval still needs your decision.")
+                approve_column, compare_column = st.columns(2)
+                approve_column.button(
+                    "Review and approve",
+                    key=f"review-approve:{interrupt.interrupt_id}",
+                    use_container_width=True,
+                    on_click=_return_to_approval,
+                    args=(st.session_state, interrupt.interrupt_id),
+                )
+                compare_column.button(
+                    "Compare options",
+                    key=f"compare:{interrupt.interrupt_id}",
+                    use_container_width=True,
+                    on_click=_return_to_approval,
+                    args=(st.session_state, interrupt.interrupt_id),
+                )
+
+
 def _render_self_sourced_items(
     st: Any,
     selections: Sequence[SelfSourcedSelection],
@@ -15922,7 +16444,22 @@ def _render_needs_attention(
             "Required items unavailable from the selected store scope"
         )
         for item in optimization.gap_items:
-            st.write(f"• {_item_display_name(item)}")
+            affected_children = tuple(
+                dict.fromkeys(
+                    _child_display_label(child_id, child_labels)
+                    for need in result.purchase_needs
+                    if item in {need.canonical_item, need.label}
+                    for child_id in need.allocated_to
+                )
+            )
+            child_text = (
+                f" — for {_join_names(affected_children)}"
+                if affected_children
+                else ""
+            )
+            st.write(
+                f"• {_item_display_name(item)}{child_text}"
+            )
 
     unresolved_notes = _unresolved_catalog_notes(
         optimization,
@@ -16223,7 +16760,6 @@ def _render_list_interpretation(
 ) -> None:
     """Separate model reading evidence from deterministic cart arithmetic."""
 
-    st.subheader("How your list became the cart")
     st.write(
         "A language model read the supply list. Below are the original lines "
         "and the choices you confirmed. Quantities, package choices, prices, "
@@ -16296,28 +16832,32 @@ def _render_summary_headline(
 
     st.header(copy.summary_heading)
     st.caption(copy.headline_heading)
-    columns = st.columns(2 if budget_cents is None else 3)
+    item_count = sum(len(plan.lines) for plan in _plans(optimization))
+    store_count = sum(
+        len(plan.store_orders) for plan in _plans(optimization)
+    )
+    columns = st.columns(3)
     columns[0].metric(
         "Total cost",
         format_streamlit_money(optimization.landed_cost),
     )
+    columns[1].metric("Items", str(item_count))
+    columns[2].metric("Stores", str(store_count))
     if budget_cents is None:
         st.caption("No budget comparison selected.")
     else:
         if variance is not None and variance >= 0:
-            columns[1].metric(
-                "Budget remaining",
-                format_streamlit_money(variance),
+            st.success(
+                "Budget remaining: "
+                f"{format_streamlit_money(variance)} · "
+                f"{copy.complete_status if is_complete else 'Required items missing'}"
             )
         else:
-            columns[1].metric(
-                "Budget shortfall",
-                format_streamlit_money(abs(variance or 0)),
+            st.caption(
+                "Budget shortfall: "
+                f"{format_streamlit_money(abs(variance or 0))} · "
+                f"{copy.complete_status if is_complete else 'Required items missing'}"
             )
-    columns[-1].metric(
-        "Plan status",
-        copy.complete_status if is_complete else "Required items missing",
-    )
 
 
 def _approval_outcome_labels(
@@ -16347,6 +16887,7 @@ def _approval_outcome_labels(
 
 
 def _render_summary(st: Any) -> None:
+    st = _ShoppingPlanViewScope(st, st.session_state)
     result: PipelineResult | None = st.session_state["result"]
     intake = st.session_state["intake"]
     if result is None or intake is None:
@@ -16457,6 +16998,7 @@ def _render_summary(st: Any) -> None:
         is_complete,
         copy,
     )
+    _render_cost_summary(st, optimization, stores)
     if st.session_state.get("catalog_change_notice"):
         st.info(
             escape_streamlit_dollars(
@@ -16480,12 +17022,6 @@ def _render_summary(st: Any) -> None:
             child_labels,
             self_sourced_decisions,
         )
-    _render_list_interpretation(
-        st,
-        result,
-        child_labels,
-        tuple(st.session_state.get("review_items", ())),
-    )
     has_assumptions_or_notes = bool(
         result.normalization.display_only_requirements
         or any(
@@ -16494,18 +17030,63 @@ def _render_summary(st: Any) -> None:
             for flag in requirement.assumption_flags
         )
     )
+    parent_decisions = tuple(st.session_state["parent_decisions"])
+
+    # 3. The main shopping task is organized directly by store.
+    _render_store_breakdown(
+        st,
+        optimization,
+        matches,
+        stores,
+        child_labels,
+        approval_presentations,
+    )
+
+    # 4. Supporting detail follows the store-organized shopping task.
+    with st.expander(
+        "Cost by student or classroom",
+        key="cost-by-student",
+    ):
+        _render_per_child(
+            st,
+            optimization,
+            children,
+            intake["budget_allocations"],
+        )
+
+    # 6. Routine equivalents collapse to one line; consequential choices remain.
+    with st.expander(
+        "Substitutions and package choices",
+        key="substitutions-and-packages",
+    ):
+        _render_substitutions(st, optimization, matches, stores)
+
+    with st.expander(
+        "How the lists became this cart",
+        key="list-interpretation",
+    ):
+        _render_list_interpretation(
+            st,
+            result,
+            child_labels,
+            tuple(st.session_state.get("review_items", ())),
+        )
+
     if has_assumptions_or_notes:
-        with st.expander("Assumptions and list notes"):
+        with st.expander(
+            "Assumptions and list notes",
+            key="assumptions-and-list-notes",
+        ):
             _render_assumptions_and_notes(
                 st,
                 result,
                 child_labels,
             )
 
-    # 3. Parent outcomes are summarized; detailed reasoning stays collapsed.
-    parent_decisions = tuple(st.session_state["parent_decisions"])
-    with st.expander("Decisions made and their outcomes"):
-        _render_approvals_summary(st, approval_presentations)
+    with st.expander(
+        "Decisions made and their outcomes",
+        key="decisions-and-outcomes",
+    ):
         st.caption("How the plan was built")
         st.table(
             escape_streamlit_data([
@@ -16525,32 +17106,8 @@ def _render_summary(st: Any) -> None:
             ])
         )
 
-    # 4. Shopping details are available without competing with the headline.
-    with st.expander("Where to shop"):
-        _render_cost_summary(st, optimization)
-        _render_store_breakdown(
-            st,
-            optimization,
-            matches,
-            stores,
-            child_labels,
-        )
-
-    # 5. Attribution is useful detail, but not part of the quick read.
-    with st.expander("Cost by student or classroom"):
-        _render_per_child(
-            st,
-            optimization,
-            children,
-            intake["budget_allocations"],
-        )
-
-    # 6. Routine equivalents collapse to one line; consequential choices remain.
-    with st.expander("Substitutions and package choices"):
-        _render_substitutions(st, optimization, matches, stores)
-
     st.subheader("Try a live catalog change")
-    with st.container(border=True):
+    with st.container(border=True, key="live-catalog-change"):
         st.write(
             "Change simulated stock or price. Ready, Set, School will reuse "
             "the saved list reading and product judgments, rebuild the cart, "
@@ -16664,9 +17221,9 @@ def _render_summary(st: Any) -> None:
         else:
             st.info("There are no selected cart products to change.")
 
-    # 7. BR-05 optional items are last, collapsed, exact, and selectable.
+    # 5. BR-05 optional items are last, collapsed, exact, and selectable.
     if addon_evaluation is not None:
-        with st.expander("Optional items"):
+        with st.expander("Optional items", key="optional-items"):
             _render_addons(
                 st,
                 result,
@@ -16694,7 +17251,15 @@ def _render_summary(st: Any) -> None:
         parent_decisions,
     )
 
-    # 8. Checkout stays visible for the parent who needs only the quick read.
+    _render_plan_approvals(
+        st,
+        result,
+        optimization,
+        matches,
+        approval_presentations,
+    )
+
+    # 6. Checkout stays visible for the parent who needs only the quick read.
     st.subheader("Simulated checkout")
     checkout_staleness = detect_cart_staleness(optimization, offers)
     if checkout_staleness:
@@ -16713,13 +17278,11 @@ def _render_summary(st: Any) -> None:
                     f"{format_money(stale.active_line_cost_cents or 0)}."
                 )
             st.warning(escape_streamlit_dollars(detail))
-    checkout_label = "Place simulated order"
     if not is_complete:
         st.warning(
             "This checkout covers only the store-supplied items. Required "
             "items are still missing until they are obtained separately."
         )
-        checkout_label = "Place partial simulated order"
     else:
         st.caption(
             "This creates an order confirmation only. No retailer account or "
@@ -16730,11 +17293,25 @@ def _render_summary(st: Any) -> None:
         data=summary_text,
         file_name="ready-set-school-plan.txt",
         mime="text/plain",
+        key="download-shopping-plan",
     )
-    if st.button(
-        checkout_label,
+    left, right = _navigation_button_columns(st)
+    if left.button(
+        "Back to cart",
+        key="back-to-cart",
+        use_container_width=True,
+    ):
+        st.session_state["checkout_confirmation"] = None
+        st.session_state["ui_error_active"] = False
+        st.session_state["progress_substep"] = "personalizing the cart"
+        navigate_back_to_screen(st.session_state, "review")
+        st.rerun()
+    if right.button(
+        "Check out",
         type="primary",
         disabled=bool(checkout_staleness),
+        key="checkout",
+        use_container_width=True,
     ):
         confirmation = {
             "confirmation_id": (
@@ -16758,21 +17335,6 @@ def _render_summary(st: Any) -> None:
             "Total cost: "
             f"{format_streamlit_money(confirmation['landed_cost'])}."
         )
-
-    left, right = _navigation_button_columns(st)
-    if left.button(
-        "Change shopping settings",
-        use_container_width=True,
-    ):
-        st.session_state["result"] = None
-        st.session_state["checkout_confirmation"] = None
-        st.session_state["ui_error_active"] = False
-        st.session_state["progress_substep"] = "setup"
-        navigate_back_to_screen(st.session_state, "intake")
-        st.rerun()
-    if right.button("Start a new session", use_container_width=True):
-        clear_session_data(st)
-        st.rerun()
 
 
 def _apply_custom_css(st: Any) -> None:
@@ -17314,6 +17876,7 @@ def main() -> None:
     _initialize_state(st)
     _apply_custom_css(st)
     screen = st.session_state["screen"]
+    _sync_shopping_plan_visit(st.session_state, screen)
     _sync_work_episode_for_screen(st.session_state, screen)
     _render_app_title(st)
     _render_requested_next_task_scroll(st)

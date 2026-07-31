@@ -56,9 +56,8 @@ class FrozenMapleFixture:
     judge: FrozenSuitabilityJudge
 
 
-@pytest.fixture(scope="session")
-def frozen_maple_fixture() -> FrozenMapleFixture:
-    """Load the production-shaped, model-free Maple cart regression input."""
+def load_frozen_maple_fixture() -> FrozenMapleFixture:
+    """Load the production-shaped Maple boundary outside pytest injection."""
 
     fixture_path = (
         Path(__file__).parent
@@ -83,6 +82,13 @@ def frozen_maple_fixture() -> FrozenMapleFixture:
             }
         ),
     )
+
+
+@pytest.fixture(scope="session")
+def frozen_maple_fixture() -> FrozenMapleFixture:
+    """Load the production-shaped, model-free Maple cart regression input."""
+
+    return load_frozen_maple_fixture()
 
 
 @pytest.fixture

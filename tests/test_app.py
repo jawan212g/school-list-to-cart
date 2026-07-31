@@ -2268,6 +2268,9 @@ def test_complete_plan_gets_one_nonblocking_celebration() -> None:
         def caption(self, value: str) -> None:
             events.append(("caption", value))
 
+        def success(self, value: str) -> None:
+            events.append(("success", value))
+
         def columns(self, count: int) -> tuple[MetricColumn, ...]:
             return tuple(MetricColumn() for _ in range(count))
 
@@ -2335,9 +2338,11 @@ def test_no_budget_summary_shows_cost_without_budget_comparison() -> None:
         app.WARM_COPY,
     )
 
-    assert column_counts == [2]
+    assert column_counts == [3]
     assert ("caption", "No budget comparison selected.") in events
     assert any(kind == "metric:Total cost" for kind, _ in events)
+    assert any(kind == "metric:Items" for kind, _ in events)
+    assert any(kind == "metric:Stores" for kind, _ in events)
     assert not any(
         kind in {"metric:Budget remaining", "metric:Budget shortfall"}
         for kind, _ in events
@@ -2377,6 +2382,95 @@ def test_no_budget_summary_shows_cost_without_budget_comparison() -> None:
     assert "BUDGET REMAINING" not in export
     assert "BUDGET SHORTFALL" not in export
     assert "lines.append" not in inspect.getsource(app._render_review)
+
+
+def test_shopping_plan_controls_are_scoped_to_one_view_visit() -> None:
+    """A re-entry remounts controls while ordinary reruns keep identity."""
+
+    rendered_keys: list[str] = []
+
+    class Target:
+        def checkbox(self, label: str, **kwargs: object) -> bool:
+            del label
+            rendered_keys.append(str(kwargs["key"]))
+            return False
+
+    state: dict[str, object] = {
+        app.SHOPPING_PLAN_VIEW_REVISION_KEY: 0,
+        app.SHOPPING_PLAN_LAST_SCREEN_KEY: None,
+    }
+    app._sync_shopping_plan_visit(state, "summary")
+    first_revision = state[app.SHOPPING_PLAN_VIEW_REVISION_KEY]
+    app._ShoppingPlanViewScope(Target(), state).checkbox(
+        "A mutable display label",
+        key="stable-line-id",
+    )
+    app._sync_shopping_plan_visit(state, "summary")
+    app._ShoppingPlanViewScope(Target(), state).checkbox(
+        "Different mutable display label",
+        key="stable-line-id",
+    )
+    assert state[app.SHOPPING_PLAN_VIEW_REVISION_KEY] == first_revision
+    assert rendered_keys[0] == rendered_keys[1]
+
+    app._sync_shopping_plan_visit(state, "review")
+    app._sync_shopping_plan_visit(state, "summary")
+    app._ShoppingPlanViewScope(Target(), state).checkbox(
+        "A third display label",
+        key="stable-line-id",
+    )
+    assert rendered_keys[2] != rendered_keys[1]
+
+
+def test_shopping_checklist_is_durable_and_cannot_change_the_plan() -> None:
+    """Shopping ticks live outside the immutable optimization result."""
+
+    result = _real_pipeline_result("Grade 2")
+    optimization = result.proposed_cart
+    line = optimization.plan.lines[0]
+    line_id = app._shopping_checklist_line_id(0, line)
+    widget_key = "shopping-plan-visit:1:checklist:test"
+    state: dict[str, object] = {
+        app.SHOPPING_CHECKLIST_TICKS_KEY: {},
+        widget_key: True,
+    }
+
+    app._record_shopping_check(state, line_id, widget_key)
+
+    assert state[app.SHOPPING_CHECKLIST_TICKS_KEY] == {line_id: True}
+    assert result.proposed_cart == optimization
+    assert result.proposed_cart.landed_cost == optimization.landed_cost
+
+    app._clear_shopping_checks(state, (line_id,), (widget_key,))
+    assert state[app.SHOPPING_CHECKLIST_TICKS_KEY] == {line_id: False}
+    assert state[widget_key] is False
+    assert result.proposed_cart == optimization
+
+
+def test_zero_delivery_fee_names_the_threshold_that_waived_it() -> None:
+    """A free fee explains which store threshold is holding it at zero."""
+
+    result = _real_pipeline_result("Grade 2")
+    order = replace(
+        result.proposed_cart.plan.store_orders[0],
+        fulfillment_method="delivery",
+        item_subtotal=4_962,
+        fulfillment_fee=0,
+    )
+    store = Store(
+        store_id=order.store_id,
+        name="Supply Cloud",
+        distance_miles=0.0,
+        pickup_fee=0,
+        pickup_minimum=0,
+        delivery_fee=749,
+        delivery_minimum=4_900,
+        tax_applies=True,
+    )
+
+    assert app._waived_fee_text(order, store) == (
+        "Free delivery earned at $49.00"
+    )
 
 
 def test_visible_navigation_uses_four_required_stages() -> None:

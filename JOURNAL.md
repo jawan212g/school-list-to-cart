@@ -4693,6 +4693,49 @@ assertion was relaxed.
 No extraction, matching, pricing, optimizer, gate, or business-threshold
 behavior changed.
 
+## 2026-07-31 — Shopping plan organized for checkout and shopping
+
+### Objective
+
+Make the final plan answer two parent questions in order: what the complete
+order costs, then what to buy at each store.
+
+### Work completed
+
+- Lead with Total cost, Items, and Stores, followed by the exact item
+  subtotal, per-store-rounded tax, and fulfillment fees.
+- Name pickup or delivery thresholds when they make a fee free.
+- Render one store card with its own total, fulfillment method, item count,
+  item subtotal, tax, fee status, and a shortened shopping checklist.
+- Keep supporting interpretation, attribution, substitutions, assumptions,
+  and the decision log available as collapsed detail below the store lists.
+- Keep unresolved approvals visible in a dedicated card immediately before
+  simulated checkout, using the existing approval screen for the actual
+  decision.
+- Mark parent-originated item, quantity, school-provided, and approval choices
+  on the affected shopping lines.
+
+### Widget identity and checklist boundary
+
+Every stateful shopping-plan control derives its mounted key from one stable
+semantic key plus the current visit revision. Mutable store totals, item
+counts, product names, and prices remain display copy and never participate in
+widget identity. Shopping ticks are copied into their own durable session map;
+they do not modify the immutable optimization result, candidate map, totals,
+quantities, or checkout data.
+
+### Verification boundary
+
+The ARM64 suite verifies the durable checklist map and that ticking or clearing
+it leaves the optimization result unchanged. The x86 Streamlit AppTest verifies
+the real rendered checkbox survives reruns, clears on request, and leaves the
+approved plan and total unchanged.
+
+### Architecture
+
+This is a display and session-only shopping aid. No extraction, matching,
+pricing, tax, allocation, optimizer, gate, or BR threshold behavior changed.
+
 ## 2026-07-31 — Attribute identity normalization and BR-08 retirement
 
 ### Diagnosis
