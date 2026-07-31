@@ -467,12 +467,14 @@ extracted_lists = {
             Requirement(
                 req_id="maya-sticky-notes",
                 child_id="student-1",
-                raw_text="2 packs of sticky notes",
+                raw_text="2-3 packs of sticky notes",
                 canonical_item="sticky_notes",
                 quantity=2,
+                quantity_max=3,
+                quantity_is_range=True,
                 unit_type="pack",
                 package_quantity_state="specified",
-                extraction_confidence=0.6,
+                extraction_confidence=1.0,
             ),
         )
     ),
@@ -491,10 +493,12 @@ extracted_lists = {
             Requirement(
                 req_id="class-folders",
                 child_id="classroom-1",
-                raw_text="40 folders",
+                raw_text="40-45 folders",
                 canonical_item="folders",
                 quantity=40,
-                extraction_confidence=0.6,
+                quantity_max=45,
+                quantity_is_range=True,
+                extraction_confidence=1.0,
             ),
         )
     ),
@@ -1517,6 +1521,180 @@ def test_personalize_edit_opens_in_place_before_the_parent_submits(
     )
 
 
+@pytest.mark.parametrize(
+    ("entry_label", "entry_id"),
+    (
+        ("Maya", "student-1"),
+        ("Mr. G's class", "classroom-1"),
+    ),
+)
+def test_personalize_edit_submission_changes_only_the_selected_entry(
+    entry_label: str,
+    entry_id: str,
+) -> None:
+    """FR-12: a submitted quantity edit persists for either entry type."""
+
+    test_app = _run_personalize_student_and_classroom_decision_screen()
+    original_other_items = tuple(
+        item
+        for item in test_app.session_state["review_items"]
+        if item.child_id != entry_id
+    )
+    _click_label(test_app, f"Open {entry_label}")
+    _click_label(test_app, "Change item or quantity")
+    quantity_input = next(
+        widget
+        for widget in test_app.number_input
+        if str(widget.key).endswith(":decision-quantity")
+    )
+    changed_quantity = int(quantity_input.value) + 1
+    quantity_input.set_value(changed_quantity).run()
+    _click_label(test_app, "Send selection to cart")
+    _assert_no_exception(test_app)
+
+    assert test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY] == entry_id
+    assert any(
+        item.child_id == entry_id
+        and item.required_quantity == changed_quantity
+        for item in test_app.session_state["review_items"]
+    )
+    assert tuple(
+        item
+        for item in test_app.session_state["review_items"]
+        if item.child_id != entry_id
+    ) == original_other_items
+
+
+@pytest.mark.parametrize(
+    ("entry_label", "entry_id", "action", "expected_owned", "expected_status"),
+    (
+        ("Maya", "student-1", "We already own this item", True, "pending"),
+        ("Maya", "student-1", "Remove item from cart", False, "deleted"),
+        (
+            "Mr. G's class",
+            "classroom-1",
+            "We already own this item",
+            True,
+            "pending",
+        ),
+        (
+            "Mr. G's class",
+            "classroom-1",
+            "Remove item from cart",
+            False,
+            "deleted",
+        ),
+    ),
+)
+def test_personalize_decision_purchase_status_actions_are_applied_in_place(
+    entry_label: str,
+    entry_id: str,
+    action: str,
+    expected_owned: bool,
+    expected_status: str,
+) -> None:
+    """FR-12: owned and removed choices stay distinct for each entry type."""
+
+    test_app = _run_personalize_student_and_classroom_decision_screen()
+    _click_label(test_app, f"Open {entry_label}")
+    _click_label(test_app, action)
+    _assert_no_exception(test_app)
+
+    changed = tuple(
+        item
+        for item in test_app.session_state["review_items"]
+        if (
+            item.child_id == entry_id
+            and item.required_quantity == 0
+            and item.already_owned is expected_owned
+            and item.review_status == expected_status
+        )
+    )
+    assert len(changed) == 1
+    assert test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY] == entry_id
+
+
+@pytest.mark.parametrize(
+    ("entry_label", "entry_id"),
+    (
+        ("Maya", "student-1"),
+        ("Mr. G's class", "classroom-1"),
+    ),
+)
+def test_personalize_bulk_approval_resolves_only_the_open_entry(
+    entry_label: str,
+    entry_id: str,
+) -> None:
+    """FR-12: the entry-level bulk action is scoped to its visible decisions."""
+
+    test_app = _run_personalize_student_and_classroom_decision_screen()
+    _click_label(test_app, f"Open {entry_label}")
+    _click_label(test_app, "Approve all AI recommendations")
+    _assert_no_exception(test_app)
+
+    assert test_app.session_state[app.PERSONALIZE_SELECTED_VIEW_KEY] == entry_id
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    labels = tuple(navigation.proto.options)
+    selected_label = next(label for label in labels if entry_label in label)
+    other_labels = tuple(label for label in labels if entry_label not in label)
+    assert "[" not in selected_label
+    assert any("[2]" in label for label in other_labels)
+
+
+def test_summary_decision_editor_stays_visible_after_action_rerun() -> None:
+    """FR-12: Summary keeps the decision disclosure open while editing."""
+
+    test_app = _run_personalize_student_and_classroom_decision_screen()
+    expander_key = app.personalize_summary_decisions_expander_key("student-1")
+    test_app.session_state[expander_key] = True
+    test_app.run()
+    _assert_no_exception(test_app)
+
+    _click_label(test_app, "Change item or quantity")
+    _assert_no_exception(test_app)
+
+    decision_expander = next(
+        expander
+        for expander in test_app.expander
+        if (
+            expander.label == "Review decisions"
+            and any(
+                button.label == "Send selection to cart"
+                for button in expander.button
+            )
+        )
+    )
+    assert decision_expander.proto.expanded is True
+
+
+def test_summary_approval_stays_open_and_shows_remaining_decision() -> None:
+    """FR-12: approval does not hide another decision for the same student."""
+
+    test_app = _run_personalize_student_and_classroom_decision_screen()
+    expander_key = app.personalize_summary_decisions_expander_key("student-1")
+    test_app.session_state[expander_key] = True
+    test_app.run()
+    _assert_no_exception(test_app)
+
+    _click_label(test_app, "Approve this recommendation")
+    _assert_no_exception(test_app)
+
+    decision_expander = next(
+        expander
+        for expander in test_app.expander
+        if expander.label == "Review decisions"
+    )
+    assert decision_expander.proto.expanded is True
+    assert any(
+        "sticky notes" in str(markdown.value).casefold()
+        for markdown in decision_expander.markdown
+    )
+
+
 def test_unresolved_open_student_button_survives_a_view_round_trip() -> None:
     """Every Personalize button remounts under a new visit identity."""
 
@@ -1600,7 +1778,7 @@ def test_partial_personalize_actions_leave_the_same_decision_visible_to_gate() -
         for markdown in test_app.markdown
     )
     assert any(
-        expander.label == "Review 1 decision"
+        expander.label == "Review decisions"
         for expander in test_app.expander
     )
     assert any(

@@ -5101,3 +5101,45 @@ was narrowed to the gate's exact rendered line.
 The change is deterministic review-state identity and consumption only. No
 model call, matching, money path, optimizer, gate condition, or BR threshold
 changed.
+
+## 2026-07-30 — Personalize decision actions remain visible after reruns
+
+### Objective
+
+Make recommendation approval and item-or-quantity editing visibly take effect
+without making a parent reopen a collapsed Summary decision panel.
+
+### Diagnosis
+
+The action callbacks were not navigating to Summary and were not losing their
+state. A production-shaped x86 AppTest confirmed that both the approval set and
+the selected student or classroom were updated correctly. The apparent failure
+was the unkeyed Summary decision expander: every action causes a Streamlit
+rerun, the expander returned to its hard-coded collapsed state, and the editor
+or remaining decision was hidden. The already-owned action looked different
+because it also created a visible row in the separate out-of-cart block.
+
+### Work completed
+
+- Gave each student's or classroom's Summary decision disclosure a stable key
+  and durable open state.
+- Reused the same open-state mechanism as the in-cart item disclosures.
+- Kept the decision disclosure open after approving one recommendation or
+  opening the item editor, while leaving it collapsed on first arrival.
+- Added production-shaped x86 coverage for student and classroom approval,
+  editing and submission, already-owned, removal, and entry-scoped bulk
+  approval.
+- Retained the existing coverage for optional-item restoration,
+  school-provided overrides, package-count edits, in-cart quantity changes,
+  out-of-cart restoration, parent-added items, and unresolved-plan blocking.
+
+### Verification boundary
+
+The Windows ARM64 suite exercises deterministic and recorder-based behavior but
+skips Streamlit AppTest because Streamlit is not installed on that platform.
+The open-state and real callback lifecycle require the GitHub Actions x86 run.
+
+### Architecture
+
+No extraction, matching, pricing, optimizer, gate, or business-threshold
+behavior changed.

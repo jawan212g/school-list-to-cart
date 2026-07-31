@@ -7902,6 +7902,30 @@ def personalize_row_open_state_key(key_prefix: str) -> str:
     return f"{key_prefix}:open-state"
 
 
+def personalize_summary_decisions_expander_key(child_id: str) -> str:
+    """Return the stable Summary decision-disclosure key for one entry."""
+
+    return f"personalize-summary-decisions:{child_id}:expanded"
+
+
+def _personalize_expander_open_state(
+    state: MutableMapping[str, Any],
+    expander_key: str,
+    *,
+    open_state_key: str | None = None,
+) -> bool:
+    """Retain an expander's open state across action-triggered reruns."""
+
+    durable_key = (
+        open_state_key
+        if open_state_key is not None
+        else personalize_row_open_state_key(expander_key)
+    )
+    if expander_key in state:
+        state[durable_key] = bool(state[expander_key])
+    return bool(state.get(durable_key, False))
+
+
 def personalize_settled_expander_key(item: SupplyItemReview) -> str:
     """Return the production expander key for one settled Personalize row."""
 
@@ -8994,12 +9018,19 @@ def _render_personalize_summary(
                 if group.group_id not in rendered_group_ids
             )
             if groups_to_render:
+                decision_expander_key = (
+                    personalize_summary_decisions_expander_key(
+                        section.child_id
+                    )
+                )
                 with st.expander(
-                    (
-                        f"Review {len(groups_to_render)} "
-                        f"{'decision' if len(groups_to_render) == 1 else 'decisions'}"
+                    "Review decisions",
+                    expanded=_personalize_expander_open_state(
+                        st.session_state,
+                        decision_expander_key,
                     ),
-                    expanded=False,
+                    key=decision_expander_key,
+                    on_change="rerun",
                 ):
                     for group in groups_to_render:
                         members = tuple(
@@ -10306,14 +10337,13 @@ def _render_settled_review_row(
         key_prefix=key_prefix,
     )
     expander_key = personalize_row_expander_key(key_prefix)
-    open_state_key = personalize_row_open_state_key(key_prefix)
-    if expander_key in st.session_state:
-        st.session_state[open_state_key] = bool(
-            st.session_state[expander_key]
-        )
     with st.expander(
         escape_streamlit_dollars(review_understanding_text(item)),
-        expanded=bool(st.session_state.get(open_state_key, False)),
+        expanded=_personalize_expander_open_state(
+            st.session_state,
+            expander_key,
+            open_state_key=personalize_row_open_state_key(key_prefix),
+        ),
         key=expander_key,
         on_change="rerun",
     ):

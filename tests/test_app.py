@@ -3633,7 +3633,7 @@ def test_personalize_navigation_round_trip_uses_non_widget_state(
         summary.messages.index(message) for message in count_messages
     )
     assert count_positions == tuple(sorted(count_positions))
-    assert ("Review 1 decision", False) in summary.expanders
+    assert ("Review decisions", False) in summary.expanders
     assert ("popover", "Notebook paper") not in summary.events
     assert ("popover", "Tissues, optional") not in summary.events
     assert ("popover", "Pencils") not in summary.events
