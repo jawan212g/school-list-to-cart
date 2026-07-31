@@ -5017,3 +5017,10 @@ its parent-facing presentation was wrong.
 The language model and deterministic calculation boundaries are unchanged.
 No extraction prompt, matching behavior, money path, optimizer, gate, or
 business threshold changed.
+
+### x86 verification follow-up
+
+The first x86 run exposed one AppTest assertion that still expected the former
+“extract items” section copy. The production screen already rendered “read
+items”; the test was updated to assert that live wording, and the remaining
+section heading was changed from “What we will extract” to “What we'll read.”

@@ -975,7 +975,7 @@ def test_section_statement_and_submitted_scope_use_same_live_state() -> None:
 
     test_app = _run_section_screen()
     scope_text = " ".join(str(item.value) for item in test_app.markdown)
-    assert "We will extract items from 1st Grade" in scope_text
+    assert "We will read items from 1st Grade" in scope_text
     assert "Highly Capable Class" not in scope_text
 
     question = next(
@@ -989,7 +989,7 @@ def test_section_statement_and_submitted_scope_use_same_live_state() -> None:
     _assert_no_exception(test_app)
     scope_text = " ".join(str(item.value) for item in test_app.markdown)
     assert (
-        "We will extract items from 1st Grade and Highly Capable Class"
+        "We will read items from 1st Grade and Highly Capable Class"
         in scope_text
     )
     override_selector = next(

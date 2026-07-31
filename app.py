@@ -11114,7 +11114,7 @@ def _render_sections(st: Any) -> None:
                     section.section_id: section
                     for section in selected_sections
                 }
-                st.markdown("#### Part 1 · What we will extract")
+                st.markdown("#### Part 1 · What we'll read")
                 if choice.selected_section_labels:
                     st.write(
                         escape_streamlit_dollars(
