@@ -4693,6 +4693,63 @@ assertion was relaxed.
 No extraction, matching, pricing, optimizer, gate, or business-threshold
 behavior changed.
 
+## 2026-07-31 — Gate proof and Maple variance reconciliation
+
+### Objective
+
+Prove the human-approval boundary still operates after the clean frozen Maple
+cart fell from two interrupts to zero, and choose a legitimate one-decision
+demo path without reviving BR-08 or weakening another rule.
+
+### Approval-gate proof
+
+Production-shaped frozen-fixture gate contexts now exercise all six active
+FR-26 branches: budget exceeded, major substitution, brand-lock break,
+preference-dependent attribute choice, low confidence, and required item
+unavailable. Each gate branch produces exactly its named interrupt. A seventh
+test proves the former non-returnable condition remains intentionally inactive
+under retired BR-08, including for the $35.98 non-returnable headphones.
+
+The producer audit found one real reachability gap: `match_offers()` filters
+every offer whose brand differs from a locked brand before substitution
+classification. The pipeline therefore reports a required locked-brand item as
+unavailable when its exact brand is absent; it cannot currently emit
+`brand_lock_break`. The frozen near-variant proves the gate consumer still
+handles such evidence, but it does not prove the current matcher can produce
+it. This pass records the defect and does not loosen the brand filter or change
+the intended approval behavior without a separate reconciliation of FR-17 and
+FR-26.
+
+The smallest operational demo variation is a stockout of
+`VD-GLU-VB-006`, the exact large Value Basics glue-stick package. Replanning
+selects the standard-size Cloud Choice package and produces one
+`major_substitution` interrupt. This demonstrates the approval boundary using
+an understandable inventory change rather than a manufactured threshold.
+
+### Variance finding
+
+The normalized frozen fixture now reproduces the earlier A-9/A-10 outcomes:
+a $109.83 required cart and a $69.24 recommended $85 plan. The $0.21 gap from
+the later $110.04 frozen cart was not model nondeterminism: `wide-ruled` and
+`wide ruled` froze as different attribute identities, split one notebook-paper
+requirement into two package decisions, and added 20 item cents plus one tax
+cent. A variance previously attributed wholly to model-assisted extraction or
+matching therefore included a deterministic normalization defect.
+
+The historical $111.21/$71.07 pair remains unexplained because no confirmed
+extraction and suitability evidence was retained for that run. Provider runs
+with different requirement counts, match decisions, recommended plans, or
+interrupt counts also remain model-dependent unless they are replayed from the
+current frozen boundary. The normalization correction explains the specific
+$110.04-to-$109.83 difference; it does not retroactively explain every older
+live-run difference.
+
+### Architecture
+
+No gate condition, BR threshold, matching decision, optimization behavior, or
+money calculation changed. This pass adds production-shaped gate evidence and
+records the corrected causal account.
+
 ## 2026-07-31 — Shopping plan organized for checkout and shopping
 
 ### Objective

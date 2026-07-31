@@ -81,7 +81,7 @@ class ApprovalBatch:
 
 @dataclass(frozen=True)
 class GateContext:
-    """Deterministic evidence required to evaluate the seven conditions."""
+    """Deterministic evidence required for the six active FR-26 conditions."""
 
     optimization: OptimizationResult
     matches: MatchResult

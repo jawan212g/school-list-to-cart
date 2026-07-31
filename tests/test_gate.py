@@ -279,8 +279,8 @@ def test_no_budget_never_fires_the_budget_interrupt() -> None:
     )
 
 
-def test_no_budget_preserves_non_budget_approval_conditions() -> None:
-    """FR-26: removing the ceiling does not bypass product approvals."""
+def test_no_budget_does_not_restore_retired_returnability_interrupt() -> None:
+    """Retired BR-08 stays inactive even without a budget ceiling."""
 
     offer = _offer(price=1_600, returnable=False)
     need = _need()
@@ -341,17 +341,19 @@ def test_condition_3_brand_lock_break_fires_once() -> None:
 def test_condition_4_preference_attribute_choice_fires_once() -> None:
     offer = _offer()
     need = _need(attributes={"acceptable_colors": ("red",)})
+    matches = match_offers([need], [offer], [_store()])
+    assert matches.needs[0].candidates[0].substitution_reasons == (
+        "attribute_change:acceptable_colors",
+    )
     _assert_one(
-        _context(
-            need,
-            offer,
-            _candidate(
-                need,
-                offer,
-                substitution_type="major",
-                reasons=("attribute_change:acceptable_colors",),
-            ),
-            _optimization(offer),
+        GateContext(
+            optimization=_optimization(offer),
+            matches=matches,
+            normalization=NormalizationResult(requirements=()),
+            extractions={},
+            offers=(offer,),
+            stores=(_store(),),
+            tax_basis_points=0,
         ),
         "attribute_choice",
         (0, -500),
@@ -379,7 +381,7 @@ def test_retired_br08_ignores_legacy_returnability_data() -> None:
     ).interrupts == ()
 
 
-def test_condition_6_ambiguous_sub_07_match_routes_to_review_once() -> None:
+def test_condition_5_ambiguous_sub_07_match_routes_to_review_once() -> None:
     offer = _offer()
     need = _need(
         attributes={"other_details": "ambiguous classroom item"}
@@ -410,7 +412,7 @@ def test_condition_6_ambiguous_sub_07_match_routes_to_review_once() -> None:
     )
 
 
-def test_condition_7_required_item_unavailable_fires_once() -> None:
+def test_condition_6_required_item_unavailable_fires_once() -> None:
     offer = _offer()
     need = _need()
     _assert_one(

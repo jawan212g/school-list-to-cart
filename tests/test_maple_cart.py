@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from itertools import combinations
 from types import SimpleNamespace
 from typing import Any
 
 import app
 from agent.budget_plans import evaluate_budget_actions
-from agent.match import MatchResult, SuitabilityJudge
+from agent.gate import GateContext, evaluate_gate
+from agent.match import MatchResult, NeedMatches, SuitabilityJudge
 from agent.optimize import OptimizationConfig
 from agent.pipeline import (
     PipelineResult,
     PipelineSession,
     _optimize_and_consolidate,
+    replan_after_catalog_change,
     run_pipeline_from_confirmed_extractions,
 )
 from agent.schema import ExtractionEnvelope
@@ -53,6 +56,104 @@ def _run_maple(
         offers=tuple(load_catalog()),
         suitability_judge=judge,
     )
+
+
+def _gate_context(
+    result: PipelineResult,
+    *,
+    matches: MatchResult | None = None,
+) -> GateContext:
+    """Build the exact gate input used by the confirmed-input pipeline."""
+
+    return GateContext(
+        optimization=result.proposed_cart,
+        matches=result.matches if matches is None else matches,
+        normalization=result.normalization,
+        extractions=result.extractions,
+        offers=tuple(load_catalog()),
+        stores=tuple(load_stores()),
+        tax_basis_points=result.session.tax_basis_points,
+        unit_needs=result.purchase_needs,
+        optimization_config=OptimizationConfig(
+            shopping_mode=result.session.shopping_mode,
+            budget_cents=result.session.budget_total,
+            allowed_store_ids=result.session.allowed_stores,
+            max_stores=result.session.max_stores,
+            store_radius_miles=result.session.store_radius_miles,
+            fulfillment_preference=result.session.fulfillment_pref,
+            tax_basis_points=result.session.tax_basis_points,
+        ),
+    )
+
+
+def _selected_candidate_variant(
+    result: PipelineResult,
+    *,
+    substitution_reasons: tuple[str, ...] | None = None,
+    confidence_review: bool = False,
+) -> MatchResult:
+    """Vary one real selected Maple candidate without inventing object shapes."""
+
+    selected_line = result.proposed_cart.plan.lines[0]
+    varied_needs: list[NeedMatches] = []
+    changed = False
+    for need_matches in result.matches.needs:
+        if (
+            need_matches.unit_need.source_requirement_ids
+            != selected_line.source_requirement_ids
+        ):
+            varied_needs.append(need_matches)
+            continue
+        selected = next(
+            candidate
+            for candidate in need_matches.candidates
+            if candidate.offer.sku == selected_line.sku
+        )
+        if confidence_review:
+            blocked = replace(
+                selected,
+                match_confidence=0.65,
+                suitability_reason=(
+                    "Near-variant evidence is deliberately ambiguous."
+                ),
+            )
+            varied_needs.append(
+                replace(
+                    need_matches,
+                    candidates=(),
+                    review_blocked_candidates=(blocked,),
+                )
+            )
+        else:
+            assert substitution_reasons is not None
+            varied = replace(
+                selected,
+                substitution_type="major",
+                substitution_reasons=substitution_reasons,
+                attribute_status=(
+                    "different"
+                    if any(
+                        reason.startswith("attribute_change:")
+                        for reason in substitution_reasons
+                    )
+                    else selected.attribute_status
+                ),
+                requires_approval=True,
+            )
+            varied_needs.append(
+                replace(
+                    need_matches,
+                    candidates=tuple(
+                        varied
+                        if candidate.offer.sku == selected_line.sku
+                        else candidate
+                        for candidate in need_matches.candidates
+                    ),
+                )
+            )
+        changed = True
+    assert changed is True
+    return MatchResult(needs=tuple(varied_needs))
 
 
 def test_frozen_maple_fixture_records_the_human_binding_correction(
@@ -118,6 +219,160 @@ def test_frozen_maple_85_dollar_recommended_plan_baseline(
         result.budget_analysis.recommended_plan.resulting_landed_cost_cents
         == 6_924
     )
+
+
+def test_frozen_gate_condition_1_budget_exceeded_still_fires(
+    frozen_maple_fixture: Any,
+) -> None:
+    """FR-26: one cent below the exact frozen total triggers the budget gate."""
+
+    result = _run_maple(
+        frozen_maple_fixture.extractions,
+        frozen_maple_fixture.judge,
+        budget_cents=10_982,
+    )
+
+    assert tuple(
+        interrupt.kind for interrupt in result.approval_batch.interrupts
+    ) == ("budget_exceeded",)
+
+
+def test_frozen_gate_condition_2_major_substitution_still_fires(
+    frozen_maple_fixture: Any,
+) -> None:
+    """FR-26: a stockout can expose one genuine size substitution."""
+
+    result = _run_maple(
+        frozen_maple_fixture.extractions,
+        frozen_maple_fixture.judge,
+        budget_cents=15_000,
+    )
+    changed_sku = "VD-GLU-VB-006"
+    changed_offers = tuple(
+        replace(offer, stock_qty=0)
+        if offer.sku == changed_sku
+        else offer
+        for offer in load_catalog()
+    )
+    transition = replan_after_catalog_change(
+        result,
+        changed_offers,
+        tuple(load_stores()),
+        change_kind="stockout",
+        changed_sku=changed_sku,
+    )
+
+    assert tuple(
+        interrupt.kind
+        for interrupt in transition.result.approval_batch.interrupts
+    ) == ("major_substitution",)
+    assert transition.result.approval_batch.interrupts[0].sku == (
+        "CL-GLU-CC-012"
+    )
+
+
+def test_frozen_gate_condition_3_accepts_brand_break_evidence(
+    frozen_maple_fixture: Any,
+) -> None:
+    """FR-26: the gate branch fires, although matching filters this evidence."""
+
+    result = _run_maple(
+        frozen_maple_fixture.extractions,
+        frozen_maple_fixture.judge,
+        budget_cents=15_000,
+    )
+    matches = _selected_candidate_variant(
+        result,
+        substitution_reasons=("brand_lock_break",),
+    )
+
+    assert tuple(
+        interrupt.kind
+        for interrupt in evaluate_gate(
+            _gate_context(result, matches=matches)
+        ).interrupts
+    ) == ("brand_lock_break",)
+
+
+def test_frozen_gate_condition_4_attribute_choice_still_fires(
+    frozen_maple_fixture: Any,
+) -> None:
+    """FR-26: preference-sensitive color evidence gets its own interrupt."""
+
+    result = _run_maple(
+        frozen_maple_fixture.extractions,
+        frozen_maple_fixture.judge,
+        budget_cents=15_000,
+    )
+    matches = _selected_candidate_variant(
+        result,
+        substitution_reasons=("attribute_change:color",),
+    )
+
+    assert tuple(
+        interrupt.kind
+        for interrupt in evaluate_gate(
+            _gate_context(result, matches=matches)
+        ).interrupts
+    ) == ("attribute_choice",)
+
+
+def test_frozen_gate_condition_5_low_confidence_still_fires(
+    frozen_maple_fixture: Any,
+) -> None:
+    """FR-26/BR-11: a sub-floor near variant cannot reach the cart silently."""
+
+    result = _run_maple(
+        frozen_maple_fixture.extractions,
+        frozen_maple_fixture.judge,
+        budget_cents=15_000,
+    )
+    matches = _selected_candidate_variant(
+        result,
+        confidence_review=True,
+    )
+
+    assert tuple(
+        interrupt.kind
+        for interrupt in evaluate_gate(
+            _gate_context(result, matches=matches)
+        ).interrupts
+    ) == ("low_confidence",)
+
+
+def test_frozen_gate_condition_6_required_unavailable_still_fires(
+    frozen_maple_fixture: Any,
+) -> None:
+    """FR-26: pickup-only makes delivery-only headphones unavailable."""
+
+    result = _run_maple(
+        frozen_maple_fixture.extractions,
+        frozen_maple_fixture.judge,
+        budget_cents=15_000,
+        fulfillment="pickup",
+    )
+
+    assert tuple(
+        interrupt.kind for interrupt in result.approval_batch.interrupts
+    ) == ("required_unavailable",)
+
+
+def test_frozen_retired_br08_remains_inactive(
+    frozen_maple_fixture: Any,
+) -> None:
+    """Retired BR-08 does not revive for the expensive headphones line."""
+
+    result = _run_maple(
+        frozen_maple_fixture.extractions,
+        frozen_maple_fixture.judge,
+        budget_cents=15_000,
+    )
+    offers_by_sku = {offer.sku: offer for offer in load_catalog()}
+    headphones = offers_by_sku["CL-HDP-CLS-001"]
+
+    assert headphones.is_returnable is False
+    assert headphones.pack_price > 1_500
+    assert result.approval_batch.interrupts == ()
 
 
 def test_frozen_maple_single_stop_second_trip_is_not_unavailable(
