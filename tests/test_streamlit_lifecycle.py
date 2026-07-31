@@ -363,6 +363,71 @@ app._render_review(st)
     return test_app
 
 
+def _run_personalize_two_decision_screen() -> AppTest:
+    """Mount production Personalize with two independently flagged items."""
+
+    test_app = AppTest.from_string(
+        """
+import streamlit as st
+import app
+from agent.review import organize_extractions
+from agent.schema import ExtractionEnvelope, Requirement
+
+st.session_state.setdefault(
+    "intake",
+    {
+        "children": (
+            {
+                "child_id": "child-1",
+                "label": "Mr. G",
+                "grade": "Grade 5",
+            },
+        )
+    },
+)
+st.session_state.setdefault(
+    "extracted_lists",
+    {
+        "child-1": ExtractionEnvelope(
+            requirements=(
+                Requirement(
+                    req_id="pencils",
+                    child_id="child-1",
+                    raw_text="24 pencils",
+                    canonical_item="pencils",
+                    quantity=24,
+                    extraction_confidence=0.6,
+                ),
+                Requirement(
+                    req_id="sticky-notes",
+                    child_id="child-1",
+                    raw_text="2 packs of sticky notes",
+                    canonical_item="sticky_notes",
+                    quantity=2,
+                    unit_type="pack",
+                    package_quantity_state="specified",
+                    extraction_confidence=0.6,
+                ),
+            )
+        )
+    },
+)
+st.session_state.setdefault(
+    "review_items",
+    organize_extractions(dict(st.session_state["extracted_lists"])),
+)
+st.session_state.setdefault("parent_added_review_items", ())
+st.session_state.setdefault("extraction_errors", {})
+st.session_state.setdefault("list_inputs", ())
+st.session_state.setdefault(app.PERSONALIZE_SELECTED_VIEW_KEY, "summary")
+app._render_review(st)
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
 def _run_personalize_package_decision_screen() -> AppTest:
     """Mount the production Personalize path with one missing pack count."""
 
@@ -1293,6 +1358,52 @@ def test_personalize_edit_survives_summary_round_trip_without_button_crash() -> 
         if button.label == "Approve all AI recommendations"
     )
     assert reopened_bulk_key != first_bulk_key
+
+
+def test_unresolved_open_student_button_survives_a_view_round_trip() -> None:
+    """Every Personalize button remounts under a new visit identity."""
+
+    test_app = _run_personalize_two_decision_screen()
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    navigation.set_value("child-1").run()
+    _assert_no_exception(test_app)
+
+    _click_label(test_app, "Change item or quantity")
+    _click_label(test_app, "Send selection to cart")
+
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    navigation.set_value("summary").run()
+    _assert_no_exception(test_app)
+    _click_label(test_app, "Use these choices and build my shopping plan")
+
+    unresolved_open = next(
+        button
+        for button in test_app.button
+        if (
+            button.label == "Open Mr. G"
+            and "unresolved-student" in str(button.key)
+        )
+    )
+    unresolved_open.click().run()
+    _assert_no_exception(test_app)
+
+    navigation = next(
+        radio
+        for radio in test_app.radio
+        if radio.label == "Choose a student or Summary"
+    )
+    navigation.set_value("summary").run()
+    _assert_no_exception(test_app)
+    _click_label(test_app, "Use these choices and build my shopping plan")
+    _assert_no_exception(test_app)
 
 
 def test_personalize_remove_action_uses_distinct_removed_group() -> None:
