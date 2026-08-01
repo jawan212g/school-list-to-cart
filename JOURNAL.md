@@ -6179,3 +6179,44 @@ low-confidence catalog-match decision remains.
 - Deploy, repeat the failing shopping-plan build, and compare the three
   `PLAN_BUILD_MEMORY` entries. Remove the temporary extraction diagnostic once
   the Machias dump has been captured.
+
+## 2026-07-31 — Hosted optimizer process-loss guard
+
+### Incident evidence
+
+- The repeated Streamlit Cloud failure was not a semantic-matching timeout:
+  the hosted log reached both `before_matching` and `after_matching` at the
+  same 310.9 MiB peak RSS.
+- The process disappeared before `after_optimization`, with no Python
+  traceback. The failure boundary is therefore the deterministic optimizer.
+- The live run carried 35 extracted requirements into 26 item types. A local
+  replay of that category and quantity shape visited 672,641 exact-search
+  states. The optimizer's memo table had no bound and retained a growing SKU
+  prefix for every distinct partial store-subtotal state. An abrupt container
+  kill during that growth is the evidence-supported diagnosis; the hosted log
+  cannot distinguish an operating-system memory kill from another native
+  process termination after the final checkpoint.
+
+### Work completed
+
+- Retain at most 25,000 memoized optimizer states as an operational memory
+  guard, not a business rule. The oldest entry is evicted at capacity.
+  Eviction only causes recomputation; it does not
+  change candidate eligibility, exact scoring, pruning bounds, or cart output.
+- Added warning-level optimizer input and search telemetry: need count,
+  candidate breadth, visited states, memoized prunes, peak cache entries,
+  evictions, capacity, and elapsed search time.
+- Split the existing post-match/post-optimization memory checkpoints around
+  the preliminary and consolidated exact searches so a future failure names
+  the precise optimizer phase.
+- Removed the temporary per-requirement extraction dump after capturing the
+  requested Machias evidence; school-list text no longer floods hosted logs.
+
+### Verification
+
+- A live-shaped 35-requirement local replay completed at the 25,000-state cap
+  in 9.11 seconds and produced the same 18162-cent result as the prior
+  unbounded replay. It evicted 306,633 old memo entries while preserving the
+  exact result.
+- A focused regression forces eviction at a two-state capacity and asserts
+  the complete `OptimizationResult` is identical to the unbounded result.

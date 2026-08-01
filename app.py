@@ -7167,34 +7167,6 @@ def _extract_list_inputs(
     return extractions, errors
 
 
-def _log_premerge_extraction_requirements(
-    extractions: Mapping[str, ExtractionEnvelope],
-    student_labels: Mapping[str, str],
-) -> None:
-    """Temporarily expose exact extraction records before deterministic merge."""
-
-    for child_id, envelope in extractions.items():
-        student = student_labels.get(child_id, child_id)
-        for requirement in envelope.requirements:
-            diagnostic = {
-                "student": student,
-                "canonical_item": requirement.canonical_item,
-                "raw_text": requirement.raw_text,
-                "document": requirement.source_document,
-                "page": requirement.source_page,
-                "section": requirement.source_section,
-                "attributes": requirement.attributes.model_dump(mode="json"),
-            }
-            LOGGER.warning(
-                "PREMERGE_EXTRACTION_REQUIREMENT %s",
-                json.dumps(
-                    diagnostic,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-            )
-
-
 def _run_pipeline_from_cached_extractions(
     session: PipelineSession,
     list_inputs: Sequence[ListInput],
@@ -14633,13 +14605,6 @@ def _render_working(st: Any) -> None:
                 },
                 **new_extraction_errors,
             }
-            _log_premerge_extraction_requirements(
-                extractions,
-                {
-                    str(child["child_id"]): str(child["label"])
-                    for child in intake["children"]
-                },
-            )
             merged_extractions, merge_result = consolidate_extractions(
                 extractions
             )

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import combinations
+import logging
+from time import perf_counter
 from typing import Literal
 
 from agent.aggregate import UnitNeed
@@ -24,6 +26,12 @@ from agent.store_scope import (
     store_supports_fulfillment,
 )
 from data.loader import Offer, Store
+
+
+LOGGER = logging.getLogger(__name__)
+OPTIMIZER_STATE_CACHE_MAX_ENTRIES = 25_000
+# Operational memory guard, not a cart rule: eviction only causes exact-search
+# recomputation and cannot change candidates, costs, pruning, or the result.
 
 
 ShoppingMode = Literal["budget", "single_stop", "custom"]
@@ -726,10 +734,15 @@ def _best_multi_store_plan(
         raise ValueError("Custom max_stores must be positive")
 
     best_plan: CartPlan | None = None
-    best_prefix_by_state: dict[
+    best_prefix_by_state: OrderedDict[
         tuple[int, tuple[tuple[str, int], ...]],
         tuple[str, ...],
-    ] = {}
+    ] = OrderedDict()
+    visited_states = 0
+    memoized_prunes = 0
+    cache_evictions = 0
+    peak_cache_entries = 0
+    search_started_at = perf_counter()
 
     def unavoidable_tax(
         item_subtotals_by_store: Mapping[str, int],
@@ -777,6 +790,12 @@ def _best_multi_store_plan(
         item_subtotals_by_store: dict[str, int],
     ) -> None:
         nonlocal best_plan
+        nonlocal cache_evictions
+        nonlocal memoized_prunes
+        nonlocal peak_cache_entries
+        nonlocal visited_states
+
+        visited_states += 1
 
         state_key = (
             index,
@@ -789,8 +808,24 @@ def _best_multi_store_plan(
         )
         prior_prefix = best_prefix_by_state.get(state_key)
         if prior_prefix is not None and prior_prefix <= prefix_key:
+            memoized_prunes += 1
+            best_prefix_by_state.move_to_end(state_key)
             return
         best_prefix_by_state[state_key] = prefix_key
+        best_prefix_by_state.move_to_end(state_key)
+        if len(best_prefix_by_state) > OPTIMIZER_STATE_CACHE_MAX_ENTRIES:
+            best_prefix_by_state.popitem(last=False)
+            cache_evictions += 1
+            if cache_evictions == 1:
+                LOGGER.warning(
+                    "OPTIMIZER_STATE_CACHE reached capacity=%d; "
+                    "continuing exact search with oldest-state eviction",
+                    OPTIMIZER_STATE_CACHE_MAX_ENTRIES,
+                )
+        peak_cache_entries = max(
+            peak_cache_entries,
+            len(best_prefix_by_state),
+        )
 
         lower_bound = (
             current_item_cost
@@ -850,6 +885,20 @@ def _best_multi_store_plan(
             chosen.pop()
 
     search(0, [], frozenset(), 0, {})
+    elapsed_seconds = perf_counter() - search_started_at
+    if cache_evictions or visited_states >= 10_000 or elapsed_seconds >= 1.0:
+        LOGGER.warning(
+            "OPTIMIZER_SEARCH completed elapsed_seconds=%.3f needs=%d "
+            "visited_states=%d memoized_prunes=%d peak_cache_entries=%d "
+            "cache_evictions=%d cache_capacity=%d",
+            elapsed_seconds,
+            len(ordered),
+            visited_states,
+            memoized_prunes,
+            peak_cache_entries,
+            cache_evictions,
+            OPTIMIZER_STATE_CACHE_MAX_ENTRIES,
+        )
     if best_plan is None:
         raise ValueError("No cart satisfies the active store constraints")
     return best_plan

@@ -689,6 +689,26 @@ def run_pipeline(
         ),
     )
     log_process_peak_rss(LOGGER, "after_matching")
+    candidate_store_counts = Counter(
+        len(
+            {
+                candidate.offer.store_id
+                for candidate in need_matches.optimization_candidates
+            }
+        )
+        for need_matches in matches.needs
+    )
+    LOGGER.warning(
+        "OPTIMIZER_INPUT needs=%d candidate_skus=%d "
+        "candidate_store_count_histogram=%s shopping_mode=%s",
+        len(matches.needs),
+        sum(
+            len(need_matches.optimization_candidates)
+            for need_matches in matches.needs
+        ),
+        dict(sorted(candidate_store_counts.items())),
+        session.shopping_mode,
+    )
     if progress_callback is not None:
         progress_callback(
             "optimization",
@@ -1182,6 +1202,7 @@ def _optimize_and_consolidate(
         stores,
         config,
     )
+    log_process_peak_rss(LOGGER, "after_preliminary_optimization")
     consolidation = consolidate_selected_skus(
         unit_needs,
         matches,
@@ -1189,16 +1210,15 @@ def _optimize_and_consolidate(
     )
     if not consolidation.changed:
         return preliminary, consolidation
-    return (
-        _optimize_with_match_candidates(
-            consolidation.unit_needs,
-            consolidation.matches,
-            offers,
-            stores,
-            config,
-        ),
-        consolidation,
+    consolidated_optimization = _optimize_with_match_candidates(
+        consolidation.unit_needs,
+        consolidation.matches,
+        offers,
+        stores,
+        config,
     )
+    log_process_peak_rss(LOGGER, "after_consolidated_optimization")
+    return consolidated_optimization, consolidation
 
 def detect_cart_staleness(
     optimization: OptimizationResult,

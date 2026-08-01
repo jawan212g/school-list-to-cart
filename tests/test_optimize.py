@@ -1,6 +1,9 @@
 """Hand-computed tests for deterministic aggregation and optimization."""
 
 from collections.abc import Mapping
+import logging
+
+import pytest
 
 from agent.aggregate import Requirement, UnitNeed, aggregate_requirements
 from agent.optimize import (
@@ -624,6 +627,60 @@ def test_e25_four_store_six_dollar_saving_is_rejected() -> None:
     assert result.plan.comparison_cost == 4_000
     assert len(result.plan.store_orders) == 1
     assert result.plan.store_orders[0].store_id == "A"
+
+
+def test_exact_search_cache_eviction_does_not_change_the_cart(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Bounded memo storage preserves the exact optimizer result."""
+
+    categories = (
+        "pencils",
+        "glue_sticks",
+        "scissors",
+        "crayons",
+        "folders",
+        "tissues",
+    )
+    store_ids = ("A", "B", "C", "D")
+    needs = [
+        _unit_need(category, {"child-a": index + 1})
+        for index, category in enumerate(categories)
+    ]
+    offers = [
+        _offer(
+            f"{store_id}-{category}",
+            store_id,
+            category,
+            1,
+            90 + category_index * 11 + store_index * 7,
+        )
+        for category_index, category in enumerate(categories)
+        for store_index, store_id in enumerate(store_ids)
+    ]
+    stores = [
+        _store(
+            store_id,
+            pickup_fee=store_index * 13,
+            pickup_minimum=500 + store_index * 100,
+        )
+        for store_index, store_id in enumerate(store_ids)
+    ]
+    config = _config(tax_basis_points=700)
+
+    baseline = optimize_cart(needs, offers, stores, config)
+
+    monkeypatch.setattr(
+        "agent.optimize.OPTIMIZER_STATE_CACHE_MAX_ENTRIES",
+        2,
+    )
+    caplog.set_level(logging.WARNING, logger="agent.optimize")
+    bounded = optimize_cart(needs, offers, stores, config)
+
+    assert bounded == baseline
+    assert "OPTIMIZER_STATE_CACHE reached capacity=2" in caplog.text
+    assert "cache_evictions=" in caplog.text
 
 
 def test_e28_pickup_minimum_fee_changes_store_assignment() -> None:
