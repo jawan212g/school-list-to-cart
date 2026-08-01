@@ -90,6 +90,57 @@ def test_different_quantities_produce_exactly_one_interrupt() -> None:
     assert result.interrupts[0].plausible_annual_maximum == 2
 
 
+def test_machias_folder_wording_produces_one_product_identity_decision() -> None:
+    """BR-13/BR-31: source wording preserves the two folder styles."""
+
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="folders-grade-5",
+                child_id="child-1",
+                raw_text="Pocket folder (bottom pockets) | 5th: 3",
+                canonical_item="folders",
+                quantity=3,
+                source_document="Machiasschoolsupplylist 1.pdf",
+                source_section="5th Grade",
+                source_page=2,
+                attributes={},
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="folders-highly-capable",
+                child_id="child-1",
+                raw_text="2 Pocket folder w/ fasteners",
+                canonical_item="folders",
+                quantity=2,
+                source_document="Machiasschoolsupplylist 1.pdf",
+                source_section="Highly Capable Class",
+                source_page=3,
+                attributes={},
+                extraction_confidence=1.0,
+            ),
+        )
+    )
+
+    _, result = consolidate_extractions({"child-1": envelope})
+    folder_decisions = tuple(
+        decision
+        for decision in item_decisions(result)
+        if decision.canonical_item == "folders"
+    )
+
+    assert tuple(
+        requirement.attributes.style
+        for requirement in envelope.requirements
+    ) == ("bottom pockets", "with fasteners")
+    assert len(folder_decisions) == 1
+    assert folder_decisions[0].conflict_type == "different_products"
+    assert tuple(source.page_number for source in folder_decisions[0].sources) == (
+        2,
+        3,
+    )
+
+
 def test_quantity_total_remains_an_explicit_parent_choice() -> None:
     """BR-30: summing cross-section quantities is available but not default."""
 

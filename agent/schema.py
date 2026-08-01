@@ -206,6 +206,28 @@ def _correct_attribute_fields(
             corrected["style"] = "cap"
             changed = True
 
+    if canonical_item == "folders":
+        has_bottom_pockets = re.search(
+            r"\bbottom\s+pockets?\b",
+            raw_evidence,
+        ) is not None
+        has_fasteners = re.search(
+            r"\b(?:w|with)\s+fasteners?\b",
+            raw_evidence,
+        ) is not None
+        source_style = (
+            "bottom pockets with fasteners"
+            if has_bottom_pockets and has_fasteners
+            else "bottom pockets"
+            if has_bottom_pockets
+            else "with fasteners"
+            if has_fasteners
+            else None
+        )
+        if source_style is not None and corrected.get("style") != source_style:
+            corrected["style"] = source_style
+            changed = True
+
     if (
         canonical_item == "glue_sticks"
         and "large" in raw_evidence.split()

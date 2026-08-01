@@ -9419,53 +9419,8 @@ def _render_personalize_child_sources(
 ) -> None:
     """Place one compact, closed source control above a student's sections."""
 
-    sources = tuple(
-        list_input
-        for list_input in st.session_state.get("list_inputs", ())
-        if list_input.child_id == child_id
-    )
-    if not sources:
-        return
-    section_labels = _personalize_section_labels(
-        st.session_state,
-        child_id,
-    )
-    if section_labels:
-        st.caption(
-            escape_streamlit_dollars(
-                (
-                    "Section read: "
-                    if len(section_labels) == 1
-                    else "Sections read: "
-                )
-                + _join_names(section_labels)
-            )
-        )
-    if len(sources) == 1:
-        source = sources[0]
-        _render_source_reference(
-            st,
-            source,
-            page_number=NONPAGINATED_SOURCE_PAGE,
-            source_line=_personalize_source_line(source),
-            key=f"personalize-source:{child_id}:0",
-            button_label=_personalize_source_button_label(source),
-        )
-        return
-    with st.expander(
-        f"Lists used · {len(sources)}",
-        key=f"personalize-sources:{child_id}:expanded",
-        on_change="rerun",
-    ):
-        for index, source in enumerate(sources):
-            _render_source_reference(
-                st,
-                source,
-                page_number=NONPAGINATED_SOURCE_PAGE,
-                source_line=_personalize_source_line(source),
-                key=f"personalize-source:{child_id}:{index}",
-                button_label=_personalize_source_button_label(source),
-            )
+    del child_label
+    _render_personalize_source_pages_control(st, child_id)
 
 
 def _personalize_source_pages(
@@ -9557,11 +9512,11 @@ def _personalize_source_pages(
     )
 
 
-def _render_personalize_summary_source_control(
+def _render_personalize_source_pages_control(
     st: Any,
     child_id: str,
 ) -> None:
-    """Render every page read for one student inside that student's box."""
+    """Render every page read for one student on either Personalize view."""
 
     sources = tuple(
         source
@@ -9688,7 +9643,7 @@ def _render_personalize_summary(
                         f"**{section.child_label}**"
                     )
                 )
-                _render_personalize_summary_source_control(
+                _render_personalize_source_pages_control(
                     st,
                     section.child_id,
                 )

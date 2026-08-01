@@ -6083,3 +6083,51 @@ low-confidence catalog-match decision remains.
 - The new real-render AppTest is skipped on the local ARM64 installation and
   requires the x86 GitHub Actions run before deployment verification is
   complete.
+
+## 2026-07-31 — Machias folder identity and selected source pages
+
+### Objective
+
+- Preserve the product difference between the 5th Grade bottom-pocket folder
+  and the Highly Capable folder with fasteners, and show both selected PDF
+  pages from the student's full Personalize view.
+
+### Diagnosis
+
+- A live OpenAI vision extraction of pages 2 and 3 returned 32 requirements
+  and retained both folder rows, the selected page tuple `(2, 3)`, and the
+  correct section names. On that run the model also supplied `style` for both
+  folders, and deterministic consolidation produced one different-products
+  decision.
+- The schema did not derive either folder style from the exact source line.
+  If a model run omitted those optional attributes, merge identity depended on
+  residual prose and could fail to surface the intended product decision.
+- The Personalize Summary card already opened every selected page. The full
+  student view still used an older renderer that always requested page 1 for a
+  single uploaded file, ignoring the envelope's selected pages.
+
+### Work completed
+
+- Amended BR-13's existing source-derived attribute behavior so `bottom
+  pockets` and `w/ fasteners` / `with fasteners` deterministically populate a
+  folder's product-defining style before merge identity is frozen. When both
+  phrases occur on one line, the retained style names both features.
+- Routed both Personalize views through the same page collector and source
+  popover. A student with 5th Grade and Highly Capable Class selected now sees
+  page 2 and page 3 in one `Open lists used` control.
+- Added a production-schema merge regression with the model attributes empty,
+  a real-PDF source rendering regression, and an x86 AppTest that verifies the
+  two folder quantity controls reach the duplicate-resolution screen.
+
+### Testing performed
+
+- Before the fix, both focused ARM64 regressions failed: folder styles were
+  `None`, and the full student view exposed only one page-1 source control.
+- Focused after the fix: `2 passed`.
+- `py -3.12-arm64 -m pytest -q`
+  - `485 passed, 1 skipped in 10.16s`.
+
+### Remaining work
+
+- The real-render duplicate-screen regression requires the x86 GitHub Actions
+  runner because Streamlit AppTest is unavailable in the local ARM64 runtime.

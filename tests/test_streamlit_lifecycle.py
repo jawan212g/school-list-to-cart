@@ -1191,6 +1191,91 @@ else:
     return test_app
 
 
+def _run_machias_folder_merge_screen() -> AppTest:
+    """Mount the production duplicate screen with the two Machias folders."""
+
+    test_app = AppTest.from_string(
+        """
+import streamlit as st
+import app
+from agent.requirement_merge import consolidate_extractions
+from agent.schema import ExtractionEnvelope, Requirement
+
+envelope = ExtractionEnvelope(
+    requirements=(
+        Requirement(
+            req_id="folders-grade-5",
+            child_id="child-1",
+            raw_text="Pocket folder (bottom pockets) | 5th: 3",
+            canonical_item="folders",
+            quantity=3,
+            source_document="Machiasschoolsupplylist 1.pdf",
+            source_section="5th Grade",
+            source_page=2,
+            attributes={},
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="folders-highly-capable",
+            child_id="child-1",
+            raw_text="2 Pocket folder w/ fasteners",
+            canonical_item="folders",
+            quantity=2,
+            source_document="Machiasschoolsupplylist 1.pdf",
+            source_section="Highly Capable Class",
+            source_page=3,
+            attributes={},
+            extraction_confidence=1.0,
+        ),
+    )
+)
+_, merge_result = consolidate_extractions({"child-1": envelope})
+st.session_state.setdefault("requirement_merge_result", merge_result)
+st.session_state.setdefault("unmerged_extracted_lists", {"child-1": envelope})
+st.session_state.setdefault(
+    "intake",
+    {
+        "children": (
+            {
+                "child_id": "child-1",
+                "label": "Jawan",
+                "grade": "Grade 5",
+            },
+        )
+    },
+)
+st.session_state.setdefault("list_inputs", ())
+st.session_state.setdefault("screen", "requirement_merge")
+app._render_requirement_merge(st)
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
+def test_machias_folder_styles_reach_the_duplicate_resolution_screen() -> None:
+    """BR-13/BR-31: both real folder lines remain a visible parent choice."""
+
+    test_app = _run_machias_folder_merge_screen()
+
+    assert any(
+        subheader.value == "Folders for Jawan"
+        for subheader in test_app.subheader
+    )
+    assert {
+        number_input.label
+        for number_input in test_app.number_input
+    } == {
+        "Bottom Pockets Folders quantity",
+        "With Fasteners Folders quantity",
+    }
+    assert any(
+        "one product or two?" in expander.label
+        for expander in test_app.expander
+    )
+
+
 def _composition_review_rows(test_app: AppTest) -> tuple[Any, ...]:
     return tuple(_session_value(test_app, "review_items", ()))
 

@@ -4885,6 +4885,109 @@ def test_personalize_summary_opens_typed_and_uploaded_sources(
     assert pasted_only.text_sources == [typed_text]
 
 
+def test_personalize_student_view_opens_every_selected_pdf_page() -> None:
+    """BR-22/BR-52: the full student view shows every section page read."""
+
+    pdf_path = (
+        Path(__file__).parent
+        / "sample_lists"
+        / "Machiasschoolsupplylist 1.pdf"
+    )
+    envelope = ExtractionEnvelope(
+        requirements=(
+            Requirement(
+                req_id="folders-grade-5",
+                child_id="child-1",
+                raw_text="Pocket folder (bottom pockets) | 5th: 3",
+                canonical_item="folders",
+                quantity=3,
+                source_document=pdf_path.name,
+                source_section="5th Grade",
+                source_page=2,
+                extraction_confidence=1.0,
+            ),
+            Requirement(
+                req_id="folders-highly-capable",
+                child_id="child-1",
+                raw_text="2 Pocket folder w/ fasteners",
+                canonical_item="folders",
+                quantity=2,
+                source_document=pdf_path.name,
+                source_section="Highly Capable Class",
+                source_page=3,
+                extraction_confidence=1.0,
+            ),
+        ),
+        document_selection=DocumentSelection(
+            selected_section_ids=("grade-5", "highly-capable"),
+            selected_section_labels=("5th Grade", "Highly Capable Class"),
+            selected_page_numbers=(2, 3),
+        ),
+    )
+
+    class SourceRecorder:
+        def __init__(self) -> None:
+            self.session_state: dict[str, object] = {
+                "list_inputs": (
+                    ListInput(
+                        child_id="child-1",
+                        source=pdf_path.read_bytes(),
+                        mime_type="application/pdf",
+                        document_name=pdf_path.name,
+                    ),
+                ),
+                "extracted_lists": {"child-1": envelope},
+                "source_reference_cache": {},
+            }
+            self.popovers: list[str] = []
+            self.captions: list[str] = []
+            self.markdowns: list[str] = []
+            self.rendered_pages: list[bytes] = []
+
+        def __enter__(self) -> "SourceRecorder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def popover(self, label: str, **kwargs: object) -> "SourceRecorder":
+            del kwargs
+            self.popovers.append(label)
+            return self
+
+        def caption(self, value: object) -> None:
+            self.captions.append(str(value))
+
+        def markdown(self, value: object, **kwargs: object) -> None:
+            del kwargs
+            self.markdowns.append(str(value))
+
+        def image(self, value: bytes, **kwargs: object) -> None:
+            del kwargs
+            self.rendered_pages.append(value)
+
+        def code(self, value: str, **kwargs: object) -> None:
+            raise AssertionError((value, kwargs))
+
+        def info(self, value: object) -> None:
+            raise AssertionError(value)
+
+    recorder = SourceRecorder()
+    app._render_personalize_child_sources(recorder, "child-1", "Jawan")
+
+    assert recorder.popovers == ["Open lists used"]
+    assert len(recorder.rendered_pages) == 2
+    assert any("Sections read: 5th Grade and Highly Capable Class" in value for value in recorder.captions)
+    assert any(
+        pdf_path.name in value and "page 2" in value
+        for value in recorder.markdowns
+    )
+    assert any(
+        pdf_path.name in value and "page 3" in value
+        for value in recorder.markdowns
+    )
+
+
 def test_personalize_source_summary_extracts_scope_and_deduplicates_gaps() -> None:
     """BR-57/BR-58: production rendering names scope and one source gap."""
 
