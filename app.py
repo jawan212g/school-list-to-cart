@@ -15076,7 +15076,7 @@ def _initialize_approval_selection(
     st: Any,
     generation: int,
     presentation: ApprovalDisplayDecision,
-) -> str:
+) -> str | None:
     """Initialize one stable selected option ID before widgets render."""
 
     key = _approval_selection_key(
@@ -15086,6 +15086,8 @@ def _initialize_approval_selection(
     valid_ids = tuple(
         option.alternative_id for option in presentation.options
     )
+    if not valid_ids:
+        return None
     selected_id = st.session_state.get(key)
     if selected_id not in valid_ids:
         selected_id = presentation.options[
@@ -15422,6 +15424,7 @@ def _render_approval(st: Any) -> None:
     if (
         budget_presentation is not None
         and result.budget_analysis is not None
+        and result.session.budget_mode != "per_child"
     ):
         interrupt_id = budget_presentation.interrupt.interrupt_id
         budget_strategy_key = (
@@ -15431,33 +15434,57 @@ def _render_approval(st: Any) -> None:
             option.alternative_id
             for option in budget_presentation.options
         )
-        recommended_id = budget_presentation.options[
-            approval_default_index(budget_presentation.options)
-        ].alternative_id
-        if st.session_state.get(budget_strategy_key) not in strategy_ids:
-            st.session_state[budget_strategy_key] = recommended_id
-        strategy_id = str(st.session_state[budget_strategy_key])
-        strategy = next(
-            option
-            for option in budget_presentation.options
-            if option.alternative_id == strategy_id
+        recommended_option = next(
+            (
+                option
+                for option in budget_presentation.options
+                if option.is_recommended
+            ),
+            budget_presentation.options[0]
+            if budget_presentation.options
+            else None,
         )
-        last_strategy_key = f"{budget_strategy_key}_last"
-        last_strategy_id = st.session_state.get(last_strategy_key)
-        if not strategy_id.endswith("-custom"):
-            checkbox_values = budget_strategy_checkbox_values(
-                strategy,
-                result.budget_analysis.actions,
+        if recommended_option is None:
+            budget_selection_error = (
+                "No budget choices are available. Return to your cart and "
+                "try building the plan again."
             )
-            for action in result.budget_analysis.actions:
-                checkbox_key = (
-                    f"budget_action_{generation}_{action.action_id}"
+            strategy_ids = ()
+        else:
+            recommended_id = recommended_option.alternative_id
+            if st.session_state.get(budget_strategy_key) not in strategy_ids:
+                st.session_state[budget_strategy_key] = recommended_id
+            strategy_id = str(st.session_state[budget_strategy_key])
+            strategy = next(
+                (
+                    option
+                    for option in budget_presentation.options
+                    if option.alternative_id == strategy_id
+                ),
+                None,
+            )
+            if strategy is None:
+                budget_selection_error = (
+                    "The selected budget choice is no longer available. "
+                    "Choose another option."
                 )
-                st.session_state[checkbox_key] = checkbox_values[
-                    action.action_id
-                ]
-        if last_strategy_id != strategy_id:
-            st.session_state[last_strategy_key] = strategy_id
+            else:
+                last_strategy_key = f"{budget_strategy_key}_last"
+                last_strategy_id = st.session_state.get(last_strategy_key)
+                if not strategy_id.endswith("-custom"):
+                    checkbox_values = budget_strategy_checkbox_values(
+                        strategy,
+                        result.budget_analysis.actions,
+                    )
+                    for action in result.budget_analysis.actions:
+                        checkbox_key = (
+                            f"budget_action_{generation}_{action.action_id}"
+                        )
+                        st.session_state[checkbox_key] = checkbox_values[
+                            action.action_id
+                        ]
+                if last_strategy_id != strategy_id:
+                    st.session_state[last_strategy_key] = strategy_id
         budget_selected_ids = tuple(
             action.action_id
             for action in result.budget_analysis.actions
@@ -15499,13 +15526,20 @@ def _render_approval(st: Any) -> None:
             and saved_outcome in valid_ids
         ):
             st.session_state[key] = saved_outcome
-        widget_outcomes[presentation.interrupt.interrupt_id] = (
-            _initialize_approval_selection(
-                st,
-                generation,
-                presentation,
-            )
+        initialized_outcome = _initialize_approval_selection(
+            st,
+            generation,
+            presentation,
         )
+        if initialized_outcome is None:
+            widget_outcomes.pop(
+                presentation.interrupt.interrupt_id,
+                None,
+            )
+        else:
+            widget_outcomes[presentation.interrupt.interrupt_id] = (
+                initialized_outcome
+            )
     effective_budget_ids = (
         budget_selected_ids if budget_evaluation is not None else ()
     )
@@ -15704,6 +15738,7 @@ def _render_approval(st: Any) -> None:
             if (
                 interrupt.kind == "budget_exceeded"
                 and result.budget_analysis is not None
+                and result.session.budget_mode != "per_child"
             ):
                 if budget_evaluation is None or budget_strategy_key is None:
                     st.error(
@@ -15762,12 +15797,17 @@ def _render_approval(st: Any) -> None:
                     strategies_by_id[strategy_id]
                 )
                 custom_option = next(
-                    option
-                    for option in presentation.options
-                    if option.alternative_id.endswith("-custom")
+                    (
+                        option
+                        for option in presentation.options
+                        if option.alternative_id.endswith("-custom")
+                    ),
+                    None,
                 )
 
                 def mark_budget_as_custom() -> None:
+                    if custom_option is None:
+                        return
                     st.session_state[budget_strategy_key] = (
                         custom_option.alternative_id
                     )
@@ -15776,6 +15816,11 @@ def _render_approval(st: Any) -> None:
                     )
 
                 st.markdown("#### Tier 2 — adjust the plan")
+                if custom_option is None:
+                    st.warning(
+                        "These detailed budget adjustments are unavailable "
+                        "for this plan. Choose one of the complete plans above."
+                    )
                 if not result.budget_analysis.substitution_actions:
                     st.caption(
                         "No cheaper stocked substitutions are available."
@@ -16010,7 +16055,26 @@ def _render_approval(st: Any) -> None:
                     st.success("Each individual budget now covers its cost.")
                 elif not unresolved_per_entry_budget_ids:
                     st.success("Every remaining overage has been accepted.")
-                selections[interrupt.interrupt_id] = presentation.options[0]
+                selected_budget_option = next(
+                    (
+                        option
+                        for option in presentation.options
+                        if option.is_recommended
+                    ),
+                    presentation.options[0]
+                    if presentation.options
+                    else None,
+                )
+                if selected_budget_option is None:
+                    st.error(
+                        "No individual-budget action is available. Return to "
+                        "your cart and try building the plan again."
+                    )
+                    unresolved_per_entry_budget_ids.add(
+                        interrupt.interrupt_id
+                    )
+                    continue
+                selections[interrupt.interrupt_id] = selected_budget_option
                 continue
 
             resolution = selection_state.resolutions.get(
@@ -16048,6 +16112,13 @@ def _render_approval(st: Any) -> None:
             catalog_option_count = sum(
                 option.sku is not None for option in presentation.options
             )
+            if not presentation.options:
+                st.error(
+                    "No purchase choices are available for this decision. "
+                    "Return to your cart and try building the plan again."
+                )
+                unconfirmed_product_decisions.add(interrupt.interrupt_id)
+                continue
             st.caption(
                 (
                     "Choose whether to buy this stocked product or source "

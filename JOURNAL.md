@@ -6271,3 +6271,40 @@ low-confidence catalog-match decision remains.
   optimizer, gate threshold, or money calculation changed. This pass only
   canonicalizes deterministic attribute identity and comparison evidence.
 - Exact source lines remain unchanged for provenance.
+
+## 2026-07-31 — Individual-budget approval routing crash
+
+### Objective
+
+- Keep the Decisions to review screen usable when an individual-budget
+  approval has no combined-budget custom-plan option.
+
+### Diagnosis
+
+- The deterministic gate emits one alternative for
+  `approval-budget-per-entry`: raise the affected individual budgets. The
+  presentation builder faithfully retained that single option.
+- The active renderer already had the requested individual-budget controls:
+  a per-entry budget and spend table, live item removals, editable budget
+  amounts, and explicit acceptance of any remaining overage.
+- An earlier shared initialization branch treated every non-null budget
+  analysis as a combined-budget plan. It searched the individual-budget
+  option tuple for an ID ending in `-custom` and raised `StopIteration` before
+  the individual-budget controls could render.
+
+### Work completed
+
+- Restricted combined-budget plan initialization and rendering to combined
+  budget mode, allowing per-entry approvals to reach their dedicated path.
+- Made missing approval options and missing custom-plan options render a
+  recoverable parent-facing message instead of raising from an empty
+  collection.
+- Extended the real x86 Streamlit lifecycle fixture to prove the production
+  individual-budget presentation contains only its one `-raise` option and
+  still renders and recalculates without a custom alternative.
+
+### Testing limitation
+
+- Streamlit AppTest is unavailable in the local Windows ARM64 runtime, so the
+  real-render regression is collected there but executes on the x86 GitHub
+  Actions runner.

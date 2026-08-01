@@ -325,6 +325,18 @@ result = _run_maple(
     budget_mode="per_child",
     budget_allocations=allocations,
 )
+presentations = app.build_approval_presentations(
+    result,
+    tuple(app.load_catalog()),
+    tuple(app.load_stores()),
+    {"grade-2": "Grade 2", "grade-5": "Grade 5"},
+)
+st.session_state["test_individual_budget_option_ids"] = tuple(
+    option.alternative_id
+    for presentation in presentations
+    if presentation.interrupt.interrupt_id == "approval-budget-per-entry"
+    for option in presentation.options
+)
 st.session_state["intake"] = {
     "children": (
         {
@@ -387,6 +399,11 @@ def test_individual_budget_decision_screen_renders_and_recalculates() -> None:
 
     test_app = _run_individual_budget_decision_screen()
 
+    option_ids = tuple(
+        _session_value(test_app, "test_individual_budget_option_ids", ())
+    )
+    assert option_ids == ("approval-budget-per-entry-raise",)
+    assert not any(option_id.endswith("-custom") for option_id in option_ids)
     assert any(
         "individual budgets are over" in str(error.value).casefold()
         for error in test_app.error
