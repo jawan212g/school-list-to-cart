@@ -8,6 +8,8 @@ from typing import Any
 import pytest
 
 import app
+from agent.aggregate import aggregate_requirements
+from agent.normalize import normalize_requirement
 from agent.review import confirmed_requirements
 from agent.rules import SYSTEM_DECISION_PARENT_CHOSE_SCHOOL_PROVIDED_ITEM
 
@@ -1113,12 +1115,15 @@ st.session_state.setdefault(
         "child-1": ExtractionEnvelope(
             requirements=(
                 Requirement(
-                    req_id="red-pens",
+                    req_id="colored-markers",
                     child_id="child-1",
-                    raw_text="1 Pack of Red Pens",
-                    canonical_item="pens",
+                    raw_text="Colored markers",
+                    canonical_item="markers",
                     quantity=1,
                     unit_type="pack",
+                    source_document="Machiasschoolsupplylist 1.pdf",
+                    source_section="Highly Capable Class",
+                    source_page=3,
                     extraction_confidence=1.0,
                 ),
             )
@@ -2615,15 +2620,29 @@ def test_package_count_decision_edits_items_per_package_not_order_quantity() -> 
         for widget in test_app.number_input
         if widget.label == "Items per package"
     )
-    assert package_input.value == 12
-    package_input.set_value(24).run()
+    assert package_input.value == 10
+    package_input.set_value(20).run()
     _assert_no_exception(test_app)
     _click_label(test_app, "Send selection to cart")
 
     item = test_app.session_state["review_items"][0]
-    assert item.package_size == 24
+    assert item.package_size == 20
     assert item.required_quantity == 1
     assert item.unit == "pack"
+    assert not any(
+        widget.label == "Items per package"
+        for widget in test_app.number_input
+    )
+
+    confirmed = confirmed_requirements(
+        (item.model_copy(update={"review_status": "confirmed"}),)
+    )[0]
+    normalized = normalize_requirement(confirmed)
+    cart_need = aggregate_requirements((normalized,))[0]
+
+    assert confirmed.attributes.count == 20
+    assert normalized.quantity == 20
+    assert cart_need.quantity == 20
 
 
 def test_shopping_checklist_survives_reruns_without_changing_the_plan() -> None:

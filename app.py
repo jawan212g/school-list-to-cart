@@ -8508,8 +8508,6 @@ def _approve_personalize_groups(
     state[PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] = frozenset(
         parent_edited
     )
-
-
 def _set_personalize_decision_action(
     state: MutableMapping[str, Any],
     action_key: str,
@@ -9081,6 +9079,7 @@ def _commit_personalize_decision(
     state[PERSONALIZE_PARENT_EDITED_GROUP_IDS_KEY] = frozenset(
         parent_edited
     )
+    state.pop(action_key, None)
 
 
 def _mark_personalize_group_owned(

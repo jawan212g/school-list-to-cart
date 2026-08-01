@@ -6308,3 +6308,37 @@ low-confidence catalog-match decision remains.
 - Streamlit AppTest is unavailable in the local Windows ARM64 runtime, so the
   real-render regression is collected there but executes on the x86 GitHub
   Actions runner.
+
+## 2026-07-31 — Package-quantity editor state and cart handoff
+
+### Objective
+
+- Make the Personalize package-quantity action visibly responsive and prove
+  that the parent-entered package count reaches the cart calculation.
+
+### Diagnosis
+
+- The package editor was correctly gated on a non-widget decision-action key,
+  and the Change button used a Streamlit callback that automatically reran the
+  screen. No explicit rerun was missing.
+- Send selection correctly copied the stepper value into the durable review
+  row, and confirmed-requirement conversion carried it in the structured
+  `count` attribute. The existing test stopped at the review row and did not
+  verify normalization or cart aggregation.
+- The completed edit left the decision-action key behind. Revisiting the card
+  could therefore show the editor immediately; clicking Change wrote the same
+  state again and appeared to do nothing.
+
+### Work completed
+
+- Clear the completed edit-mode key after Send selection commits the durable
+  review-row update.
+- Changed the real-render regression to the reported Page 3 colored-markers
+  shape. It opens the editor, changes 10 items per package to 20, submits,
+  verifies the editor closes, and proves the confirmed requirement,
+  normalized quantity, and aggregated cart need all equal 20.
+
+### Testing limitation
+
+- The behavioral Streamlit regression executes on the x86 Actions runner;
+  Windows ARM64 collects the module as the existing supported skip.
