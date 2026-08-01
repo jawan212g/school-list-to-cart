@@ -63,6 +63,7 @@ from agent.requirement_merge import (
     requirement_source,
 )
 from agent.schema import ExtractionEnvelope, Requirement
+from agent.telemetry import log_process_peak_rss
 from data.loader import Offer, Store, load_catalog, load_stores
 
 
@@ -671,6 +672,7 @@ def run_pipeline(
         normalization.budget_requirements,
         student_counts_by_child=session.student_counts,
     )
+    log_process_peak_rss(LOGGER, "before_matching")
     matches = match_offers(
         unit_needs,
         active_offers,
@@ -686,6 +688,7 @@ def run_pipeline(
             )
         ),
     )
+    log_process_peak_rss(LOGGER, "after_matching")
     if progress_callback is not None:
         progress_callback(
             "optimization",
@@ -709,6 +712,7 @@ def run_pipeline(
         active_stores,
         optimization_config,
     )
+    log_process_peak_rss(LOGGER, "after_optimization")
     final_matches = consolidation.matches
     proposed_cart = _decorate_optimization(optimization, final_matches)
     if progress_callback is not None:

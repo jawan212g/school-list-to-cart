@@ -42,7 +42,7 @@ BR-##, and edge cases E-##.
 ```
 python -m venv .venv
 .venv\Scripts\activate        # Windows
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 copy .streamlit\secrets.toml.example .streamlit\secrets.toml
 # add your API key to .streamlit\secrets.toml
 streamlit run app.py

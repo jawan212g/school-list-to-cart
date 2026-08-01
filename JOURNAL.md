@@ -6131,3 +6131,51 @@ low-confidence catalog-match decision remains.
 
 - The real-render duplicate-screen regression requires the x86 GitHub Actions
   runner because Streamlit AppTest is unavailable in the local ARM64 runtime.
+## 2026-07-31 — Plan-build memory diagnostics and reproducible dependencies
+
+### Objective
+
+- Determine whether the deployed shopping-plan process is approaching the
+  one-gigabyte container ceiling, and prevent dependency drift before the
+  demonstration.
+
+### Work completed
+
+- Added warning-level process peak-RSS checkpoints immediately before
+  matching, immediately after matching, and immediately after deterministic
+  optimization. Linux logs include both MiB and bytes under the stable
+  `PLAN_BUILD_MEMORY` prefix.
+- Replaced every open-ended production dependency with an exact version pin,
+  including Streamlit's currently resolved dependency closure.
+- Moved pytest and its test-only dependencies into `requirements-dev.txt`.
+  Production installs only `requirements.txt`; GitHub Actions and local
+  development install the dev file.
+- Updated the README development setup command and the x86 test workflow to
+  use the dev requirements file.
+
+### Decisions and limitations
+
+- Peak RSS uses the standard-library operating-system counter rather than a
+  new monitoring dependency. It reports a high-water mark on Streamlit
+  Cloud's Debian host and logs an explicit unavailable value on platforms
+  without that counter.
+- If the process is killed during matching, the pre-matching checkpoint will
+  be present but the post-matching checkpoint cannot run. The three requested
+  checkpoints can distinguish a completed matching or optimization surge but
+  cannot replace container-level monitoring during an abrupt kill.
+- Python itself is controlled by Streamlit Community Cloud deployment
+  settings, not `requirements.txt`. The existing deployed interpreter remains
+  fixed unless the app is deleted and redeployed.
+
+### Testing performed
+
+- Complete production and development dependency resolution succeeded with
+  exact pins.
+- `py -3.12-arm64 -m pytest -q`: `486 passed, 1 skipped in 18.85s`.
+- `py -3.12-arm64 -m pip check`: no broken requirements.
+
+### Recommended next step
+
+- Deploy, repeat the failing shopping-plan build, and compare the three
+  `PLAN_BUILD_MEMORY` entries. Remove the temporary extraction diagnostic once
+  the Machias dump has been captured.

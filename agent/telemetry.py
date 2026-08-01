@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import dataclass, field
 from time import perf_counter
 
@@ -17,6 +18,39 @@ class ElapsedTimer:
         """Return elapsed wall-clock seconds."""
 
         return perf_counter() - self.started_at
+
+
+def _process_peak_rss_bytes() -> int | None:
+    """Return the process high-water RSS using the host operating system."""
+
+    try:
+        import resource
+    except ImportError:
+        return None
+    peak_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return peak_rss if sys.platform == "darwin" else peak_rss * 1024
+
+
+def log_process_peak_rss(
+    logger: logging.Logger,
+    stage: str,
+) -> None:
+    """Log peak resident memory without participating in plan calculations."""
+
+    peak_rss_bytes = _process_peak_rss_bytes()
+    if peak_rss_bytes is None:
+        logger.warning(
+            "PLAN_BUILD_MEMORY stage=%s peak_rss=unavailable platform=%s",
+            stage,
+            sys.platform,
+        )
+        return
+    logger.warning(
+        "PLAN_BUILD_MEMORY stage=%s peak_rss_mib=%.1f peak_rss_bytes=%d",
+        stage,
+        peak_rss_bytes / (1024 * 1024),
+        peak_rss_bytes,
+    )
 
 
 def log_operation_success(
