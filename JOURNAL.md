@@ -6019,3 +6019,35 @@ low-confidence catalog-match decision remains.
   wording, and exact composition of item removals with added individual funds.
 - `py -3.12-arm64 -m pytest -q`
   - `483 passed, 1 skipped in 16.38s`.
+
+## 2026-07-31 — Advanced preferences stay open during edits
+
+### Objective
+
+- Keep `Advanced shopping and tax options` open when changing the pickup-trip
+  radius or another control inside that disclosure.
+
+### Work completed
+
+- Diagnosed the collapse as an unkeyed Streamlit expander remounting with its
+  default closed state on the radius widget's normal rerun.
+- Gave the disclosure a stable key and routed its open state through the same
+  durable, non-widget state mechanism used by Personalize expanders.
+- Renamed that shared helper to describe its application-wide purpose rather
+  than one screen.
+
+### Testing performed
+
+- Added an x86 AppTest that opens the production Shopping preferences
+  disclosure, changes the pickup radius to 6.5 miles, and asserts that the
+  disclosure remains open and the new value remains selected.
+- Updated the narrow renderer fixture to accept and verify the production
+  expander's keyed Streamlit signature; it does not stand in for the browser
+  behavior test.
+- Focused ARM64 run: `141 passed, 1 skipped`.
+
+### Limitations and next step
+
+- Streamlit AppTest does not run on this ARM64 installation. The new behavioral
+  regression must be confirmed by the x86 GitHub Actions runner before this
+  fix is treated as deployed-verified.

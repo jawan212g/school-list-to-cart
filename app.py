@@ -5257,6 +5257,12 @@ def update_pickup_radius_for_fulfillment(
     return fulfillment_preference == "delivery"
 
 
+def intake_advanced_options_expander_key() -> str:
+    """Return the stable disclosure identity for advanced setup options."""
+
+    return "intake-advanced-shopping-and-tax:expanded"
+
+
 def intake_entry_display_number(
     state: Mapping[str, Any],
     index: int,
@@ -6156,7 +6162,16 @@ def _render_preferences_step(st: Any) -> None:
         )
         st.session_state["maximum_stores"] = maximum_stores
 
-    with st.expander("Advanced shopping and tax options"):
+    advanced_options_key = intake_advanced_options_expander_key()
+    with st.expander(
+        "Advanced shopping and tax options",
+        expanded=_durable_expander_open_state(
+            st.session_state,
+            advanced_options_key,
+        ),
+        key=advanced_options_key,
+        on_change="rerun",
+    ):
         st.caption(
             "Adjust distance, pickup or delivery, and tax."
         )
@@ -8593,7 +8608,7 @@ def personalize_summary_decisions_expander_key(child_id: str) -> str:
     return f"personalize-summary-decisions:{child_id}:expanded"
 
 
-def _personalize_expander_open_state(
+def _durable_expander_open_state(
     state: MutableMapping[str, Any],
     expander_key: str,
     *,
@@ -9715,7 +9730,7 @@ def _render_personalize_summary(
                 )
                 with st.expander(
                     "Review decisions",
-                    expanded=_personalize_expander_open_state(
+                    expanded=_durable_expander_open_state(
                         st.session_state,
                         decision_expander_key,
                     ),
@@ -11055,7 +11070,7 @@ def _render_settled_review_row(
                 student_counts_by_child=student_counts_by_child,
             )
         ),
-        expanded=_personalize_expander_open_state(
+        expanded=_durable_expander_open_state(
             st.session_state,
             expander_key,
             open_state_key=personalize_row_open_state_key(key_prefix),

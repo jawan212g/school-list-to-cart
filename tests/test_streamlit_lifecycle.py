@@ -1469,6 +1469,43 @@ def test_preferences_survive_banner_widget_cleanup_and_remount() -> None:
     ).value == "8.125"
 
 
+def test_advanced_preferences_stay_open_when_pickup_radius_changes() -> None:
+    """FR-04: editing radius does not collapse its keyed disclosure."""
+
+    test_app = _complete_students(_run_app(), ("Maya",))
+    _click_label(test_app, "Continue to shopping preferences")
+    expander_key = app.intake_advanced_options_expander_key()
+
+    test_app.session_state[expander_key] = True
+    test_app.run()
+    _assert_no_exception(test_app)
+    advanced = next(
+        expander
+        for expander in test_app.expander
+        if expander.label == "Advanced shopping and tax options"
+    )
+    assert advanced.proto.expanded is True
+
+    _set_widget(
+        test_app,
+        "number_input",
+        "store_radius_miles",
+        6.5,
+    )
+    _assert_no_exception(test_app)
+    advanced = next(
+        expander
+        for expander in test_app.expander
+        if expander.label == "Advanced shopping and tax options"
+    )
+    assert advanced.proto.expanded is True
+    assert _widget(
+        test_app,
+        "number_input",
+        "store_radius_miles",
+    ).value == 6.5
+
+
 def test_untouched_defaults_are_committed_before_continue() -> None:
     """FR-03/FR-04/BR-02: displayed defaults reach the intake plan untouched."""
 

@@ -675,8 +675,13 @@ def test_preferences_renderer_builds_intake_from_durable_values() -> None:
             raise AssertionError(value)
 
         @staticmethod
-        def expander(label: str) -> ExpanderContext:
-            del label
+        def expander(
+            label: str,
+            **kwargs: object,
+        ) -> ExpanderContext:
+            assert label == "Advanced shopping and tax options"
+            assert kwargs["key"] == app.intake_advanced_options_expander_key()
+            assert kwargs["on_change"] == "rerun"
             return ExpanderContext()
 
         @classmethod
