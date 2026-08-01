@@ -298,6 +298,60 @@ app._render_approval(st)
     return test_app
 
 
+def _run_individual_budget_decision_screen() -> AppTest:
+    """Mount the real cart-decision screen with one entry over budget."""
+
+    test_app = AppTest.from_string(
+        """
+import sys
+from pathlib import Path
+
+import streamlit as st
+import app
+
+tests_path = str(Path.cwd() / "tests")
+if tests_path not in sys.path:
+    sys.path.insert(0, tests_path)
+from conftest import load_frozen_maple_fixture
+from test_maple_cart import _run_maple
+
+app._initialize_state(st)
+fixture = load_frozen_maple_fixture()
+allocations = {"grade-2": 3_000, "grade-5": 20_000}
+result = _run_maple(
+    fixture.extractions,
+    fixture.judge,
+    budget_cents=sum(allocations.values()),
+    budget_mode="per_child",
+    budget_allocations=allocations,
+)
+st.session_state["intake"] = {
+    "children": (
+        {
+            "child_id": "grade-2",
+            "label": "Grade 2",
+            "grade": "Grade 2",
+        },
+        {
+            "child_id": "grade-5",
+            "label": "Grade 5",
+            "grade": "Grade 5",
+        },
+    ),
+    "budget_total": sum(allocations.values()),
+    "budget_mode": "per_child",
+    "budget_allocations": allocations,
+}
+st.session_state["result"] = result
+st.session_state["screen"] = "approval"
+app._render_approval(st)
+"""
+    )
+    test_app.run()
+    _assert_no_exception(test_app)
+    return test_app
+
+
 def test_cart_decision_uses_one_stage_appropriate_approval_action() -> None:
     """FR-27: post-match cards choose products without Personalize actions."""
 
@@ -326,6 +380,28 @@ def test_cart_decision_uses_one_stage_appropriate_approval_action() -> None:
         if button.label == "Save decisions and continue"
     )
     assert continue_button.disabled is False
+
+
+def test_individual_budget_decision_screen_renders_and_recalculates() -> None:
+    """BR-04: the production screen evaluates per-entry budgets before render."""
+
+    test_app = _run_individual_budget_decision_screen()
+
+    assert any(
+        "individual budgets are over" in str(error.value).casefold()
+        for error in test_app.error
+    )
+    budget_input = next(
+        item
+        for item in test_app.text_input
+        if item.label == "Grade 2's budget ($)"
+    )
+    budget_input.set_value("60.00").run()
+    _assert_no_exception(test_app)
+    assert any(
+        "each individual budget now covers its cost" in str(success.value).casefold()
+        for success in test_app.success
+    )
 
 
 def _run_section_screen() -> AppTest:

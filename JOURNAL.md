@@ -6051,3 +6051,35 @@ low-confidence catalog-match decision remains.
 - Streamlit AppTest does not run on this ARM64 installation. The new behavioral
   regression must be confirmed by the x86 GitHub Actions runner before this
   fix is treated as deployed-verified.
+
+## 2026-07-31 — Individual-budget decision screen crash
+
+### Diagnosis
+
+- The deployed log contained Streamlit's generic failure page but no Python
+  traceback. The failing production path was nevertheless deterministic in
+  the current source: `_render_approval()` read
+  `per_entry_budget_evaluation` while rendering an individual-budget card,
+  before that local variable was assigned below the final Continue button.
+- A per-entry budget overage therefore raised `UnboundLocalError` during the
+  first render. Combined-budget render tests did not enter this branch, and
+  the existing per-entry test called the evaluator directly instead of
+  rendering the screen.
+
+### What changed
+
+- Moved the existing deterministic per-entry evaluation ahead of the decision
+  card render and reused its exact optimization result for the visible plan.
+  No budget, pricing, tax, matching, or optimizer calculation changed.
+- Added an x86 AppTest that mounts `_render_approval()` with the frozen Maple
+  extraction fixture in real per-entry budget mode, verifies the overage card
+  renders, edits the affected allocation, and verifies the exact recalculation
+  completes without an exception.
+
+### Testing performed
+
+- `py -3.12-arm64 -m pytest -q`
+  - `483 passed, 1 skipped in 16.93s`.
+- The new real-render AppTest is skipped on the local ARM64 installation and
+  requires the x86 GitHub Actions run before deployment verification is
+  complete.

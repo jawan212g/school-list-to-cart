@@ -15624,6 +15624,21 @@ def _render_approval(st: Any) -> None:
             else None
         ),
     )
+    per_entry_budget_evaluation: PerEntryBudgetEvaluation | None = None
+    if (
+        per_entry_budget_interrupt is not None
+        and per_entry_budget_error is None
+    ):
+        per_entry_budget_evaluation = evaluate_per_entry_budget_adjustments(
+            result,
+            presentations,
+            selection_state.active_outcomes,
+            per_entry_omitted_source_ids,
+            per_entry_budget_values,
+            offers,
+            stores,
+        )
+        current_optimization = per_entry_budget_evaluation.optimization
 
     st.header("Decisions to review")
     if st.session_state.get("catalog_change_notice"):
@@ -16155,21 +16170,6 @@ def _render_approval(st: Any) -> None:
             or bool(unresolved_per_entry_budget_ids)
         ),
     )
-    per_entry_budget_evaluation: PerEntryBudgetEvaluation | None = None
-    if (
-        per_entry_budget_interrupt is not None
-        and per_entry_budget_error is None
-    ):
-        per_entry_budget_evaluation = evaluate_per_entry_budget_adjustments(
-            result,
-            presentations,
-            selection_state.active_outcomes,
-            per_entry_omitted_source_ids,
-            per_entry_budget_values,
-            offers,
-            stores,
-        )
-        current_optimization = per_entry_budget_evaluation.optimization
     if not submitted:
         return
 
