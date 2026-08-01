@@ -6342,3 +6342,42 @@ low-confidence catalog-match decision remains.
 
 - The behavioral Streamlit regression executes on the x86 Actions runner;
   Windows ARM64 collects the module as the existing supported skip.
+
+## 2026-07-31 — Exact two-entry demo browser hardening
+
+### Objective
+
+- Run the Kevin Grade 5 plus Mr. Smith Kindergarten classroom scenario in a
+  real browser and remove the defects preventing the final shopping plan.
+
+### Live-browser findings and fixes
+
+- Per-entry budget mode still built the combined-budget recommendation matrix,
+  causing dozens of unnecessary exact optimizer searches. Per-entry mode now
+  uses its dedicated budget gate and lists removable products from the already
+  computed cart without repricing each row.
+- Submitting item removals together with product approvals reused a preview
+  computed before the product approvals, so the final consistency check rejected
+  a valid combination. The submitted cart now derives once from the complete
+  set of parent choices, and every approved SKU remains fixed during that search.
+- An accepted individual budget was applied to the stale pre-removal cart,
+  raising `Authorized budget cannot remain below total cost`. It now applies to
+  the approved cart containing the parent's removals and product choices.
+- A stock or price change preserved an old budget approval even when the new
+  plan exceeded that authorized amount. Any budget interrupt that remains after
+  a catalog change is reopened; unaffected product approvals remain preserved.
+- Returning from Shopping plan to Personalize could reuse a stale Streamlit
+  button key and crash. Personalize now advances its visit identity whenever the
+  screen is re-entered, matching the existing Shopping plan mechanism.
+
+### Verified outcome
+
+- The exact browser session reached Shopping plan with classroom quantities of
+  20 glue sticks, 50 pencils, and 30 sticky-note pads; the final plan displayed
+  $184.93 total cost, 22 products, 6 items not in the cart, and 3 shopping stops.
+- The summary shows each student/classroom's cost and retains the starting budget
+  separately from a parent-authorized increase.
+- A simulated stockout rebuilt the cart, changed the total, reopened the affected
+  product approval, and preserved unrelated approvals. A second live defect in
+  the budget-preservation branch was fixed from that run.
+- ARM64 suite: 499 passed, 1 skipped.

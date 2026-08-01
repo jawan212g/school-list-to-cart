@@ -322,6 +322,50 @@ def build_required_item_removal_choices(
     )
 
 
+def build_required_item_removal_entries(
+    optimization: OptimizationResult,
+    unit_needs: Sequence[UnitNeed],
+) -> tuple[RequiredItemRemovalChoice, ...]:
+    """List removable required items without repricing each one (FR-28)."""
+
+    lines_by_need: dict[tuple[str, ...], list[CartLine]] = {}
+    for line in _selected_lines(optimization):
+        lines_by_need.setdefault(
+            line.source_requirement_ids,
+            [],
+        ).append(line)
+
+    entries = tuple(
+        RequiredItemRemovalChoice(
+            canonical_item=need.canonical_item,
+            source_requirement_ids=need.source_requirement_ids,
+            affected_line_ids=tuple(
+                line.line_id
+                for line in lines_by_need.get(
+                    need.source_requirement_ids,
+                    (),
+                )
+            ),
+            allocated_to=need.allocated_to,
+            cost_delta_cents=0,
+            item_subtotal_delta_cents=0,
+            tax_delta_cents=0,
+            fulfillment_fee_delta_cents=0,
+        )
+        for need in unit_needs
+        if lines_by_need.get(need.source_requirement_ids)
+    )
+    return tuple(
+        sorted(
+            entries,
+            key=lambda entry: (
+                entry.canonical_item,
+                entry.source_requirement_ids,
+            ),
+        )
+    )
+
+
 def removal_cost_context(
     interrupt: ApprovalInterrupt,
     optimization: OptimizationResult,

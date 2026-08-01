@@ -9,6 +9,7 @@ from agent.addons import AddOnItem, AddOnProposal
 from agent.aggregate import UnitNeed
 from agent.approval_options import (
     build_catalog_approval_choices,
+    build_required_item_removal_entries,
     removal_cost_context,
 )
 from agent.budget_plans import (
@@ -312,6 +313,46 @@ def test_no_exact_match_keeps_catalog_choices_and_self_source_last(
     )
 
 
+def test_per_entry_removal_entries_use_the_existing_cart_without_repricing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FR-28: the individual-budget item list is derived from the built cart."""
+
+    stores = (_store("VALUE", "Value Depot"),)
+    offers = (
+        _offer("PENCIL", "VALUE", "Value Pencils", "pencils", 12, 240),
+    )
+    needs = (
+        _need("pencils", 12, {"kevin": 12}, {}, "kevin:pencils"),
+    )
+    config = OptimizationConfig(
+        shopping_mode="budget",
+        fulfillment_preference="pickup",
+        tax_basis_points=0,
+    )
+    matches = match_offers(needs, offers, stores)
+    optimization = optimize_cart(
+        needs,
+        offers,
+        stores,
+        config,
+        candidate_skus_by_need=matches.candidate_skus_by_need,
+    )
+
+    monkeypatch.setattr(
+        "agent.approval_options.optimize_cart",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("the existing cart should not be repriced")
+        ),
+    )
+    entries = build_required_item_removal_entries(optimization, needs)
+
+    assert len(entries) == 1
+    assert entries[0].canonical_item == "pencils"
+    assert entries[0].source_requirement_ids == ("kevin:pencils",)
+    assert entries[0].allocated_to == {"kevin": 12}
+
+
 def test_approval_confirmation_records_only_the_visible_selection() -> None:
     """FR-27: cart-stage approval records the selected product, not edits."""
 
@@ -327,6 +368,83 @@ def test_approval_confirmation_records_only_the_visible_selection() -> None:
         "selection": "catalog-choice",
         "confirmed-selection": "catalog-choice",
     }
+
+
+def test_approved_current_product_remains_forced_during_another_replan() -> None:
+    """FR-27: a fresh budget search cannot replace an approved product."""
+
+    stores = (_store("VALUE", "Value Depot"),)
+    offer = _offer(
+        "PENCIL-CURRENT",
+        "VALUE",
+        "Current Pencils",
+        "pencils",
+        12,
+        240,
+    )
+    need = _need("pencils", 12, {"kevin": 12}, {}, "kevin:pencils")
+    matches, optimization, _ = _approval_fixture(
+        (need,),
+        (offer,),
+        stores,
+        OptimizationConfig(
+            shopping_mode="budget",
+            fulfillment_preference="pickup",
+            tax_basis_points=0,
+        ),
+    )
+    interrupt = ApprovalInterrupt(
+        interrupt_id="approve-pencils",
+        kind="major_substitution",
+        message="Approve pencils.",
+        recommendation="Use Current Pencils.",
+        alternatives=(),
+        cost_impact_cents=0,
+        source_requirement_ids=need.source_requirement_ids,
+        sku=offer.sku,
+    )
+    option = app.ApprovalDisplayOption(
+        alternative_id="approve-current",
+        label="Current Pencils",
+        cost_delta_cents=0,
+        purchase_price_cents=240,
+        sku=offer.sku,
+        source_requirement_ids=need.source_requirement_ids,
+        is_current_product=True,
+        is_recommended=True,
+    )
+    presentation = app.ApprovalDisplayDecision(
+        interrupt=interrupt,
+        item_name="Pencils",
+        heading="Pencils — substitution",
+        message="Approve pencils.",
+        recommendation="Use Current Pencils.",
+        affected_children=("Kevin",),
+        options=(option,),
+    )
+    result = _pipeline_result(
+        session=PipelineSession(
+            session_id="current-product-replan",
+            children=("kevin",),
+            budget_total=1_000,
+            fulfillment_pref="pickup",
+            tax_basis_points=0,
+        ),
+        needs=(need,),
+        matches=matches,
+        optimization=optimization,
+        batch=ApprovalBatch(interrupts=(interrupt,), raw_interrupt_count=1),
+    )
+
+    omitted, forced = app._selected_requirement_constraints(
+        result,
+        (presentation,),
+        {interrupt.interrupt_id: option.alternative_id},
+        (),
+    )
+
+    assert omitted == frozenset()
+    assert forced == {need.source_requirement_ids: frozenset({offer.sku})}
 
 
 def test_substitution_removal_keeps_internal_delta_but_shows_no_purchase() -> None:
@@ -549,7 +667,7 @@ def test_self_source_option_uses_the_same_spacing_as_other_options() -> None:
     assert label.startswith("Do not buy this")
     assert "────────" not in label
     assert caption.startswith("Source-it-yourself choice")
-    assert "Saves \\$3.00" in caption
+    assert "Saves" not in caption
 
 
 def test_budget_interrupt_has_ranked_item_choices_and_applies_selection() -> None:

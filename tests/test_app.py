@@ -2344,7 +2344,8 @@ def test_no_budget_summary_shows_cost_without_budget_comparison() -> None:
         app.WARM_COPY,
     )
 
-    assert column_counts == [3]
+    assert column_counts == [4]
+    assert ("metric:Not in this cart", "0") in events
     assert ("caption", "No budget comparison selected.") in events
     assert any(kind == "metric:Total cost" for kind, _ in events)
     assert any(kind == "metric:Products to buy" for kind, _ in events)
@@ -2426,6 +2427,24 @@ def test_shopping_plan_controls_are_scoped_to_one_view_visit() -> None:
         key="stable-line-id",
     )
     assert rendered_keys[2] != rendered_keys[1]
+
+
+def test_personalize_buttons_remount_only_when_the_screen_is_reentered() -> None:
+    """A Personalize revisit cannot reuse a stale Streamlit button key."""
+
+    state: dict[str, object] = {
+        app.PERSONALIZE_VIEW_REVISION_KEY: 2,
+        app.PERSONALIZE_LAST_SCREEN_KEY: "summary",
+    }
+
+    app._sync_personalize_visit(state, "review")
+    first_visit = state[app.PERSONALIZE_VIEW_REVISION_KEY]
+    app._sync_personalize_visit(state, "review")
+    assert state[app.PERSONALIZE_VIEW_REVISION_KEY] == first_visit
+
+    app._sync_personalize_visit(state, "summary")
+    app._sync_personalize_visit(state, "review")
+    assert state[app.PERSONALIZE_VIEW_REVISION_KEY] == first_visit + 1
 
 
 def test_shopping_checklist_is_durable_and_cannot_change_the_plan() -> None:

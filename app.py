@@ -34,6 +34,7 @@ from agent.approval_options import (
     CatalogApprovalChoice,
     RemovalCostContext,
     build_catalog_approval_choices,
+    build_required_item_removal_entries,
     build_required_item_removal_choices,
     removal_cost_context,
 )
@@ -234,6 +235,7 @@ PERSONALIZE_SOURCE_CHANGE_NOTICES_KEY = (
 )
 SHOPPING_PLAN_VIEW_REVISION_KEY = "shopping_plan_view_revision"
 SHOPPING_PLAN_LAST_SCREEN_KEY = "shopping_plan_last_screen"
+PERSONALIZE_LAST_SCREEN_KEY = "personalize_last_screen"
 SHOPPING_CHECKLIST_TICKS_KEY = "shopping_plan_checklist_ticks"
 SHOPPING_LIST_PREVIEW_ITEM_COUNT = 4
 WORK_EPISODE_COUNTER_KEY = "working_progress_episode_counter"
@@ -2886,8 +2888,6 @@ def approval_option_caption(option: ApprovalDisplayOption) -> str:
         parts.append(
             "Source-it-yourself choice — required item remains unmet."
         )
-    if option.explanation:
-        parts.append(option.explanation)
     if not parts:
         parts.append("Alternative.")
     return escape_streamlit_dollars(" ".join(parts))
@@ -3021,7 +3021,9 @@ def _selected_requirement_constraints(
     for _, option in _selected_approval_options(presentations, outcomes):
         if option.leaves_required_unmet:
             omitted.add(option.source_requirement_ids)
-        elif option.sku is not None and not option.is_current_product:
+        elif option.sku is not None:
+            # A product the parent approved remains authoritative when another
+            # choice (such as removing a budget item) causes a fresh search.
             forced[option.source_requirement_ids] = frozenset({option.sku})
     return frozenset(omitted), forced
 
@@ -3394,11 +3396,7 @@ def _apply_approval_outcomes(
     generic_forced_skus = {
         option.source_requirement_ids: frozenset({option.sku})
         for _, option in selected
-        if (
-            option.sku is not None
-            and not option.is_current_product
-            and not option.leaves_required_unmet
-        )
+        if option.sku is not None and not option.leaves_required_unmet
     }
     unmet_source_ids = set(generic_unmet_source_ids)
     forced_skus = dict(generic_forced_skus)
@@ -3839,6 +3837,7 @@ def _initialize_state(st: Any) -> None:
         "checkout_confirmation": None,
         SHOPPING_PLAN_VIEW_REVISION_KEY: 0,
         SHOPPING_PLAN_LAST_SCREEN_KEY: None,
+        PERSONALIZE_LAST_SCREEN_KEY: None,
         SHOPPING_CHECKLIST_TICKS_KEY: {},
         "stockout_skus": frozenset(),
         "price_overrides": {},
@@ -3874,6 +3873,20 @@ def _sync_shopping_plan_visit(
             int(state.get(SHOPPING_PLAN_VIEW_REVISION_KEY, 0)) + 1
         )
     state[SHOPPING_PLAN_LAST_SCREEN_KEY] = screen
+
+
+def _sync_personalize_visit(
+    state: MutableMapping[str, Any],
+    screen: str,
+) -> None:
+    """Advance button identity whenever Personalize is entered again."""
+
+    previous_screen = state.get(PERSONALIZE_LAST_SCREEN_KEY)
+    if screen == "review" and previous_screen != "review":
+        state[PERSONALIZE_VIEW_REVISION_KEY] = (
+            int(state.get(PERSONALIZE_VIEW_REVISION_KEY, 0)) + 1
+        )
+    state[PERSONALIZE_LAST_SCREEN_KEY] = screen
 
 
 def _persistent_notice(st: Any) -> None:
@@ -15370,13 +15383,9 @@ def _render_approval(st: Any) -> None:
         )
         per_entry_removal_choices = tuple(
             choice
-            for choice in build_required_item_removal_choices(
+            for choice in build_required_item_removal_entries(
                 result.proposed_cart,
-                result.matches,
                 result.purchase_needs,
-                offers,
-                stores,
-                _optimization_config(result),
             )
             if initially_over.intersection(choice.allocated_to)
         )
@@ -16092,16 +16101,6 @@ def _render_approval(st: Any) -> None:
                 continue
             st.markdown("**What the list asks for**")
             st.write(escape_streamlit_dollars(presentation.message))
-            presentation = _reprice_approval_presentation(
-                presentation,
-                result,
-                presentations,
-                selection_state.active_outcomes,
-                effective_budget_ids,
-                current_optimization,
-                offers,
-                stores,
-            )
             st.markdown("**Current recommendation**")
             st.info(
                 escape_streamlit_dollars(
@@ -16264,25 +16263,37 @@ def _render_approval(st: Any) -> None:
         )
 
     try:
-        approved_optimization = _apply_approval_outcomes(
-            result.proposed_cart,
-            result.matches,
-            result.purchase_needs,
-            presentations,
-            outcomes,
-            offers,
-            stores,
-            _optimization_config(result),
-            budget_analysis=result.budget_analysis,
-            budget_action_ids=budget_selected_ids,
-            precomputed_budget_optimization=(
-                None
-                if budget_evaluation is None
-                else budget_evaluation.optimization
-            ),
-        )
         if per_entry_budget_evaluation is not None:
-            approved_optimization = per_entry_budget_evaluation.optimization
+            # Re-evaluate from the complete submitted state.  The preview was
+            # calculated before the parent confirmed the product cards, so
+            # reusing it here would silently discard those approvals.
+            approved_optimization = evaluate_per_entry_budget_adjustments(
+                result,
+                presentations,
+                outcomes,
+                per_entry_omitted_source_ids,
+                per_entry_budget_values,
+                offers,
+                stores,
+            ).optimization
+        else:
+            approved_optimization = _apply_approval_outcomes(
+                result.proposed_cart,
+                result.matches,
+                result.purchase_needs,
+                presentations,
+                outcomes,
+                offers,
+                stores,
+                _optimization_config(result),
+                budget_analysis=result.budget_analysis,
+                budget_action_ids=budget_selected_ids,
+                precomputed_budget_optimization=(
+                    None
+                    if budget_evaluation is None
+                    else budget_evaluation.optimization
+                ),
+            )
     except ValueError as error:
         st.error(escape_streamlit_dollars(str(error)))
         return
@@ -16341,12 +16352,15 @@ def _render_approval(st: Any) -> None:
                 budget_total=updated_budget_total,
                 budget_allocations=updated_allocations,
             ),
-            proposed_cart=apply_authorized_budget(
-                result.proposed_cart,
-                updated_budget_total,
-            ),
+            # The accepted budget applies to the cart after all submitted
+            # removals and product choices, not to the now-stale original cart.
+            proposed_cart=approved_optimization,
         )
         updated_intake = dict(intake)
+        updated_intake.setdefault(
+            "initial_budget_allocations",
+            dict(original_allocations),
+        )
         updated_intake["budget_total"] = updated_budget_total
         updated_intake["budget_allocations"] = updated_allocations
         st.session_state["intake"] = updated_intake
@@ -16754,6 +16768,7 @@ def _render_per_child(
     optimization: OptimizationResult,
     children: Sequence[Mapping[str, Any]],
     allocations: Mapping[str, int],
+    initial_allocations: Mapping[str, int] | None = None,
 ) -> None:
     item_costs: dict[str, int] = {}
     landed_costs: dict[str, int] = {}
@@ -16775,9 +16790,16 @@ def _render_per_child(
                 landed_costs.get(child_id, 0)
             ),
         }
-        if child_id in allocations:
-            variance = allocations[child_id] - landed_costs.get(child_id, 0)
-            row["Budget difference"] = (
+        starting_allocations = initial_allocations or allocations
+        if child_id in starting_allocations:
+            starting_budget = starting_allocations[child_id]
+            row["Starting budget"] = format_streamlit_money(starting_budget)
+            if allocations.get(child_id) != starting_budget:
+                row["Approved budget"] = format_streamlit_money(
+                    allocations.get(child_id, starting_budget)
+                )
+            variance = starting_budget - landed_costs.get(child_id, 0)
+            row["Difference from starting budget"] = (
                 f"{format_streamlit_money(abs(variance))} left"
                 if variance >= 0
                 else f"{format_streamlit_money(abs(variance))} over"
@@ -17740,6 +17762,7 @@ def _render_summary_headline(
     budget_mode: str = "combined",
     budget_allocations: Mapping[str, int] | None = None,
     child_labels: Mapping[str, str] | None = None,
+    excluded_count: int = 0,
 ) -> None:
     """Lead with cost, budget status, and plan completeness."""
 
@@ -17796,13 +17819,14 @@ def _render_summary_headline(
     store_count = sum(
         len(plan.store_orders) for plan in _plans(optimization)
     )
-    columns = st.columns(3)
+    columns = st.columns(4)
     columns[0].metric(
         "Total cost",
         format_streamlit_money(optimization.landed_cost),
     )
     columns[1].metric("Products to buy", str(item_count))
-    columns[2].metric("Shopping stops", str(store_count))
+    columns[2].metric("Not in this cart", str(excluded_count))
+    columns[3].metric("Shopping stops", str(store_count))
     if budget_cents is None:
         st.caption("No budget comparison selected.")
     elif budget_mode == "per_child":
@@ -17975,6 +17999,25 @@ def _render_summary(st: Any) -> None:
     )
     copy = select_copy_set(tone_state)
 
+    review_items = tuple(st.session_state.get("review_items", ()))
+    personalized_left_out = sum(
+        1
+        for item in review_items
+        if (
+            item.optional
+            or item.provided_by_school
+            or item.review_status == "deleted"
+            or item.already_owned
+            or item.required_quantity == EXCLUDED_REQUIREMENT_QUANTITY
+            or item.condition_applies is False
+        )
+    )
+    excluded_count = (
+        personalized_left_out
+        + len(self_sourced_decisions)
+        + len(required_optimization.unfulfilled_gap_items)
+    )
+
     # 1. The plan's condition comes before every detail when it needs attention.
     _render_summary_headline(
         st,
@@ -17985,8 +18028,17 @@ def _render_summary(st: Any) -> None:
         str(intake["budget_mode"]),
         intake["budget_allocations"],
         child_labels,
+        excluded_count,
     )
     _render_cost_summary(st, optimization, stores)
+    st.subheader("Budget by student or classroom")
+    _render_per_child(
+        st,
+        optimization,
+        children,
+        intake["budget_allocations"],
+        intake.get("initial_budget_allocations"),
+    )
     if st.session_state.get("catalog_change_notice"):
         st.info(
             escape_streamlit_dollars(
@@ -18031,18 +18083,6 @@ def _render_summary(st: Any) -> None:
     )
 
     # 4. Supporting detail follows the store-organized shopping task.
-    with st.expander(
-        "Cost for each student or classroom",
-        key="cost-by-student",
-        expanded=False,
-    ):
-        _render_per_child(
-            st,
-            optimization,
-            children,
-            intake["budget_allocations"],
-        )
-
     # 6. Routine equivalents collapse to one line; consequential choices remain.
     with st.expander(
         "Product and package choices",
@@ -18869,6 +18909,7 @@ def main() -> None:
     _apply_custom_css(st)
     screen = st.session_state["screen"]
     _sync_shopping_plan_visit(st.session_state, screen)
+    _sync_personalize_visit(st.session_state, screen)
     _sync_work_episode_for_screen(st.session_state, screen)
     _render_app_title(st)
     _render_requested_next_task_scroll(st)

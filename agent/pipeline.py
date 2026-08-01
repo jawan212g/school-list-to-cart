@@ -775,13 +775,17 @@ def run_pipeline(
         optimization_config,
         student_counts_by_child=session.student_counts,
     )
-    budget_analysis = build_budget_analysis(
-        proposed_cart,
-        final_matches,
-        consolidation.unit_needs,
-        active_offers,
-        active_stores,
-        optimization_config,
+    budget_analysis = (
+        build_budget_analysis(
+            proposed_cart,
+            final_matches,
+            consolidation.unit_needs,
+            active_offers,
+            active_stores,
+            optimization_config,
+        )
+        if session.budget_mode == "combined"
+        else None
     )
     if progress_callback is not None:
         progress_callback(
@@ -1060,13 +1064,17 @@ def replan_after_catalog_change(
         config,
         student_counts_by_child=prior.session.student_counts,
     )
-    budget_analysis = build_budget_analysis(
-        proposed_cart,
-        final_matches,
-        consolidation.unit_needs,
-        active_offers,
-        active_stores,
-        config,
+    budget_analysis = (
+        build_budget_analysis(
+            proposed_cart,
+            final_matches,
+            consolidation.unit_needs,
+            active_offers,
+            active_stores,
+            config,
+        )
+        if prior.session.budget_mode == "combined"
+        else None
     )
     result = PipelineResult(
         session=prior.session,
@@ -1091,7 +1099,24 @@ def replan_after_catalog_change(
     )
     current_ids = frozenset(_ungrouped_interrupt_ids(approval_batch))
     previous_outcomes = approval_outcomes or {}
-    preserved_outcomes = dict(previous_outcomes)
+    current_budget_ids = frozenset(
+        child.interrupt_id
+        for interrupt in approval_batch.interrupts
+        for child in (
+            interrupt.grouped_interrupts
+            if interrupt.grouped_interrupts
+            else (interrupt,)
+        )
+        if child.kind == "budget_exceeded"
+    )
+    preserved_outcomes = {
+        interrupt_id: outcome
+        for interrupt_id, outcome in previous_outcomes.items()
+        if (
+            interrupt_id in current_ids
+            and interrupt_id not in current_budget_ids
+        )
+    }
     preserved_budget_actions = tuple(dict.fromkeys(budget_action_ids))
     return ReplanTransition(
         result=result,

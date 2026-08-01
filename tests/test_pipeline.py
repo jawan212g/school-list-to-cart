@@ -260,6 +260,7 @@ def test_per_entry_budgets_reach_cost_attribution_and_budget_review() -> None:
     assert tuple(
         interrupt.kind for interrupt in result.approval_batch.interrupts
     ) == ("budget_exceeded",)
+    assert result.budget_analysis is None
 
 
 def test_per_entry_overage_is_not_masked_by_another_entry_headroom() -> None:
