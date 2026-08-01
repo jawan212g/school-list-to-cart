@@ -6220,3 +6220,54 @@ low-confidence catalog-match decision remains.
   exact result.
 - A focused regression forces eviction at a two-state capacity and asserts
   the complete `OptimizationResult` is identical to the unbounded result.
+
+## 2026-07-31 — Model-populated BR-13 attribute canonicalization
+
+### Objective
+
+- Ensure deterministic attribute vocabularies normalize model-populated
+  values before same-product identity is frozen, including the live Machias
+  `graph paper` ruling.
+
+### Diagnosis
+
+- Source correction and later normalization already knew several equivalent
+  spellings, but the validated `Requirement` retained a model-populated value
+  whenever the same slot was non-empty. The production schema therefore kept
+  `graph paper`, `wide ruling`, and `pencil top eraser` instead of their
+  canonical values.
+- Six new production-schema assertions failed before the fix. The existing
+  empty-slot tests did not exercise this model-populated path.
+- The current merge reconciler does not consult the value allowlist at
+  `rules.py:543`; it treats any two non-empty values in a product-defining
+  field as a conflict. A direct replay of `graph paper` versus `lined` already
+  produced a different-products decision before this change. The
+  canonicalization defect was real, but by itself does not fully explain a
+  deployed card that disappeared; stale state or a different live path would
+  still need evidence if that symptom recurs.
+- Matching had a second consumer split: it canonicalized the requested value
+  but tokenized the catalog value without the same canonical pass. Once the
+  shared ruling vocabulary used `wide-ruled`, that split correctly surfaced
+  as two frozen-baseline substitution failures and was fixed at the shared
+  comparison boundary rather than by changing the tests.
+
+### Work completed
+
+- Centralized BR-13 text, approximation, measurement-unit, and field-alias
+  canonicalization in `agent/rules.py`.
+- Applied the same function to model-filled and source-corrected schema slots,
+  later requirement normalization, and both sides of catalog attribute
+  comparison.
+- Expanded the ruling, tip-style, eraser-style, and material vocabularies so
+  their canonical spellings are stable. `graph paper` and `graph` now both
+  become `graph`; wide and college ruling use the existing parent-readable
+  `wide-ruled` and `college-ruled` forms.
+- Added a live-shaped Machias merge regression and production-schema coverage
+  for every alias registered in BR-13, not only empty attribute slots.
+
+### Architecture and limitations
+
+- No model call, extraction prompt, quantity, matching eligibility, price,
+  optimizer, gate threshold, or money calculation changed. This pass only
+  canonicalizes deterministic attribute identity and comparison evidence.
+- Exact source lines remain unchanged for provenance.

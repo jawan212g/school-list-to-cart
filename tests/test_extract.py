@@ -24,6 +24,7 @@ from agent.schema import (
     Requirement,
 )
 from agent.rules import (
+    ATTRIBUTE_VALUE_ALIASES_BY_FIELD,
     EXTRACTION_TEXT_MODEL_TIMEOUT_SECONDS,
     VISION_MODEL_CALL_TIMEOUT_SECONDS,
 )
@@ -1421,6 +1422,109 @@ def test_production_schema_captures_product_defining_rulings(
     )
 
     assert requirement.attributes.ruling == expected_ruling
+
+
+@pytest.mark.parametrize(
+    ("field_name", "model_value", "expected_value", "raw_text", "item"),
+    (
+        (
+            "ruling",
+            "graph paper",
+            "graph",
+            "1 graph paper composition notebook",
+            "composition_notebooks",
+        ),
+        (
+            "ruling",
+            "wide ruling",
+            "wide-ruled",
+            "1 wide ruling composition notebook",
+            "composition_notebooks",
+        ),
+        (
+            "ruling",
+            "college ruling",
+            "college-ruled",
+            "1 college ruling notebook paper",
+            "notebook_paper",
+        ),
+        (
+            "tip_style",
+            "fine point",
+            "fine",
+            "1 fine point permanent marker",
+            "permanent_markers",
+        ),
+        (
+            "tip_style",
+            "ultra fine tip",
+            "ultra-fine",
+            "1 ultra fine tip permanent marker",
+            "permanent_markers",
+        ),
+        (
+            "style",
+            "pencil top eraser",
+            "cap",
+            "1 pencil top eraser",
+            "erasers",
+        ),
+        (
+            "material",
+            "polypropylene",
+            "plastic",
+            "1 polypropylene folder",
+            "folders",
+        ),
+    ),
+)
+def test_model_populated_br13_attribute_vocabulary_is_canonicalized(
+    field_name: str,
+    model_value: str,
+    expected_value: str,
+    raw_text: str,
+    item: str,
+) -> None:
+    """BR-13: model-filled slots use the same deterministic vocabulary."""
+
+    requirement = Requirement(
+        req_id=f"model-{field_name}",
+        child_id="child-1",
+        raw_text=raw_text,
+        canonical_item=item,
+        quantity=1,
+        attributes={field_name: model_value},
+        extraction_confidence=1.0,
+    )
+
+    assert getattr(requirement.attributes, field_name) == expected_value
+
+
+def test_every_br13_alias_passes_through_the_production_schema() -> None:
+    """BR-13: every field vocabulary applies when the model filled the slot."""
+
+    contexts = {
+        "ruling": ("composition_notebooks", "composition notebook"),
+        "tip_style": ("permanent_markers", "permanent marker"),
+        "style": ("erasers", "eraser"),
+        "material": ("folders", "folder"),
+    }
+    for field_name, aliases in ATTRIBUTE_VALUE_ALIASES_BY_FIELD.items():
+        item, noun = contexts[field_name]
+        for model_value, expected_value in aliases.items():
+            requirement = Requirement(
+                req_id=f"{field_name}-{model_value}",
+                child_id="child-1",
+                raw_text=f"1 {model_value} {noun}",
+                canonical_item=item,
+                quantity=1,
+                attributes={field_name: model_value},
+                extraction_confidence=1.0,
+            )
+            assert (
+                getattr(requirement.attributes, field_name)
+                == expected_value
+            )
 
 
 def test_regular_composition_descriptor_means_lined_ruling() -> None:

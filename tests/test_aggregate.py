@@ -113,5 +113,5 @@ def test_br13_equivalent_attribute_spelling_aggregates_one_need() -> None:
 
     assert len(needs) == 1
     assert needs[0].quantity == 3
-    assert needs[0].attributes["ruling"] == "wide"
+    assert needs[0].attributes["ruling"] == "wide-ruled"
     assert needs[0].allocated_to == {"a": 1, "b": 2}

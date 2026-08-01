@@ -481,6 +481,46 @@ def test_graph_and_regular_composition_books_are_different_products() -> None:
     )
 
 
+def test_model_populated_graph_paper_ruling_stays_separate_from_lined() -> None:
+    """BR-13/BR-31: live model phrasing cannot hide a ruling conflict."""
+
+    requirements = (
+        Requirement(
+            req_id="graph-model-value",
+            child_id="child-1",
+            raw_text="Composition book (sewn binding) - graph paper | 5th: 1",
+            canonical_item="composition_notebooks",
+            quantity=1,
+            attributes={"ruling": "graph paper"},
+            source_document="Machiasschoolsupplylist 1.pdf",
+            source_section="5th",
+            source_page=2,
+            extraction_confidence=1.0,
+        ),
+        Requirement(
+            req_id="lined-model-value",
+            child_id="child-1",
+            raw_text="4 Regular composition books",
+            canonical_item="composition_notebooks",
+            quantity=4,
+            attributes={"ruling": "lined"},
+            source_document="Machiasschoolsupplylist 1.pdf",
+            source_section="Highly Capable Class",
+            source_page=3,
+            extraction_confidence=1.0,
+        ),
+    )
+
+    assert requirements[0].attributes.ruling == "graph"
+    result = consolidate_requirements(requirements)
+    decision = item_decisions(result)[0]
+    assert decision.conflict_type == "different_products"
+    assert decision.default_identity == "different"
+    assert tuple(
+        variant.attributes.ruling for variant in decision.variants
+    ) == ("graph", "lined")
+
+
 def test_reviewed_composition_identity_keeps_quantity_review_open() -> None:
     """BR-44: product identity does not confirm unread variant quantities."""
 

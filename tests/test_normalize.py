@@ -83,8 +83,8 @@ def test_br13_attribute_spelling_is_normalized_before_identity() -> None:
         )
     )
 
-    assert hyphenated.attributes["ruling"] == "wide"
-    assert spaced.attributes["ruling"] == "wide"
+    assert hyphenated.attributes["ruling"] == "wide-ruled"
+    assert spaced.attributes["ruling"] == "wide-ruled"
     assert pencil_box.attributes["size"] == "8 inch"
 
 

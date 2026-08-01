@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from agent.rules import (
     AMBIGUOUS_PRODUCT_DESCRIPTORS,
+    ATTRIBUTE_VALUE_ALIASES_BY_FIELD,
     CORRECTED_EXTRACTION_CONFIDENCE,
     ITEM_FULFILLMENT_PREFERENCE_DEFAULT,
     NONPAGINATED_SOURCE_PAGE,
@@ -18,6 +19,7 @@ from agent.rules import (
     PACKAGE_QUANTITY_STATE_DEFAULT,
     QUANTITY_ONLY_SOURCE_LINE_PATTERN,
     canonical_item_from_source,
+    canonicalize_attribute_text,
     explicit_package_count,
     preferred_brand_from_source,
     required_brand_from_source,
@@ -295,6 +297,25 @@ def _correct_attribute_fields(
         unsupported_value_removed = (
             unsupported_value_removed or original_material is not None
         )
+
+    for field_name in ATTRIBUTE_VALUE_ALIASES_BY_FIELD:
+        value = corrected.get(field_name)
+        if isinstance(value, str):
+            canonical_value = canonicalize_attribute_text(
+                field_name,
+                value,
+            )
+            if canonical_value != value:
+                corrected[field_name] = canonical_value
+                changed = True
+        elif isinstance(value, tuple):
+            canonical_values = tuple(
+                canonicalize_attribute_text(field_name, item)
+                for item in value
+            )
+            if canonical_values != value:
+                corrected[field_name] = canonical_values
+                changed = True
 
     return corrected, changed, unsupported_value_removed
 

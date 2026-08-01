@@ -9,7 +9,6 @@ from decimal import Decimal
 
 from agent.rules import (
     ALLOWED_CATEGORIES,
-    ATTRIBUTE_VALUE_ALIASES_BY_FIELD,
     CANONICAL_ITEM_ALIASES,
     CONFIDENCE_FLOOR,
     COUNT_BASED_CATEGORIES,
@@ -18,35 +17,9 @@ from agent.rules import (
     PAPER_CATEGORIES,
     REAM_SHEET_COUNT,
     STANDARD_CONTAINER_CONTENT_COUNTS,
+    canonicalize_attribute_text,
 )
 from agent.schema import AttributeValue, Requirement, UnitType
-
-
-ATTRIBUTE_APPROXIMATION_WORDS = frozenset({"about", "approx", "approximately"})
-ATTRIBUTE_UNIT_ALIASES = {
-    "in": "inch",
-    "inch": "inch",
-    "inches": "inch",
-    "oz": "ounce",
-    "ounce": "ounce",
-    "ounces": "ounce",
-}
-
-
-def _normalize_attribute_text(field_name: str, value: str) -> str:
-    """Canonicalize extracted attribute text before identity is frozen (BR-13)."""
-
-    words = re.findall(r"#?\d+(?:\.\d+)?|[a-z0-9]+", value.casefold())
-    normalized = [
-        ATTRIBUTE_UNIT_ALIASES.get(word, word)
-        for word in words
-        if word not in ATTRIBUTE_APPROXIMATION_WORDS
-    ]
-    normalized_text = " ".join(normalized)
-    return ATTRIBUTE_VALUE_ALIASES_BY_FIELD.get(field_name, {}).get(
-        normalized_text,
-        normalized_text,
-    )
 
 
 def normalize_attribute_values(
@@ -57,13 +30,13 @@ def normalize_attribute_values(
     normalized: dict[str, AttributeValue] = {}
     for field_name, value in attributes.items():
         if isinstance(value, str):
-            normalized[field_name] = _normalize_attribute_text(
+            normalized[field_name] = canonicalize_attribute_text(
                 field_name,
                 value,
             )
         elif isinstance(value, tuple):
             normalized[field_name] = tuple(
-                _normalize_attribute_text(field_name, item)
+                canonicalize_attribute_text(field_name, item)
                 for item in value
             )
         else:

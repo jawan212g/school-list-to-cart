@@ -1041,20 +1041,29 @@ ATTRIBUTE_SENSITIVE_FIELDS = frozenset(
 
 ATTRIBUTE_VALUE_ALIASES_BY_FIELD = {
     "ruling": {
-        "wide ruled": "wide",
-        "wide ruling": "wide",
-        "college ruled": "college",
-        "college ruling": "college",
+        "wide": "wide-ruled",
+        "wide ruled": "wide-ruled",
+        "wide ruling": "wide-ruled",
+        "college": "college-ruled",
+        "college ruled": "college-ruled",
+        "college ruling": "college-ruled",
+        "graph paper": "graph",
+        "graph ruled": "graph",
+        "quad paper": "quad",
+        "quad ruled": "quad",
     },
     "tip_style": {
         "fine tip": "fine",
         "fine point": "fine",
-        "ultra fine tip": "ultra fine",
-        "ultra fine point": "ultra fine",
+        "ultra fine": "ultra-fine",
+        "ultra fine tip": "ultra-fine",
+        "ultra fine point": "ultra-fine",
         "chisel tip": "chisel",
         "chisel point": "chisel",
         "blunt tip": "blunt",
         "rounded tip": "blunt",
+        "rounded point": "blunt",
+        "pointed tip": "pointed",
     },
     "style": {
         "pencil top": "cap",
@@ -1070,9 +1079,41 @@ ATTRIBUTE_VALUE_ALIASES_BY_FIELD = {
     },
 }
 # BR-13 amended: safe source and catalog synonyms are canonicalized by
-# attribute field before requirement identity and matching are frozen. A model
-# spelling such as "fine tip" cannot create a substitution from catalog
-# spelling "fine", while genuinely different attribute values stay distinct.
+# attribute field before requirement identity and matching are frozen,
+# regardless of whether the model or deterministic source correction filled
+# the slot. A model spelling such as "fine tip" cannot create a substitution
+# from catalog spelling "fine", while genuinely different values stay distinct.
+
+ATTRIBUTE_APPROXIMATION_WORDS = frozenset(
+    {"about", "approx", "approximately"}
+)
+ATTRIBUTE_UNIT_ALIASES = {
+    "in": "inch",
+    "inch": "inch",
+    "inches": "inch",
+    "oz": "ounce",
+    "ounce": "ounce",
+    "ounces": "ounce",
+}
+
+
+def canonicalize_attribute_text(field_name: str, value: object) -> str:
+    """Canonicalize one BR-13 attribute value regardless of its producer."""
+
+    words = re.findall(
+        r"#?\d+(?:\.\d+)?|[a-z0-9]+",
+        str(value).casefold(),
+    )
+    normalized = [
+        ATTRIBUTE_UNIT_ALIASES.get(word, word)
+        for word in words
+        if word not in ATTRIBUTE_APPROXIMATION_WORDS
+    ]
+    normalized_text = " ".join(normalized)
+    return ATTRIBUTE_VALUE_ALIASES_BY_FIELD.get(field_name, {}).get(
+        normalized_text,
+        normalized_text,
+    )
 
 PREFERENCE_DEPENDENT_ATTRIBUTES = frozenset(
     {"acceptable_colors", "color", "character", "style"}

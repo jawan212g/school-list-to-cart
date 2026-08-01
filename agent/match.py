@@ -29,7 +29,6 @@ from agent.store_scope import (
 )
 from agent.rules import (
     ATTRIBUTE_SENSITIVE_FIELDS,
-    ATTRIBUTE_VALUE_ALIASES_BY_FIELD,
     CONFIDENCE_FLOOR,
     MAXIMUM_MATCH_CONFIDENCE,
     MINIMUM_MATCH_CONFIDENCE,
@@ -39,6 +38,7 @@ from agent.rules import (
     SUBSTITUTION_MAJOR,
     SUBSTITUTION_MINOR,
     SUBSTITUTION_NONE,
+    canonicalize_attribute_text,
     pack_count_difference_is_major,
 )
 from agent.telemetry import (
@@ -488,11 +488,7 @@ def _normalized_words(value: object) -> tuple[str, ...]:
 
 
 def _normalized_value(value: object, field_name: str) -> str:
-    text = " ".join(_normalized_words(value))
-    return ATTRIBUTE_VALUE_ALIASES_BY_FIELD.get(field_name, {}).get(
-        text,
-        text,
-    )
+    return canonicalize_attribute_text(field_name, value)
 
 
 def _attribute_words(
@@ -500,7 +496,10 @@ def _attribute_words(
     field_name: str,
 ) -> frozenset[str]:
     words = frozenset(
-        word.rstrip(".") for word in _normalized_words(value)
+        word.rstrip(".")
+        for word in _normalized_words(
+            canonicalize_attribute_text(field_name, value)
+        )
     )
     if field_name != "size":
         return words
