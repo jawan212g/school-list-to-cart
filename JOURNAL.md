@@ -5976,3 +5976,46 @@ low-confidence catalog-match decision remains.
   inside the new test with out-of-scope variables. The test is now a separate
   function after the complete pre-existing test; no application behavior was
   changed to address that test-authoring error.
+
+## 2026-07-31 — Shopping decisions use one complete-plan view
+
+### What changed
+
+- Corrected the approval screen's unavailable block to use only requirements
+  that remain unfulfilled. In single-store mode, `gap_items` also names items
+  supplied by the priced minimum second trip; those products are purchasable
+  and must not simultaneously be called unavailable.
+- The item metric and store checklist now read the same store-order line
+  collection through one helper, preventing display consumers from deriving
+  the plan count independently.
+- Rebuilt individual-budget review as composable deterministic actions. A
+  parent can remove priced required items, raise individual allocations, or
+  explicitly accept the exact residual overage. Every interaction reoptimizes
+  cached needs and candidates, including tax and fulfillment fees; extraction
+  and matching do not rerun.
+- Substitution cards now name concrete attribute or package differences and
+  omit the parent-facing severity word `major`. The internal interrupt kind is
+  unchanged. The source-it-yourself option no longer repeats its no-purchase
+  phrase.
+- Added a final bulk control that approves all currently displayed product
+  recommendations while retaining each per-card approval.
+
+### Defect finding
+
+- The unavailable contradiction was a semantic split inside one optimization
+  result: the approval card correctly consumed the primary plus second-trip
+  lines, while the unavailable block treated the primary store's raw gaps as
+  final unmet requirements. `unfulfilled_gap_items` was already the canonical
+  completed-plan answer but that screen did not use it.
+- The displayed item total and the shopping collection had separate count
+  expressions. They now share the exact rendered store-order collection.
+
+### Testing performed
+
+- Added a single-store regression proving a raw primary-store gap supplied on
+  the second trip does not render in `Items to buy elsewhere`.
+- Added a regression tying the displayed product count to the final store-order
+  collection, concrete connector-difference copy, nonduplicated no-purchase
+  wording, and exact composition of item removals with added individual funds.
+- `py -3.12-arm64 -m pytest -q`
+  - `483 passed, 1 skipped in 16.38s`.

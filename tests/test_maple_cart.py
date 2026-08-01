@@ -12,7 +12,7 @@ import app
 from agent.budget_plans import evaluate_budget_actions
 from agent.gate import GateContext, evaluate_gate
 from agent.match import MatchResult, NeedMatches, SuitabilityJudge
-from agent.optimize import OptimizationConfig
+from agent.optimize import OptimizationConfig, per_entry_landed_costs
 from agent.pipeline import (
     PipelineResult,
     PipelineSession,
@@ -34,6 +34,8 @@ def _run_maple(
     allowed_stores: frozenset[str] | None = None,
     max_stores: int | None = None,
     offers: Sequence[Offer] | None = None,
+    budget_mode: str = "combined",
+    budget_allocations: Mapping[str, int] | None = None,
 ) -> PipelineResult:
     """Run the same confirmed-input pipeline used after Personalize."""
 
@@ -45,6 +47,8 @@ def _run_maple(
             ),
             children=("grade-2", "grade-5"),
             budget_total=budget_cents,
+            budget_mode=budget_mode,  # type: ignore[arg-type]
+            budget_allocations=budget_allocations or {},
             shopping_mode=shopping_mode,  # type: ignore[arg-type]
             store_radius_miles=10.0,
             allowed_stores=allowed_stores,
@@ -57,6 +61,137 @@ def _run_maple(
         offers=tuple(load_catalog() if offers is None else offers),
         suitability_judge=judge,
     )
+
+
+def test_single_store_second_trip_is_not_presented_as_unavailable(
+    frozen_maple_fixture: Any,
+) -> None:
+    """A product supplied on the priced second trip is not buy-elsewhere work."""
+
+    result = _run_maple(
+        frozen_maple_fixture.extractions,
+        frozen_maple_fixture.judge,
+        budget_cents=15_000,
+        shopping_mode="single_stop",
+    )
+    events: list[str] = []
+
+    class Metric:
+        def metric(self, label: str, value: str) -> None:
+            events.append(f"{label}:{value}")
+
+    class Context:
+        def subheader(self, value: str, **_: object) -> None:
+            events.append(value)
+
+        def columns(self, count: int) -> tuple[Metric, ...]:
+            return tuple(Metric() for _ in range(count))
+
+        def container(self, **_: object) -> object:
+            raise AssertionError("A fulfilled second-trip item was called unavailable")
+
+    assert result.proposed_cart.gap_items
+    assert result.proposed_cart.unfulfilled_gap_items == ()
+    app._render_approval_plan_context(
+        Context(),
+        result,
+        result.proposed_cart,
+        {"grade-2": "Grade 2", "grade-5": "Grade 5"},
+    )
+    assert not any("Items to buy elsewhere" in event for event in events)
+
+
+def test_plan_item_metric_uses_the_final_store_collection(
+    frozen_maple_fixture: Any,
+) -> None:
+    """The summary count and final checklist read one canonical collection."""
+
+    result = _run_maple(
+        frozen_maple_fixture.extractions,
+        frozen_maple_fixture.judge,
+        budget_cents=15_000,
+        shopping_mode="single_stop",
+    )
+    rendered_lines = tuple(
+        line
+        for plan in (
+            result.proposed_cart.plan,
+            result.proposed_cart.minimum_second_trip,
+        )
+        if plan is not None
+        for order in plan.store_orders
+        for line in order.lines
+    )
+
+    assert app.shopping_plan_lines(result.proposed_cart) == rendered_lines
+    assert app.shopping_plan_item_count(result.proposed_cart) == len(
+        rendered_lines
+    )
+
+
+def test_individual_budget_removal_and_added_funds_compose_exactly(
+    frozen_maple_fixture: Any,
+) -> None:
+    """BR-04: item removals and added funds resolve one per-entry gap together."""
+
+    allocations = {"grade-2": 3_000, "grade-5": 20_000}
+    result = _run_maple(
+        frozen_maple_fixture.extractions,
+        frozen_maple_fixture.judge,
+        budget_cents=sum(allocations.values()),
+        budget_mode="per_child",
+        budget_allocations=allocations,
+    )
+    offers = tuple(load_catalog())
+    stores = tuple(load_stores())
+    presentations = app.build_approval_presentations(
+        result,
+        offers,
+        stores,
+        {"grade-2": "Grade 2", "grade-5": "Grade 5"},
+    )
+    removal = next(
+        choice
+        for choice in app.build_required_item_removal_choices(
+            result.proposed_cart,
+            result.matches,
+            result.purchase_needs,
+            offers,
+            stores,
+            app._optimization_config(result),
+        )
+        if "grade-2" in choice.allocated_to
+    )
+    after_removal = app.evaluate_per_entry_budget_adjustments(
+        result,
+        presentations,
+        {},
+        frozenset({removal.source_requirement_ids}),
+        allocations,
+        offers,
+        stores,
+    )
+    increased = dict(allocations)
+    increased["grade-2"] += 3_000
+    combined = app.evaluate_per_entry_budget_adjustments(
+        result,
+        presentations,
+        {},
+        frozenset({removal.source_requirement_ids}),
+        increased,
+        offers,
+        stores,
+    )
+    grade2_spend = per_entry_landed_costs(
+        after_removal.optimization
+    ).get("grade-2", 0)
+
+    assert combined.optimization.landed_cost == after_removal.optimization.landed_cost
+    assert combined.overages.get("grade-2", 0) == max(
+        grade2_spend - increased["grade-2"],
+        0,
+    )
+    assert combined.overages == {}
 
 
 def _gate_context(

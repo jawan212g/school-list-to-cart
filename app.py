@@ -559,6 +559,16 @@ class ApprovalSelectionState:
 
 
 @dataclass(frozen=True)
+class PerEntryBudgetEvaluation:
+    """Exact cart and overages after composable individual-budget edits."""
+
+    optimization: OptimizationResult
+    budgets: Mapping[str, int]
+    overages: Mapping[str, int]
+    omitted_source_requirement_ids: frozenset[tuple[str, ...]]
+
+
+@dataclass(frozen=True)
 class ToneState:
     """Plan conditions that switch the entire screen to plain language."""
 
@@ -1779,6 +1789,35 @@ def _humanize_internal_text(
     return re.sub(r"\bentry\b", "student", visible, flags=re.I)
 
 
+def shopping_plan_lines(
+    optimization: OptimizationResult,
+) -> tuple[CartLine, ...]:
+    """Return the exact product lines rendered in the store checklists."""
+
+    return tuple(
+        line
+        for plan in _plans(optimization)
+        for order in plan.store_orders
+        for line in order.lines
+    )
+
+
+def shopping_plan_item_count(optimization: OptimizationResult) -> int:
+    """Count products once from the final store-order collection."""
+
+    return len(shopping_plan_lines(optimization))
+
+
+def _per_entry_budget_keep_key(
+    generation: int,
+    source_requirement_ids: Sequence[str],
+) -> str:
+    identity = hashlib.sha256(
+        "|".join(source_requirement_ids).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"per-entry-budget:{generation}:{identity}:keep"
+
+
 def _interrupt_item_name(
     result: PipelineResult,
     interrupt: ApprovalInterrupt,
@@ -1902,6 +1941,111 @@ def _attribute_labels(
         for reason in candidate.substitution_reasons
         if reason.startswith(prefix)
     )
+
+
+def _plain_attribute_value(value: object) -> str | None:
+    """Render one catalog or list attribute without exposing field syntax."""
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value).replace("_", " ")
+
+
+def _substitution_question(
+    result: PipelineResult,
+    line: CartLine,
+    offer: Offer | None,
+) -> str:
+    """Explain the concrete stocked-product difference that needs approval."""
+
+    need = next(
+        (
+            candidate
+            for candidate in result.purchase_needs
+            if candidate.source_requirement_ids == line.source_requirement_ids
+        ),
+        None,
+    )
+    candidate = result.matches.candidate(
+        line.source_requirement_ids,
+        line.sku,
+    )
+    reasons = () if candidate is None else candidate.substitution_reasons
+    differences: list[str] = []
+    for reason in reasons:
+        if reason.startswith("attribute_change:"):
+            field_name = reason.removeprefix("attribute_change:")
+            field_label = ATTRIBUTE_DISPLAY_NAMES.get(
+                field_name,
+                field_name.replace("_", " "),
+            )
+            requested = (
+                _plain_attribute_value(need.attributes.get(field_name))
+                if need is not None
+                else None
+            )
+            aliases = ATTRIBUTE_OFFER_KEYS.get(field_name, (field_name,))
+            offered = (
+                next(
+                    (
+                        _plain_attribute_value(offer.attributes.get(alias))
+                        for alias in aliases
+                        if _plain_attribute_value(
+                            offer.attributes.get(alias)
+                        )
+                        is not None
+                    ),
+                    None,
+                )
+                if offer is not None
+                else None
+            )
+            if requested is not None and offered is not None:
+                differences.append(
+                    f"The list asks for {requested} {field_label}; "
+                    f"this option has {offered} {field_label}."
+                )
+            else:
+                differences.append(
+                    f"This option differs from the list in its {field_label}."
+                )
+        elif reason == "pack_count_difference":
+            requested_count = (
+                _plain_attribute_value(need.attributes.get("count"))
+                if need is not None
+                else None
+            )
+            offered_count = (
+                str(offer.pack_size) if offer is not None else None
+            )
+            if requested_count is not None and offered_count is not None:
+                differences.append(
+                    f"The list asks for {requested_count} per package; "
+                    f"this option contains {offered_count}."
+                )
+            else:
+                differences.append(
+                    "This option has a different package count from the list."
+                )
+        elif reason == "brand_lock_break":
+            requested_brand = need.brand_lock if need is not None else None
+            offered_brand = offer.brand if offer is not None else None
+            if requested_brand and offered_brand:
+                differences.append(
+                    f"The list requires {requested_brand}; this option is "
+                    f"{offered_brand}."
+                )
+            else:
+                differences.append(
+                    "This option uses a different brand from the list."
+                )
+    if not differences:
+        differences.append(
+            "This stocked product differs from what the list asks for."
+        )
+    return " ".join(differences) + " Is that acceptable?"
 
 
 def _source_lines(
@@ -2569,7 +2713,7 @@ def _approval_heading(
 ) -> str:
     item_name = _interrupt_item_name(result, interrupt, line)
     if interrupt.kind == "major_substitution":
-        return f"{item_name} — major substitution"
+        return f"{item_name} — substitution"
     if interrupt.kind == "attribute_choice":
         attributes = _attribute_labels(result, line)
         detail = _join_names(attributes) if attributes else "requested details"
@@ -2608,15 +2752,9 @@ def _approval_message(
                 f"the requested {_join_names(attribute_labels)}."
             )
         if interrupt.kind == "major_substitution":
-            difference = (
-                f" Its different {_join_names(attribute_labels)} contributed "
-                "to that classification."
-                if attribute_labels
-                else ""
-            )
             return (
-                f'The list asks for “{request}.” The proposed product is a '
-                f"major substitution.{difference}"
+                f'The list asks for “{request}.” '
+                + _substitution_question(result, line, offer)
             )
         return (
             f"{product_name} from {store_name} needs your approval before "
@@ -2731,9 +2869,11 @@ def approval_option_label(option: ApprovalDisplayOption) -> str:
         suffix = "No purchase in this cart"
     else:
         suffix = ""
-    return escape_streamlit_dollars(
-        option.label if not suffix else f"{option.label} — {suffix}"
-    )
+    if suffix and option.label.casefold().endswith(suffix.casefold()):
+        rendered = option.label
+    else:
+        rendered = option.label if not suffix else f"{option.label} — {suffix}"
+    return escape_streamlit_dollars(rendered)
 
 
 def approval_option_caption(option: ApprovalDisplayOption) -> str:
@@ -3108,6 +3248,8 @@ def _self_sourced_decisions(
     budget_analysis: BudgetAnalysis | None = None,
     budget_action_ids: Sequence[str] = (),
     child_labels: Mapping[str, str] | None = None,
+    result: PipelineResult | None = None,
+    per_entry_omitted_source_ids: Sequence[tuple[str, ...]] = (),
 ) -> tuple[SelfSourcedSelection, ...]:
     selections = []
     seen_requirement_ids: set[tuple[str, ...]] = set()
@@ -3176,6 +3318,57 @@ def _self_sourced_decisions(
                     affected_children=affected_children,
                 )
             )
+    if result is not None and per_entry_omitted_source_ids:
+        labels = child_labels or {}
+        budget_presentation = next(
+            (
+                presentation
+                for presentation in presentations
+                if presentation.interrupt.kind == "budget_exceeded"
+            ),
+            None,
+        )
+        if budget_presentation is not None:
+            for source_ids in per_entry_omitted_source_ids:
+                if source_ids in seen_requirement_ids:
+                    continue
+                need = next(
+                    (
+                        candidate
+                        for candidate in result.purchase_needs
+                        if candidate.source_requirement_ids == source_ids
+                    ),
+                    None,
+                )
+                if need is None:
+                    continue
+                seen_requirement_ids.add(source_ids)
+                affected_children = tuple(
+                    _child_display_label(child_id, labels)
+                    for child_id in need.allocated_to
+                )
+                option = ApprovalDisplayOption(
+                    alternative_id=(
+                        "per-entry-budget-omit-" + "-".join(source_ids)
+                    ),
+                    label=(
+                        f"Remove {_item_display_name(need.canonical_item)} "
+                        "from this cart"
+                    ),
+                    cost_delta_cents=0,
+                    source_requirement_ids=source_ids,
+                    affected_children=affected_children,
+                    item_name=_item_display_name(need.canonical_item),
+                    leaves_required_unmet=True,
+                )
+                selections.append(
+                    SelfSourcedSelection(
+                        presentation=budget_presentation,
+                        option=option,
+                        item_name=_item_display_name(need.canonical_item),
+                        affected_children=affected_children,
+                    )
+                )
     return tuple(selections)
 
 
@@ -3252,6 +3445,49 @@ def _apply_approval_outcomes(
     )
 
 
+def evaluate_per_entry_budget_adjustments(
+    result: PipelineResult,
+    presentations: Sequence[ApprovalDisplayDecision],
+    outcomes: Mapping[str, str],
+    omitted_source_requirement_ids: frozenset[tuple[str, ...]],
+    budgets: Mapping[str, int],
+    offers: Sequence[Offer],
+    stores: Sequence[Store],
+) -> PerEntryBudgetEvaluation:
+    """Reprice combined BR-04 per-entry actions from cached pipeline inputs."""
+
+    existing_omissions, forced_skus = _selected_requirement_constraints(
+        result,
+        presentations,
+        outcomes,
+        (),
+    )
+    omitted = frozenset(existing_omissions | omitted_source_requirement_ids)
+    remaining_needs = tuple(
+        need
+        for need in result.purchase_needs
+        if need.source_requirement_ids not in omitted
+    )
+    candidate_skus = dict(result.matches.candidate_skus_by_need)
+    candidate_skus.update(forced_skus)
+    optimization = optimize_cart(
+        remaining_needs,
+        offers,
+        stores,
+        replace(
+            _optimization_config(result),
+            budget_cents=sum(budgets.values()),
+        ),
+        candidate_skus_by_need=candidate_skus,
+    )
+    return PerEntryBudgetEvaluation(
+        optimization=optimization,
+        budgets=dict(budgets),
+        overages=per_entry_budget_overages(optimization, budgets),
+        omitted_source_requirement_ids=omitted_source_requirement_ids,
+    )
+
+
 def _combined_costs(
     optimization: OptimizationResult,
 ) -> tuple[int, int, int]:
@@ -3275,6 +3511,9 @@ def _has_parent_selected_unmet_item(
     result: PipelineResult | None,
 ) -> bool:
     """Return whether a recorded parent choice leaves a required item unmet."""
+
+    if state.get("per_entry_budget_omitted_source_ids"):
+        return True
 
     if result is not None and result.budget_analysis is not None:
         for action_id in state.get("budget_action_ids", ()):
@@ -3410,7 +3649,7 @@ def build_text_summary(
             lines.append("REQUIRED ITEMS NOT IN THE CART")
             lines.extend(
                 f"  {_item_display_name(item)} | UNAVAILABLE"
-                for item in optimization.gap_items
+                for item in optimization.unfulfilled_gap_items
             )
         if result.extraction_failures:
             lines.append("LISTS NOT INCLUDED")
@@ -3592,6 +3831,7 @@ def _initialize_state(st: Any) -> None:
         "approval_generation": 0,
         "approved_optimization": None,
         "budget_action_ids": (),
+        "per_entry_budget_omitted_source_ids": frozenset(),
         "parent_decisions": (),
         "include_addons": False,
         "addon_selection_token": None,
@@ -4472,6 +4712,7 @@ def _invalidate_plan_state(state: MutableMapping[str, Any]) -> None:
         "resolved_interrupts": {},
         "approval_presentations_cache": None,
         "budget_action_ids": (),
+        "per_entry_budget_omitted_source_ids": frozenset(),
         "parent_decisions": (),
         "checkout_confirmation": None,
     }
@@ -14138,6 +14379,7 @@ def _route_pipeline_result(
         st.session_state["approval_presentations_cache"] = None
         st.session_state["approved_optimization"] = None
         st.session_state["budget_action_ids"] = ()
+        st.session_state["per_entry_budget_omitted_source_ids"] = frozenset()
         st.session_state["resolved_interrupts"] = {}
         st.session_state["replan_preserved_approval_ids"] = frozenset()
         st.session_state["replan_preserved_budget_action_ids"] = frozenset()
@@ -15015,7 +15257,7 @@ def _render_approval_plan_context(
         ),
     )
     plans = _plans(optimization)
-    item_count = sum(len(plan.lines) for plan in plans)
+    item_count = shopping_plan_item_count(optimization)
     store_count = len(
         {
             order.store_id
@@ -15031,17 +15273,18 @@ def _render_approval_plan_context(
     metrics[1].metric("Items", str(item_count))
     metrics[2].metric("Stores", str(store_count))
 
-    if not optimization.gap_items:
+    unavailable_items = optimization.unfulfilled_gap_items
+    if not unavailable_items:
         return
     with st.container(border=True):
         st.markdown(
-            f"**Items to buy elsewhere ({len(optimization.gap_items)})**"
+            f"**Items to buy elsewhere ({len(unavailable_items)})**"
         )
         st.write(
             "These items are not stocked within the shopping preferences "
             "you selected."
         )
-        for item in optimization.gap_items:
+        for item in unavailable_items:
             affected_children = tuple(
                 dict.fromkeys(
                     _child_display_label(child_id, child_labels)
@@ -15070,6 +15313,16 @@ def _approval_confirm_selection(
     """Record the stocked-product choice currently visible in one card."""
 
     state[confirmation_key] = str(state[selection_key])
+
+
+def _approval_confirm_all(
+    state: MutableMapping[str, Any],
+    key_pairs: Sequence[tuple[str, str]],
+) -> None:
+    """Approve every currently displayed stocked-product recommendation."""
+
+    for confirmation_key, selection_key in key_pairs:
+        state[confirmation_key] = str(state[selection_key])
 
 
 def _render_approval(st: Any) -> None:
@@ -15121,6 +15374,68 @@ def _render_approval(st: Any) -> None:
     )
     generation = int(st.session_state["approval_generation"])
     offers_by_sku = {offer.sku: offer for offer in offers}
+
+    per_entry_budget_interrupt = next(
+        (
+            presentation
+            for presentation in presentations
+            if (
+                presentation.interrupt.interrupt_id
+                == "approval-budget-per-entry"
+            )
+        ),
+        None,
+    )
+    per_entry_removal_choices = ()
+    per_entry_budget_values: dict[str, int] = {}
+    per_entry_budget_error: str | None = None
+    per_entry_accept_keys: dict[str, str] = {}
+    if per_entry_budget_interrupt is not None:
+        initially_over = frozenset(
+            per_entry_budget_overages(
+                result.proposed_cart,
+                result.session.budget_allocations,
+            )
+        )
+        per_entry_removal_choices = tuple(
+            choice
+            for choice in build_required_item_removal_choices(
+                result.proposed_cart,
+                result.matches,
+                result.purchase_needs,
+                offers,
+                stores,
+                _optimization_config(result),
+            )
+            if initially_over.intersection(choice.allocated_to)
+        )
+        for entry_id, budget in result.session.budget_allocations.items():
+            budget_key = (
+                f"per-entry-budget:{generation}:{entry_id}:amount"
+            )
+            if budget_key not in st.session_state:
+                st.session_state[budget_key] = (
+                    f"{budget // 100}.{budget % 100:02d}"
+                )
+            try:
+                per_entry_budget_values[entry_id] = money_to_cents(
+                    str(st.session_state[budget_key])
+                )
+            except ValueError as error:
+                per_entry_budget_error = str(error)
+            accept_key = (
+                f"per-entry-budget:{generation}:{entry_id}:accept"
+            )
+            per_entry_accept_keys[entry_id] = accept_key
+            if accept_key not in st.session_state:
+                st.session_state[accept_key] = False
+        for choice in per_entry_removal_choices:
+            keep_key = _per_entry_budget_keep_key(
+                generation,
+                choice.source_requirement_ids,
+            )
+            if keep_key not in st.session_state:
+                st.session_state[keep_key] = True
 
     budget_presentation = next(
         (
@@ -15231,6 +15546,44 @@ def _render_approval(st: Any) -> None:
         widget_outcomes,
         offers,
     )
+    per_entry_omitted_source_ids = frozenset(
+        choice.source_requirement_ids
+        for choice in per_entry_removal_choices
+        if not bool(
+            st.session_state.get(
+                _per_entry_budget_keep_key(
+                    generation,
+                    choice.source_requirement_ids,
+                ),
+                True,
+            )
+        )
+    )
+    if per_entry_omitted_source_ids:
+        active_outcomes = dict(selection_state.active_outcomes)
+        resolutions = dict(selection_state.resolutions)
+        for presentation in presentations:
+            source_ids = presentation.interrupt.source_requirement_ids
+            if (
+                presentation.interrupt.kind == "budget_exceeded"
+                or source_ids not in per_entry_omitted_source_ids
+            ):
+                continue
+            active_outcomes.pop(presentation.interrupt.interrupt_id, None)
+            resolutions[presentation.interrupt.interrupt_id] = (
+                InterruptResolution(
+                    interrupt_id=presentation.interrupt.interrupt_id,
+                    message=(
+                        "Resolved by your budget choice — this item will "
+                        "not be purchased."
+                    ),
+                    source_requirement_ids=source_ids,
+                )
+            )
+        selection_state = ApprovalSelectionState(
+            active_outcomes=active_outcomes,
+            resolutions=resolutions,
+        )
     for interrupt_id in selection_state.resolutions:
         st.session_state.pop(
             _approval_selection_key(generation, interrupt_id),
@@ -15311,6 +15664,8 @@ def _render_approval(st: Any) -> None:
     )
     selections: dict[str, ApprovalDisplayOption] = {}
     unconfirmed_product_decisions: set[str] = set()
+    unconfirmed_confirmation_keys: list[tuple[str, str]] = []
+    unresolved_per_entry_budget_ids: set[str] = set()
 
     for index, presentation in enumerate(presentations):
         interrupt = presentation.interrupt
@@ -15561,12 +15916,115 @@ def _render_approval(st: Any) -> None:
                 interrupt.kind == "budget_exceeded"
                 and result.session.budget_mode == "per_child"
             ):
-                st.write(escape_streamlit_dollars(presentation.message))
-                st.info(
-                    escape_streamlit_dollars(
-                        presentation.options[0].explanation
+                if (
+                    per_entry_budget_error is not None
+                    or per_entry_budget_evaluation is None
+                ):
+                    st.error(
+                        escape_streamlit_dollars(
+                            per_entry_budget_error
+                            or "The individual budgets could not be evaluated."
+                        )
                     )
+                    unresolved_per_entry_budget_ids.add(
+                        interrupt.interrupt_id
+                    )
+                    continue
+                st.error(
+                    "One or more individual budgets are over. Review the "
+                    "amounts below before continuing."
                 )
+                costs = per_entry_landed_costs(
+                    per_entry_budget_evaluation.optimization
+                )
+                breakdown = []
+                for entry_id, budget in per_entry_budget_values.items():
+                    spend = costs.get(entry_id, 0)
+                    difference = budget - spend
+                    breakdown.append(
+                        {
+                            "Student or classroom": _child_display_label(
+                                entry_id,
+                                child_labels,
+                            ),
+                            "Budget": format_streamlit_money(budget),
+                            "Total cost": format_streamlit_money(spend),
+                            "Difference": (
+                                f"{format_streamlit_money(difference)} left"
+                                if difference >= 0
+                                else (
+                                    f"{format_streamlit_money(abs(difference))} over"
+                                )
+                            ),
+                        }
+                    )
+                st.table(escape_streamlit_data(breakdown))
+
+                st.markdown("#### Review the cart and remove items")
+                st.caption(
+                    "Uncheck products to leave them out. Totals recalculate "
+                    "with current tax and store fees."
+                )
+                current_lines = shopping_plan_lines(result.proposed_cart)
+                for choice in per_entry_removal_choices:
+                    keep_key = _per_entry_budget_keep_key(
+                        generation,
+                        choice.source_requirement_ids,
+                    )
+                    line_price = sum(
+                        line.line_cost
+                        for line in current_lines
+                        if (
+                            line.source_requirement_ids
+                            == choice.source_requirement_ids
+                        )
+                    )
+                    affected = tuple(
+                        _child_display_label(entry_id, child_labels)
+                        for entry_id in choice.allocated_to
+                    )
+                    st.checkbox(
+                        escape_streamlit_dollars(
+                            f"Keep {_item_display_name(choice.canonical_item)} "
+                            f"for {_join_names(affected)} — "
+                            f"{format_money(line_price)}"
+                        ),
+                        key=keep_key,
+                    )
+
+                st.markdown("#### Add funds")
+                st.caption(
+                    "Change only the individual budget that should increase."
+                )
+                for entry_id in result.session.budget_allocations:
+                    st.text_input(
+                        (
+                            f"{_child_display_label(entry_id, child_labels)}'s "
+                            "budget ($)"
+                        ),
+                        key=(
+                            f"per-entry-budget:{generation}:{entry_id}:amount"
+                        ),
+                    )
+
+                st.markdown("#### Accept any remaining overage")
+                remaining_overages = per_entry_budget_evaluation.overages
+                for entry_id, overage in remaining_overages.items():
+                    accept_key = per_entry_accept_keys[entry_id]
+                    st.checkbox(
+                        escape_streamlit_dollars(
+                            "Accept "
+                            f"{_child_display_label(entry_id, child_labels)}'s "
+                            f"remaining {format_money(overage)} overage"
+                        ),
+                        key=accept_key,
+                    )
+                    if not bool(st.session_state.get(accept_key, False)):
+                        unresolved_per_entry_budget_ids.add(entry_id)
+                if not remaining_overages:
+                    st.success("Each individual budget now covers its cost.")
+                elif not unresolved_per_entry_budget_ids:
+                    st.success("Every remaining overage has been accepted.")
                 selections[interrupt.interrupt_id] = presentation.options[0]
                 continue
 
@@ -15636,6 +16094,9 @@ def _render_approval(st: Any) -> None:
                 st.success("Selection approved.")
             else:
                 unconfirmed_product_decisions.add(interrupt.interrupt_id)
+                unconfirmed_confirmation_keys.append(
+                    (confirmation_key, selection_key)
+                )
             st.button(
                 "Approve selection",
                 key=(
@@ -15652,6 +16113,23 @@ def _render_approval(st: Any) -> None:
                 use_container_width=True,
             )
 
+    if unconfirmed_confirmation_keys:
+        decision_count = len(unconfirmed_confirmation_keys)
+        st.button(
+            (
+                f"Approve all {decision_count} remaining "
+                f"{'recommendation' if decision_count == 1 else 'recommendations'}"
+            ),
+            key=f"approval-action:{generation}:confirm-all",
+            type="primary",
+            on_click=_approval_confirm_all,
+            args=(
+                st.session_state,
+                tuple(unconfirmed_confirmation_keys),
+            ),
+            use_container_width=True,
+        )
+
     submitted = st.button(
         "Save decisions and continue",
         type="primary",
@@ -15659,8 +16137,24 @@ def _render_approval(st: Any) -> None:
         disabled=(
             budget_selection_error is not None
             or bool(unconfirmed_product_decisions)
+            or bool(unresolved_per_entry_budget_ids)
         ),
     )
+    per_entry_budget_evaluation: PerEntryBudgetEvaluation | None = None
+    if (
+        per_entry_budget_interrupt is not None
+        and per_entry_budget_error is None
+    ):
+        per_entry_budget_evaluation = evaluate_per_entry_budget_adjustments(
+            result,
+            presentations,
+            selection_state.active_outcomes,
+            per_entry_omitted_source_ids,
+            per_entry_budget_values,
+            offers,
+            stores,
+        )
+        current_optimization = per_entry_budget_evaluation.optimization
     if not submitted:
         return
 
@@ -15747,6 +16241,8 @@ def _render_approval(st: Any) -> None:
                 else budget_evaluation.optimization
             ),
         )
+        if per_entry_budget_evaluation is not None:
+            approved_optimization = per_entry_budget_evaluation.optimization
     except ValueError as error:
         st.error(escape_streamlit_dollars(str(error)))
         return
@@ -15766,7 +16262,87 @@ def _render_approval(st: Any) -> None:
         presentations,
         selections,
     )
-    if budget_increase_selected:
+    if (
+        per_entry_budget_evaluation is not None
+        and result.session.budget_mode == "per_child"
+    ):
+        original_allocations = result.session.budget_allocations
+        if any(
+            per_entry_budget_values.get(entry_id, 0) < original_budget
+            for entry_id, original_budget in original_allocations.items()
+        ):
+            st.error(
+                "Use the cart controls to lower spending. Added funds cannot "
+                "reduce an individual budget."
+            )
+            return
+        updated_allocations = dict(per_entry_budget_values)
+        updated_costs = per_entry_landed_costs(approved_optimization)
+        for entry_id, overage in per_entry_budget_evaluation.overages.items():
+            if bool(
+                st.session_state.get(
+                    per_entry_accept_keys.get(entry_id, ""),
+                    False,
+                )
+            ):
+                updated_allocations[entry_id] = max(
+                    updated_allocations[entry_id],
+                    updated_costs.get(entry_id, 0),
+                )
+        updated_budget_total = sum(updated_allocations.values())
+        approved_optimization = apply_authorized_budget(
+            approved_optimization,
+            updated_budget_total,
+        )
+        result = replace(
+            result,
+            session=replace(
+                result.session,
+                budget_total=updated_budget_total,
+                budget_allocations=updated_allocations,
+            ),
+            proposed_cart=apply_authorized_budget(
+                result.proposed_cart,
+                updated_budget_total,
+            ),
+        )
+        updated_intake = dict(intake)
+        updated_intake["budget_total"] = updated_budget_total
+        updated_intake["budget_allocations"] = updated_allocations
+        st.session_state["intake"] = updated_intake
+        st.session_state["result"] = result
+        for entry_id, new_budget in updated_allocations.items():
+            old_budget = original_allocations.get(entry_id, 0)
+            if new_budget > old_budget:
+                response_log.record(
+                    "budget_action",
+                    (
+                        "Parent increased "
+                        f"{_child_display_label(entry_id, child_labels)}'s "
+                        f"individual budget from {old_budget} cents to "
+                        f"{new_budget} cents."
+                    ),
+                    actor="parent",
+                )
+        for source_ids in per_entry_omitted_source_ids:
+            need = next(
+                (
+                    candidate
+                    for candidate in result.purchase_needs
+                    if candidate.source_requirement_ids == source_ids
+                ),
+                None,
+            )
+            if need is not None:
+                response_log.record_approval_response(
+                    "Parent removed "
+                    f"{_item_display_name(need.canonical_item)} while "
+                    "reviewing an individual budget.",
+                )
+        st.session_state["per_entry_budget_omitted_source_ids"] = (
+            per_entry_omitted_source_ids
+        )
+    elif budget_increase_selected:
         result, approved_optimization = authorize_budget_increase(
             result,
             approved_optimization,
@@ -16807,7 +17383,7 @@ def _render_needs_attention(
         st.error(
             "Required items unavailable from the selected store scope"
         )
-        for item in optimization.gap_items:
+        for item in optimization.unfulfilled_gap_items:
             affected_children = tuple(
                 dict.fromkeys(
                     _child_display_label(child_id, child_labels)
@@ -17176,7 +17752,7 @@ def _render_summary_headline(
 
     st.header(copy.summary_heading)
     st.caption(copy.headline_heading)
-    item_count = sum(len(plan.lines) for plan in _plans(optimization))
+    item_count = shopping_plan_item_count(optimization)
     store_count = sum(
         len(plan.store_orders) for plan in _plans(optimization)
     )
@@ -17273,6 +17849,13 @@ def _render_summary(st: Any) -> None:
         result.budget_analysis,
         st.session_state["budget_action_ids"],
         child_labels,
+        result,
+        tuple(
+            st.session_state.get(
+                "per_entry_budget_omitted_source_ids",
+                (),
+            )
+        ),
     )
     required_optimization, required_matches = _effective_cart(
         st,

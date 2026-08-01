@@ -194,7 +194,7 @@ def _pipeline_result(
                 520,
                 attributes={"capacity_inches": 2},
             ),
-            "Binder — major substitution",
+            "Binder — substitution",
         ),
         (
             "dividers",
@@ -217,7 +217,7 @@ def _pipeline_result(
                 600,
                 attributes={"tabs_per_set": 8},
             ),
-            "Dividers — major substitution",
+            "Dividers — substitution",
         ),
     ],
 )
@@ -428,8 +428,12 @@ def test_substitution_removal_keeps_internal_delta_but_shows_no_purchase() -> No
         {"grade2": "Grade 2", "grade5": "Grade 5"},
     )[0]
 
-    assert presentation.heading == "Headphones — major substitution"
+    assert presentation.heading == "Headphones — substitution"
     assert presentation.affected_children == ("Grade 2", "Grade 5")
+    assert (
+        "The list asks for usb connector; this option has 3.5 mm connector. "
+        "Is that acceptable?"
+    ) in presentation.message
     assert tuple(
         option.cost_delta_cents for option in presentation.options
     ) == (0, -3_101)
@@ -437,6 +441,9 @@ def test_substitution_removal_keeps_internal_delta_but_shows_no_purchase() -> No
         "Source this item myself — no purchase in this cart"
     )
     assert presentation.options[1].purchase_price_cents is None
+    assert app.approval_option_label(presentation.options[1]).casefold().count(
+        "no purchase in this cart"
+    ) == 1
     assert presentation.options[1].explanation == (
         "No other stocked catalog match is available. No product will be "
         "purchased for this item in this cart."
